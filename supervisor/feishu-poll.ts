@@ -130,12 +130,7 @@ export class FeishuPoll {
     }
     this.chats = incoming;
 
-    if (added.length === 0 && removed.length === 0) {
-      process.stderr.write(
-        `[feishu-poll] chat.list 重拉 (${incoming.size} chats，无 diff)\n`,
-      );
-      return;
-    }
+    if (added.length === 0 && removed.length === 0) return; // 无变化静默，不刷日志
     process.stderr.write(
       `[feishu-poll] chat.list 重拉 diff: +${added.length} -${removed.length}\n`,
     );

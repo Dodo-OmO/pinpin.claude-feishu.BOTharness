@@ -3,8 +3,7 @@
 // CLI 优雅化改动：
 //   1. 砍 sessions 表（Owner决策——MCP 版单 session 无脑子分片记账本）
 //   2. 砍 projects 表 + 6 个 wrapper（MCP 版无 群组概念，src/ 全无引用）
-//   3. channel_message_ids 表：曾用于飞书 messageId 跨重启去重。方案A 后 supervisor 卸 DB、
-//      入口去重改纯 in-memory Set，此表已无读写方（保留空表定义避免对存量库做破坏性迁移）
+//   3. 砍 channel_message_ids 表（方案A 后 supervisor 卸 DB、入口去重改纯 in-memory Set，已无读写方）
 //   4. 砍 ALTER TABLE 历史迁移代码（MCP 版全新建库）
 
 import Database from "better-sqlite3";
@@ -112,16 +111,6 @@ export function initDatabase(): void {
       created_at TEXT DEFAULT (datetime('now')),
       done_at TEXT
     );
-
-    -- 飞书 messageId 跨重启去重表（历史遗留）。方案A 后 supervisor 卸 DB、入口去重改纯
-    -- in-memory，此表已无读写方；保留 IF NOT EXISTS 定义仅为不对存量库做破坏性迁移。
-    CREATE TABLE IF NOT EXISTS channel_message_ids (
-      message_id TEXT PRIMARY KEY,
-      processed_at TEXT DEFAULT (datetime('now'))
-    );
-
-    CREATE INDEX IF NOT EXISTS idx_channel_message_ids_processed
-      ON channel_message_ids(processed_at);
 
     -- 品品按语义自建的群（解散群鉴权用）：只解散品品自己建的群，防误删Owner正式群
     CREATE TABLE IF NOT EXISTS pinpin_created_groups (

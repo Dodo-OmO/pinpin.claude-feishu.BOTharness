@@ -219,9 +219,8 @@ export class IpcServer extends EventEmitter {
           process.stderr.write(`[ipc-server] client ${entry.chatId} (pid=${entry.pid}) disconnected\n`);
           this.emit('client-disconnected', { chat_id: entry.chatId, pid: entry.pid });
         }
-      } else {
-        process.stderr.write('[ipc-server] anonymous client disconnected (no hello sent)\n');
       }
+      // 短连接 sink（statusline / work-stop notification）正常断开，无 hello 注册，静默不刷日志
     });
 
     socket.on('error', (err) => {
