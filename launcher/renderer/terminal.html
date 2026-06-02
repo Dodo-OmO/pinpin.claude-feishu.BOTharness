@@ -1,0 +1,43 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <title>品品 频道终端</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:wght@500;700&family=JetBrains+Mono:wght@400;500&display=swap"
+    rel="stylesheet"
+  />
+  <link rel="stylesheet" href="./styles/terminal.css" />
+</head>
+<body>
+
+<div class="term-window">
+
+  <header class="term-header">
+    <div class="term-title">
+      <span class="health-dot green" id="health"></span>
+      <strong id="header-name">频道</strong>
+      <span class="meta" id="header-meta">—</span>
+    </div>
+    <div class="spacer"></div>
+    <button class="term-btn" id="btn-compact" title="/compact 重新压缩上下文">压缩</button>
+    <button class="term-btn" id="btn-clear" title="清屏">清屏</button>
+    <button class="term-btn" id="btn-restart" title="重启该频道 CLI">↻ 重启</button>
+  </header>
+
+  <div class="term-stream" id="term-stream"></div>
+
+  <footer class="term-input-area">
+    <div class="input-row">
+      <textarea id="input-text" rows="2" placeholder="直接发文字给这个频道的品品 CLI...&#10;Ctrl+Enter 发送"></textarea>
+      <button class="send-btn" id="btn-send">发送</button>
+    </div>
+    <div class="input-hint" id="input-hint">提示：文字直连该频道 CLI（写入品品 stdin）；Ctrl+Enter 发送</div>
+  </footer>
+
+</div>
+
+<script type="module" src="./terminal.ts"></script>
+</body>
+</html>

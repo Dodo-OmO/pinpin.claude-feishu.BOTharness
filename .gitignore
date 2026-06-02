@@ -1,0 +1,25 @@
+# ── 依赖 / 构建产物 ──
+node_modules/
+dist/
+out/
+*.tsbuildinfo
+
+# ── 运行时敏感文件（绝不入库）──
+.env
+.env.local
+.feishu-user-token.json
+*.db
+*.db-shm
+*.db-wal
+logs/
+*.log
+
+# ── 本机 / 编辑器 ──
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+# ── Electron 用户数据 / 缓存 ──
+userData/
+.electron-cache/

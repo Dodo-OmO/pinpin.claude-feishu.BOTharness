@@ -1,0 +1,12 @@
+# 敏感——绝不分析
+.env
+.feishu-user-token.json
+# 运行时数据/二进制
+data.db
+data.db-shm
+data.db-wal
+logs/
+# 开发工具/自身
+.claude/
+.understand-anything/
+.npmrc

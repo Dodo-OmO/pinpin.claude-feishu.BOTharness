@@ -1,0 +1,96 @@
+* { margin: 0; padding: 0; box-sizing: border-box; }
+:root {
+  --pink: #F8B5C5; --purple: #C8B6E2; --skyblue: #A8D8E8;
+  --green: #7DCEA0; --yellow: #F4D26B; --red: #E78B8B;
+  --ink: #2C2C2E; --ink-soft: #5A5A60; --ink-mute: #9C9CA3;
+  --line: rgba(44,44,46,0.08);
+  --shadow-sm: 0 2px 8px rgba(44,44,46,0.05);
+  --bg-term: #1e1e1f;
+  --fg-term: #e0e0e2;
+}
+
+html, body { height: 100vh; overflow: hidden; }
+body {
+  font-family: 'Inter', 'Noto Sans SC', -apple-system, sans-serif;
+  background: #f5f3f8;
+  color: var(--ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+.term-window {
+  height: 100vh;
+  display: grid;
+  grid-template-rows: 48px 1fr 130px;
+}
+
+.term-header {
+  display: flex; align-items: center; gap: 12px;
+  padding: 0 14px;
+  background: white;
+  border-bottom: 1px solid var(--line);
+  box-shadow: var(--shadow-sm);
+}
+.term-title { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+.term-title strong { font-weight: 600; }
+.term-title .meta { font-size: 11px; color: var(--ink-mute); }
+.health-dot { width: 9px; height: 9px; border-radius: 50%; }
+.health-dot.green { background: var(--green); box-shadow: 0 0 5px var(--green); }
+.health-dot.yellow { background: var(--yellow); box-shadow: 0 0 5px var(--yellow); }
+.health-dot.red { background: var(--red); box-shadow: 0 0 5px var(--red); }
+.health-dot.gray { background: var(--ink-mute); }
+.spacer { flex: 1; }
+.term-btn {
+  padding: 5px 12px;
+  font-size: 11px; font-weight: 500;
+  background: rgba(44,44,46,0.04);
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  cursor: pointer;
+  color: var(--ink-soft);
+}
+.term-btn:hover { background: rgba(44,44,46,0.08); color: var(--ink); }
+
+.term-stream {
+  background: var(--bg-term);
+  color: var(--fg-term);
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  overflow: hidden;
+  /* padding 改 margin：xterm canvas 全占容器宽度，FitAddon 算出正确列数；
+     原 padding:4px 0 0 4px 会把可用宽度压窄 4px，导致 FitAddon 少算 ~1 列 */
+  margin: 4px 0 0 4px;
+}
+
+.term-input-area {
+  background: white;
+  border-top: 1px solid var(--line);
+  display: flex; flex-direction: column;
+  padding: 8px 14px;
+  gap: 6px;
+}
+.input-row { display: flex; gap: 8px; align-items: stretch; }
+.input-row textarea {
+  flex: 1;
+  resize: none;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  font-family: inherit;
+  font-size: 12px;
+  color: var(--ink);
+  line-height: 1.5;
+  background: rgba(244,240,248,0.5);
+}
+.input-row textarea:focus { outline: none; border-color: var(--purple); background: white; }
+.send-btn {
+  padding: 0 18px;
+  background: linear-gradient(135deg, var(--pink), var(--purple));
+  color: white; border: none;
+  border-radius: 8px; cursor: pointer;
+  font-weight: 600; font-size: 12px;
+}
+.send-btn:hover { filter: brightness(1.05); }
+.send-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+.input-hint { font-size: 10px; color: var(--ink-mute); }
+.input-hint.error { color: #C04848; }
+.input-hint.ok { color: #2D7A53; }

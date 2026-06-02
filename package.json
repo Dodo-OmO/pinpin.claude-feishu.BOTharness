@@ -1,0 +1,46 @@
+{
+  "name": "pinpin-feishu-mcp",
+  "version": "1.8.0",
+  "description": "品品 (Pinpin) — a Feishu companion bot on Claude Code CLI + MCP, with multi-channel CLI isolation. Architecture showcase, not a one-click-runnable product.",
+  "type": "module",
+  "private": true,
+  "license": "MIT",
+  "author": "Dodo-OmO",
+  "main": "out/main/main.js",
+  "scripts": {
+    "postinstall": "node scripts/patch-node-pty.cjs && node node_modules/electron/install.js && electron-rebuild --only node-pty",
+    "build:src": "tsc",
+    "build:launcher": "electron-vite build",
+    "build": "npm run build:src && npm run build:launcher",
+    "typecheck": "tsc --noEmit && tsc --noEmit -p launcher/tsconfig.json",
+    "dev": "tsx src/mcp/server.ts",
+    "launcher:dev": "electron-vite dev",
+    "launcher:preview": "electron-vite preview",
+    "rebuild": "electron-rebuild"
+  },
+  "dependencies": {
+    "@elevenlabs/elevenlabs-js": "^2.49.1",
+    "@larksuiteoapi/node-sdk": "^1.65.0",
+    "@modelcontextprotocol/sdk": "^1.0.0",
+    "@types/better-sqlite3": "^7.6.13",
+    "better-sqlite3": "^12.10.0",
+    "dotenv": "^16.6.1",
+    "electron-window-state": "^5.0.3",
+    "music-metadata": "^11.12.3",
+    "node-pty": "1.1.0",
+    "proper-lockfile": "^4.1.2",
+    "sharp": "^0.34.5"
+  },
+  "devDependencies": {
+    "@electron/rebuild": "^4.0.4",
+    "@types/node": "^20.0.0",
+    "@types/proper-lockfile": "^4.1.4",
+    "@xterm/addon-fit": "^0.10.0",
+    "@xterm/xterm": "^5.5.0",
+    "electron": "^42.0.0",
+    "electron-vite": "^2.3.0",
+    "tsx": "^4.0.0",
+    "typescript": "^5.4.0",
+    "vite": "^5.4.10"
+  }
+}

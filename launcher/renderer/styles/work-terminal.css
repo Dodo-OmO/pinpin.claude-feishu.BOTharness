@@ -1,0 +1,9 @@
+/* work-terminal 专属（Q5 v3 起改 xterm 渲染 PTY raw，复用 styles/terminal.css 主样式）
+   本文件只保留 [✕ 结束] 按钮的红色变体（terminal.css 通用按钮无此色） */
+
+.term-btn-danger {
+  color: #c0392b;
+}
+.term-btn-danger:hover {
+  background: rgba(192, 57, 43, 0.08);
+}
