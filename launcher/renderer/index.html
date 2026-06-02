@@ -130,6 +130,10 @@
           </select>
         </div>
         <div class="settings-row">
+          <label>新频道默认压缩阈值（%，20-50）</label>
+          <input id="default-compact" type="number" min="20" max="50" step="1" value="25">
+        </div>
+        <div class="settings-row">
           <label>work session 默认模型</label>
           <select id="work-default-model"></select>
         </div>
@@ -166,7 +170,7 @@
         <p>架构：supervisor（Electron main）→ 飞书 poll 单点 + 按 chat_id 分发 → 各 chat 独立 stdio MCP server 子进程 → claude CLI 交互式。</p>
         <p>诉求 B 传话筒：品品调 pinpin_spawn_work_session 派后台 claude code session，stop 后自动汇报回原 chat。</p>
         <p id="about-ipc">IPC port: -</p>
-        <p>推理由本地交互式 Claude Code CLI 子进程承担，飞书侧只走消息通道。</p>
+        <p>所有推理由本地交互式 Claude Code CLI 承担。</p>
       </div>
     </div>
 

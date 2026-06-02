@@ -6,8 +6,7 @@
  *
  * supervisor 持有 ChannelCli 实例，控制其生命周期（start / stop / restart / compact / attachTerminal）。
  *
- * **交互式 CLI 约束**：本类只 spawn 交互式 `claude`，绝不在 args 里出现 `-p` / `--print`
- *   （品品依赖持续交互式会话维持人格与上下文）。
+ * **交互式 CLI 约束**：本类绝不允许在 spawn args 里出现 `-p` / `--print`，必须**交互式 claude**。
  */
 
 import { EventEmitter } from 'node:events';
@@ -18,6 +17,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PtyManager, type PtyStats } from './pty-manager.js';
 import { buildInstructions } from '../src/mcp/instructions.js';
+import { DEFAULT_AUTOCOMPACT_PCT } from './channel-config-store.js';
 
 /** node-pty spawn 不走 shell——必须绝对路径。Owner Win11 claude 装在 ~\.local\bin\claude.exe。
  *  优先级：PINPIN_CLAUDE_PATH env → where claude.exe → 'claude' 兜底（会失败但 msg 清晰） */
@@ -48,6 +48,8 @@ export interface ChannelCliOptions {
   /** P1.3: statusLine sink script 绝对路径（scripts/statusline-sink.cjs）。
    *  通过 claude --settings 内联 JSON 注入 statusLine 配置，sink 收 stdin JSON 推 supervisor。 */
   statusLineSinkPath: string;
+  /** 自动压缩阈值（上下文用量百分比）。缺省走 DEFAULT_AUTOCOMPACT_PCT；注入子 CLI 的 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE。 */
+  autoCompactPct?: number;
 }
 
 export type ChannelCliStatus = 'starting' | 'running' | 'stopped' | 'failed';
@@ -121,7 +123,7 @@ export class ChannelCli extends EventEmitter {
       );
     }
 
-    // 约束检查：args 不许含 -p / --print（必须交互式会话）
+    // 红线检查：args 不许含 -p / --print（交互式 CLI 约束）
     const args = [
       '--dangerously-load-development-channels',
       'server:feishu-channel',
@@ -154,7 +156,7 @@ export class ChannelCli extends EventEmitter {
       // 自动压缩走 CLI 原生 auto-compact：把触发阈值从默认 ~83% 调低到 25%（只能调低不能调高）。
       // CLI 到 25% 就地原生压缩（自动留摘要 + system prompt/人格/CLAUDE.md 从磁盘重注入不丢），
       // 无需 supervisor 监测用量阈值（D-6 手工摘要机制已回滚）。
-      CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: '25',
+      CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(this.opts.autoCompactPct ?? DEFAULT_AUTOCOMPACT_PCT),
     };
 
     const claudePath = resolveClaudePath();
@@ -328,6 +330,10 @@ export class ChannelCli extends EventEmitter {
     this.opts.chatName = name;
   }
 
+  setAutoCompactPct(pct: number): void {
+    this.opts.autoCompactPct = pct;
+  }
+
   /** 启动器终端窗口 attach：consumer 收 PTY ring buffer 全量 + 实时 onData */
   attachTerminal(consumer: (data: string) => void): void {
     this.pty?.attach(consumer);
@@ -346,6 +352,7 @@ export class ChannelCli extends EventEmitter {
     started_at: number | null;
     model: string;
     effort: string;
+    autoCompactPct: number;
     session_id?: string;
   } {
     const ptyStats = this.pty?.getStats();
@@ -358,6 +365,7 @@ export class ChannelCli extends EventEmitter {
       started_at: this.startedAt,
       model: this.opts.model,
       effort: this.opts.effort,
+      autoCompactPct: this.opts.autoCompactPct ?? DEFAULT_AUTOCOMPACT_PCT,
       session_id: this._sessionId || undefined,
     };
   }

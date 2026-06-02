@@ -57,7 +57,7 @@ process.stdin.on('end', () => {
   const durationMs = typeof cost.total_duration_ms === 'number' ? cost.total_duration_ms : null;
   const modelName = (model.display_name || model.id || '?');
   // 账号级额度（5h + 7天）—— Claude Code statusLine 的 rate_limits，每窗口带
-  // used_percentage(0-100) + resets_at(Unix 秒)。仅在 Claude Code 用量额度可用时出现，
+  // used_percentage(0-100) + resets_at(Unix 秒)。仅 Claude Code 用量额度数据存在时出现，
   // 窗口可独立缺失 → 取不到的字段置 null，绝不报错（optional chaining 防御）。
   const numOrNull = (v) => (typeof v === 'number' ? v : null);
   const rl = data?.rate_limits || {};

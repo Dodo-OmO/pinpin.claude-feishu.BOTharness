@@ -174,7 +174,7 @@ export interface WorkStopSignalParams {
 }
 
 // ── 账号级额度（来自 statusLine rate_limits）：每窗口 used_percentage(0-100) + resets_at(Unix 秒) ──
-// 仅在 Claude Code 用量额度可用时出现，窗口可独立缺失 → 字段 null。
+// 仅 Claude Code 用量额度数据存在时出现，窗口可独立缺失 → 字段 null。
 export interface RateLimitWindow {
   used_percentage: number | null;
   resets_at: number | null;

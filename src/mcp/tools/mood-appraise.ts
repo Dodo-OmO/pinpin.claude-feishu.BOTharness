@@ -37,7 +37,7 @@ export const moodAppraiseTool: Tool = {
       bonds_delta: {
         type: "object",
         properties: {
-          name: { type: "string", description: "对方名字（known_users 表里的显示名，如 \"User A\" / \"User B\"）" },
+          name: { type: "string", description: "对方名字（known_users 表里的显示名，如 \"BotC\" / \"BotA\"）" },
           delta: { type: "number", description: "-100~100，+ 拉近 - 疏远（常用 ±1~±10）" },
         },
         required: ["name", "delta"],

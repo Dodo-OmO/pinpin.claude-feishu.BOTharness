@@ -1,11 +1,9 @@
 {
   "name": "pinpin-feishu-mcp",
-  "version": "1.8.0",
-  "description": "品品 (Pinpin) — a Feishu companion bot on Claude Code CLI + MCP, with multi-channel CLI isolation. Architecture showcase, not a one-click-runnable product.",
+  "version": "1.9.0",
+  "description": "品品 飞书 MCP 版（Claude Code CLI + channels 路径，多 CLI 频道隔离）",
   "type": "module",
   "private": true,
-  "license": "MIT",
-  "author": "Dodo-OmO",
   "main": "out/main/main.js",
   "scripts": {
     "postinstall": "node scripts/patch-node-pty.cjs && node node_modules/electron/install.js && electron-rebuild --only node-pty",

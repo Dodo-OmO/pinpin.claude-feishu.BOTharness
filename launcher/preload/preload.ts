@@ -35,6 +35,8 @@ const api = {
       ipcRenderer.invoke('channel.set-model', chatId, model),
     setEffort: (chatId: string, effort: string): Promise<void> =>
       ipcRenderer.invoke('channel.set-effort', chatId, effort),
+    setCompactThreshold: (chatId: string, pct: number): Promise<void> =>
+      ipcRenderer.invoke('channel.set-compact-threshold', chatId, pct),
     setDisplayName: (chatId: string, name: string): Promise<void> =>
       ipcRenderer.invoke('channel.set-display-name', chatId, name),
     forget: (chatId: string): Promise<boolean> =>
@@ -74,6 +76,8 @@ export interface ChannelStatusInfo {
   uptime_ms: number;
   model: string;
   effort: string;
+  /** 自动压缩阈值（上下文用量百分比）。 */
+  autoCompactPct?: number;
   /** P1.3: per-CLI 上下文用量（statusLine sink 推过来） */
   context_pct?: number | null;
   context_tokens?: number | null;
@@ -117,6 +121,7 @@ export interface AppSettings {
   default_effort: string;
   work_default_model: string;
   work_default_effort: string;
+  default_compact_pct: number;
 }
 
 interface RateLimitWindow { used_percentage: number | null; resets_at: number | null }

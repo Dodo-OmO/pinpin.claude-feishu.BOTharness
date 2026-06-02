@@ -22,6 +22,7 @@ interface ChannelStatusInfo {
   started_at?: number | null;
   model: string;
   effort: string;
+  autoCompactPct?: number;
   // P1.3: per-CLI 上下文用量
   context_pct?: number | null;
   context_tokens?: number | null;
@@ -65,6 +66,7 @@ interface AppSettings {
   default_effort: string;
   work_default_model: string;
   work_default_effort: string;
+  default_compact_pct: number;
 }
 
 interface RateLimitWindow { used_percentage: number | null; resets_at: number | null }
@@ -96,6 +98,7 @@ declare global {
         openTerminal: (id: string) => Promise<void>;
         setModel: (id: string, model: string) => Promise<void>;
         setEffort: (id: string, effort: string) => Promise<void>;
+        setCompactThreshold: (id: string, pct: number) => Promise<void>;
         setDisplayName: (id: string, name: string) => Promise<void>;
         forget: (id: string) => Promise<boolean>;
         listForgotten: () => Promise<Array<{ chat_id: string; display_name?: string }>>;
@@ -255,6 +258,18 @@ function renderChannels(): void {
         else if (kind === 'effort') void window.pinpin.channel.setEffort(cid, sel.value);
       });
     });
+    // 压缩阈值数字输入框（input，非 select）——change 时 clamp 到 20-50 再存
+    row.querySelectorAll<HTMLInputElement>('input[data-channel-config="compact"]').forEach((inp) => {
+      inp.addEventListener('change', () => {
+        const cid = inp.getAttribute('data-chat-id');
+        if (!cid) return;
+        let v = Math.round(Number(inp.value));
+        if (!Number.isFinite(v)) v = 25;
+        v = Math.max(20, Math.min(50, v));
+        inp.value = String(v);
+        void window.pinpin.channel.setCompactThreshold(cid, v);
+      });
+    });
   }
   const count = document.getElementById('channels-count');
   if (count) {
@@ -317,6 +332,8 @@ function renderChannelCard(c: ChannelStatusInfo): string {
         <div class="v"><select class="card-select" data-channel-config="model" data-chat-id="${c.chat_id}" ${isRunning ? 'disabled' : ''} title="${lockTitle}">${modelOptions}</select></div>
         <div class="k">effort</div>
         <div class="v"><select class="card-select effort-select ${effortClass(c.effort)}" data-channel-config="effort" data-chat-id="${c.chat_id}" ${isRunning ? 'disabled' : ''} title="${lockTitle}">${effortOptions}</select></div>
+        <div class="k">压缩%</div>
+        <div class="v"><input class="card-num" type="number" min="20" max="50" step="1" data-channel-config="compact" data-chat-id="${c.chat_id}" value="${c.autoCompactPct ?? 25}" ${isRunning ? 'disabled' : ''} title="${isRunning ? lockTitle : '用到上下文百分之几就自动压缩(20-50)，改完重启该频道生效'}"></div>
         <div class="k">上下文</div><div class="v ${ctxPctClass(c.context_pct)}">${fmtCtxLine(c)}</div>
         <div class="k">启动</div><div class="v">${fmtStartedAt(c)}</div>
       </div>
@@ -562,7 +579,10 @@ async function init(): Promise<void> {
     const e = (document.getElementById('default-effort') as HTMLSelectElement).value;
     const wm = (document.getElementById('work-default-model') as HTMLSelectElement).value;
     const we = (document.getElementById('work-default-effort') as HTMLSelectElement).value;
-    await window.pinpin.settings.set({ default_model: m, default_effort: e, work_default_model: wm, work_default_effort: we });
+    let dc = Math.round(Number((document.getElementById('default-compact') as HTMLInputElement).value));
+    if (!Number.isFinite(dc)) dc = 25;
+    dc = Math.max(20, Math.min(50, dc));
+    await window.pinpin.settings.set({ default_model: m, default_effort: e, work_default_model: wm, work_default_effort: we, default_compact_pct: dc });
   });
   // footer btn
   // 确认对话框已移到 main process 的 ipcMain.handle('app.restart-bot') 里（dialog.showMessageBox），
@@ -612,6 +632,7 @@ async function init(): Promise<void> {
     const wdm = document.getElementById('work-default-model') as HTMLSelectElement;
     wdm.innerHTML = buildModelOptions(s.work_default_model);
     (document.getElementById('work-default-effort') as HTMLSelectElement).value = s.work_default_effort;
+    (document.getElementById('default-compact') as HTMLInputElement).value = String(s.default_compact_pct ?? 25);
   } catch { /* ignore */ }
 
   // 拉一次 state + 订阅

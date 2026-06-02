@@ -1,5 +1,5 @@
 // ElevenLabs 共用 client 工厂
-// TTS 和 STT 统一从这里取同一个 client 实例（懒初始化 + 缓存）。
+// TTS 和 STT 统一从这里取 client。
 
 import { ElevenLabsClient } from "@elevenlabs/elevenlabs-js";
 

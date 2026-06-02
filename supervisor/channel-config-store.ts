@@ -20,6 +20,9 @@
 const DEFAULTS_KEY = '__defaults__';
 const WORK_DEFAULTS_KEY = '__work_defaults__';
 
+/** 自动压缩阈值默认值（上下文用量百分比）。per-channel 未配 + 全局默认未设时的兜底，与历史硬编码一致。 */
+export const DEFAULT_AUTOCOMPACT_PCT = 25;
+
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -34,6 +37,8 @@ export interface ChannelConfig {
   seen?: boolean;
   /** Owner主动 forget 标记。set true 后 onFeishuMessage 入口直接 return 不重新 spawn，防 forget 死循环 */
   forgotten?: boolean;
+  /** 自动压缩阈值（上下文用量百分比，20-50）。缺省走 DEFAULT_AUTOCOMPACT_PCT。改完需重启该频道 CLI 生效。 */
+  autoCompactPct?: number;
 }
 
 export type ChannelConfigMap = Record<string, ChannelConfig>;

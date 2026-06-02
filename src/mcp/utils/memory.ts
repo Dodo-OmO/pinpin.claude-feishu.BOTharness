@@ -151,7 +151,7 @@ export async function writeMemoryLine(index: number, content: string): Promise<b
     process.stderr.write(
       `[memory] 第 ${index} 条超 ${MEMORY_CONTENT_MAX} 字硬兜底(${trimmed.length}),截断\n`,
     );
-    trimmed = Array.from(trimmed).slice(0, MEMORY_CONTENT_MAX).join(""); // 码点安全：按 Unicode 码点截断，emoji/surrogate pair（码点对）不被切半（参 reply-quote.ts）
+    trimmed = Array.from(trimmed).slice(0, MEMORY_CONTENT_MAX).join(""); // 码点安全：按 Unicode 码点截断，emoji/码点对不被切半（参 reply-quote.ts）
   }
   const lines = loadMemoryLines();
   lines[index - 1] = { index, date: todayDateStr(), content: trimmed };

@@ -14,8 +14,7 @@
  *   - 品品下新指令 → sendMessage(text) → PTY write
  *   - end() → PTY shutdown + JsonlWatcher stop
  *
- * **交互式 CLI 约束**：spawn args 必须用交互式 `claude`，绝不能用 `-p` / `--print`——
- *   品品依赖持续的交互式会话（人格注入、上下文累积、原生 /compact），一次性 print 模式无法承载。
+ * **交互式 CLI 约束**：spawn args 绝不能用 `-p` / `--print`，必须**交互式 claude**。
  */
 
 import { EventEmitter } from 'node:events';
@@ -169,7 +168,7 @@ const WORK_CLI_GUARD_PROMPT =
   '（按实际写，没有的项可省）。';
 
 /** D3: cwd → Claude Code jsonl 目录名编码。照搬 CLI 规则：非字母数字字符（盘符冒号/反/正斜杠/点/
- *  空格/CJK 等）逐个替换为 '-'，不折叠连续 '-'（如 `C:\Users\you` → `C--Users-you`）。
+ *  空格/CJK 等）逐个替换为 '-'，不折叠连续 '-'（实测 `C:\Users\user` → `C--Users-user`）。
  *  jsonl 落于 `~/.claude/projects/<编码后cwd>/<sessionId>.jsonl`。 */
 function jsonlPathForSession(cwd: string, sessionId: string): string {
   const encoded = cwd.replace(/[^a-zA-Z0-9]/g, '-');

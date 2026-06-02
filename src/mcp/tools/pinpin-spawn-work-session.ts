@@ -12,8 +12,7 @@
  * stop 后 supervisor 通过 IPC push WORK_STOPPED 回**原 chat** 的 stdio MCP server，
  * server 转 channel notification 给本 CLI，品品收到后向飞书该 chat 汇报 result。
  *
- * **架构约束**：所有 work 由独立的交互式 `claude` CLI 子进程承担（复用 CLI 的会话/工具栈），
- *   本 tool 只负责 spawn 与回报路由。
+ * **交互式 CLI 约束**：所有 work 由独立交互式 claude 进程承担。
  */
 
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';

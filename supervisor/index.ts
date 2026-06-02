@@ -21,7 +21,7 @@ import type { CardActionEvent } from '@larksuiteoapi/node-sdk';
 import { buildPollCard } from '../src/mcp/feishu/cards/diy-card.js';
 import { IpcServer } from './ipc-server.js';
 import { ChannelCli } from './channel-cli.js';
-import { ChannelConfigStore } from './channel-config-store.js';
+import { ChannelConfigStore, DEFAULT_AUTOCOMPACT_PCT } from './channel-config-store.js';
 import { WorkSession, type WorkSessionStopInfo } from './work-session.js';
 import { CcusagePoller, type QuotaSnapshot } from './ccusage-poller.js';
 import { SupervisorCronRunner } from './cron-runner.js';
@@ -72,6 +72,8 @@ export interface SupervisorOptions {
   /** 频道 CLI 默认 model + effort（任务 MD §决策 B 原定 medium，Owner 2026-05-28 实测后改 high） */
   defaultModel?: string;
   defaultEffort?: string;
+  /** 频道 CLI 默认自动压缩阈值（上下文用量百分比）。新群 spawn 时 fallback。 */
+  defaultAutoCompactPct?: number;
 }
 
 /** 完工提醒去重窗口：'stopped' 由 Stop hook 主路径 + idle 兜底两条发出，各自靠文本身份去重，
@@ -125,6 +127,7 @@ export class Supervisor extends EventEmitter {
       // 阶段 4 启动脚本同款写法（空格分隔，方括号小写）
       defaultModel: 'claude-opus-4-8 [1m]',
       defaultEffort: 'high',
+      defaultAutoCompactPct: DEFAULT_AUTOCOMPACT_PCT,
       ...opts,
     };
     this.ipcServer = new IpcServer();
@@ -150,6 +153,7 @@ export class Supervisor extends EventEmitter {
     const persistedDefaults = this.channelConfigStore.getDefaults();
     if (persistedDefaults?.model) this.opts.defaultModel = persistedDefaults.model;
     if (persistedDefaults?.effort) this.opts.defaultEffort = persistedDefaults.effort;
+    if (persistedDefaults?.autoCompactPct) this.opts.defaultAutoCompactPct = persistedDefaults.autoCompactPct;
     // work session 独立默认（无 persisted → null，spawn 时 fallback 频道默认）
     const persistedWorkDefaults = this.channelConfigStore.getWorkDefaults();
     this.workDefaultModel = persistedWorkDefaults?.model ?? null;
@@ -498,6 +502,7 @@ export class Supervisor extends EventEmitter {
         started_at: null,
         model: persisted?.model ?? this.opts.defaultModel,
         effort: persisted?.effort ?? this.opts.defaultEffort ?? 'high',
+        autoCompactPct: persisted?.autoCompactPct ?? this.opts.defaultAutoCompactPct ?? DEFAULT_AUTOCOMPACT_PCT,
         session_id: undefined,
       });
     }
@@ -553,6 +558,7 @@ export class Supervisor extends EventEmitter {
       vaultCwd: this.opts.vaultCwd,
       model: persisted?.model ?? this.opts.defaultModel,
       effort: persisted?.effort ?? this.opts.defaultEffort,
+      autoCompactPct: persisted?.autoCompactPct ?? this.opts.defaultAutoCompactPct,
       supervisorPort: this.ipcServer.getPort(),
       dbPath: this.dbPath,
       // P1.3: statusLine sink 绝对路径
@@ -625,9 +631,10 @@ export class Supervisor extends EventEmitter {
   }
 
   /** P2.2: 改全局默认 model/effort + 持久化。只影响后续 spawn 的新群，不动已 spawn channel */
-  setDefaults(patch: { model?: string; effort?: string }): void {
+  setDefaults(patch: { model?: string; effort?: string; autoCompactPct?: number }): void {
     if (patch.model !== undefined) this.opts.defaultModel = patch.model;
     if (patch.effort !== undefined) this.opts.defaultEffort = patch.effort;
+    if (patch.autoCompactPct !== undefined) this.opts.defaultAutoCompactPct = patch.autoCompactPct;
     this.channelConfigStore.setDefaults(patch);
     process.stderr.write(`[supervisor] defaults set: ${JSON.stringify(patch)}\n`);
   }
@@ -658,12 +665,13 @@ export class Supervisor extends EventEmitter {
   }
 
   /** P1.2: 切 channel 配置 + 持久化。channel 在 running 时不强 restart（Owner要求手动控制） */
-  setChannelConfig(chatId: string, patch: { model?: string; effort?: string }): void {
+  setChannelConfig(chatId: string, patch: { model?: string; effort?: string; autoCompactPct?: number }): void {
     this.channelConfigStore.set(chatId, patch);
     const cli = this.channels.get(chatId);
     if (cli) {
       if (patch.model !== undefined) cli.setModel(patch.model);
       if (patch.effort !== undefined) cli.setEffort(patch.effort);
+      if (patch.autoCompactPct !== undefined) cli.setAutoCompactPct(patch.autoCompactPct);
     }
     process.stderr.write(`[supervisor] channel config set: ${chatId} ${JSON.stringify(patch)}\n`);
   }
@@ -686,6 +694,7 @@ export class Supervisor extends EventEmitter {
     if (!cli) return;
     if (persisted.model) cli.setModel(persisted.model);
     if (persisted.effort) cli.setEffort(persisted.effort);
+    if (persisted.autoCompactPct !== undefined) cli.setAutoCompactPct(persisted.autoCompactPct);
   }
 
   /** 今日入站消息数（YYYY-MM-DD 本地时区） */

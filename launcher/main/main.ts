@@ -150,6 +150,8 @@ interface ChannelStatusInfo {
   started_at?: number | null;
   model: string;
   effort: string;
+  /** 自动压缩阈值（上下文用量百分比）。 */
+  autoCompactPct?: number;
   /** P1.3: per-CLI 上下文用量（statusLine sink 推过来） */
   context_pct?: number | null;
   context_tokens?: number | null;
@@ -380,6 +382,11 @@ app.whenReady().then(async () => {
     supervisor?.setChannelConfig(chatId, { effort });
     pushState();
   });
+  // 每频道自动压缩阈值（持久化 + 更新 channel-cli.opts；同 model/effort 需 restart 生效）
+  ipcMain.handle('channel.set-compact-threshold', (_, chatId: string, pct: number) => {
+    supervisor?.setChannelConfig(chatId, { autoCompactPct: pct });
+    pushState();
+  });
   // P4.Q3 续：改卡片显示名
   ipcMain.handle('channel.set-display-name', (_, chatId: string, name: string) => {
     supervisor?.setChannelDisplayName(chatId, name);
@@ -487,13 +494,15 @@ app.whenReady().then(async () => {
     default_effort: supervisor?.opts.defaultEffort ?? 'high',
     work_default_model: supervisor?.getWorkDefaults().model ?? '',
     work_default_effort: supervisor?.getWorkDefaults().effort ?? 'high',
+    default_compact_pct: supervisor?.opts.defaultAutoCompactPct ?? 25,
   }));
-  ipcMain.handle('settings.set', (_, s: { default_model?: string; default_effort?: string; work_default_model?: string; work_default_effort?: string }) => {
+  ipcMain.handle('settings.set', (_, s: { default_model?: string; default_effort?: string; work_default_model?: string; work_default_effort?: string; default_compact_pct?: number }) => {
     // P2.2: settings.set 实装——写 channel-config.json 的 __defaults__ / __work_defaults__ + 更新 supervisor opts
     if (!supervisor) return;
     supervisor.setDefaults({
       model: s.default_model,
       effort: s.default_effort,
+      autoCompactPct: s.default_compact_pct,
     });
     supervisor.setWorkDefaults({
       model: s.work_default_model,

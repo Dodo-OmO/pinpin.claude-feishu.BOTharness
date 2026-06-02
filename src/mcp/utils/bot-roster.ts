@@ -51,7 +51,7 @@ export function resolveBotName(appId: string): string | undefined {
 
 /**
  * 拼"群里已知 bot 花名册"——给 instructions 用，让品品圈 bot 时知道 cli_xxx 对应谁。
- * 输出形如：[群里已知bot（圈它用 <at user_id="cli_号">显示名</at>…）：BotA=cli_xxxx…｜BotB=cli_yyyy…]
+ * 输出形如：[群里已知bot（圈它用 <at user_id="cli_号">显示名</at>…）：BotC=cli_xxxx…｜BotA=cli_yyyy…]
  */
 export function loadBotRoster(): string {
   const entries = Object.entries(getBotMap());

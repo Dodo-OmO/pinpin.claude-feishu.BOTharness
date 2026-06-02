@@ -13,7 +13,7 @@
  *   （Fire/EatingFood/ThumbsDown/BubbleTea/XmasTree/CheckMark 等）
  */
 const EMOJI_MAP: Record<string, string> = {
-  // ── 原 12 个：早期实测验证有效 ──
+  // ── 原 12 个：早期实测 server.ts 实证有效 ──
   "🌸": "ROSE",
   "😄": "SMILE",
   "❤️": "HEART",

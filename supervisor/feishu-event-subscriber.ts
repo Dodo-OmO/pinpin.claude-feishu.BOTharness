@@ -11,7 +11,8 @@
  *
  * 实装参考：早期版本 src/feishu/client.ts createLarkChannel 模式（SDK 1.55+ 高层封装）。
  *
- * WSClient 连飞书开放平台 wss://open.feishu.cn/...，是纯飞书消息通道（不经任何推理后端）。
+ * **纯飞书消息通道**：WSClient 连飞书开放平台 wss://open.feishu.cn/...，只走飞书消息，不承担推理。
+ * 纯消息通道，不承担推理。
  */
 
 import * as Lark from '@larksuiteoapi/node-sdk';
