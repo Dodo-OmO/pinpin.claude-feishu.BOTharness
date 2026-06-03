@@ -14,7 +14,7 @@
 import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
-import { initFeishuClient } from './feishu-client.js';
+import { initFeishuClient, getFeishuClient } from './feishu-client.js';
 import { FeishuPoll, type ChatListDiff, type FeishuInboundMessage } from './feishu-poll.js';
 import { FeishuEventSubscriber, type PollActionValue } from './feishu-event-subscriber.js';
 import type { CardActionEvent } from '@larksuiteoapi/node-sdk';
@@ -99,7 +99,10 @@ export class Supervisor extends EventEmitter {
   private channels = new Map<string, ChannelCli>();
   /** D1: chat_id → 崩溃熔断计数（实例级，不随 spawnChannelCli 重建闭包清零；forgetChannel 才删）。
    *  原为 spawnChannelCli 闭包局部 var，forget→respawn 会重建闭包跳过熔断；提到实例级使熔断跨 respawn 持续。 */
-  private crashState = new Map<string, { count: number; windowStart: number }>();
+  private crashState = new Map<
+    string,
+    { count: number; windowStart: number; slowRecoveryActive?: boolean; recoveryCount?: number }
+  >();
   /** D2: chat_id → CLI 未就绪时缓冲的入站消息（带入队时间戳）。CLI ready（client-hello）后 flush 投递。
    *  每 chat 上限 50 条（超丢最旧）、flush 时丢弃入队 > 10min 的过期消息。forgetChannel 时清。 */
   private pendingInbound = new Map<string, Array<{ msg: FeishuInboundMessagePayload; enqueuedAt: number }>>();
@@ -429,6 +432,63 @@ export class Supervisor extends EventEmitter {
     if (hadChannels && this.channelsPaused) this.startAllChannels();
   }
 
+  /** 抗断线加固：熔断后的有界慢速自愈链。每 5min 一跳——
+   *  已稳定运行 → 重置熔断状态；达上限(6次) → 通知Owner + 交手动 [↻]；否则重试一次再排下一跳。
+   *  crashState 被 manual-restart/forgetChannel 清掉时链自动终止（回调内重取 state 判空）。 */
+  private scheduleSlowRecovery(chatId: string): void {
+    setTimeout(() => {
+      const state = this.crashState.get(chatId);
+      if (!state || !state.slowRecoveryActive) return; // 已被手动重启/遗忘清掉 → 链终止
+      const ch = this.channels.get(chatId);
+      if (!ch) {
+        this.crashState.delete(chatId);
+        return;
+      }
+      if (ch.status === 'running') {
+        // 上次尝试已稳定运行满 5min → 自愈成功，重置熔断状态
+        process.stderr.write(
+          `[supervisor] channel ${chatId.slice(-8)} 慢速自愈成功，频道已稳定运行\n`,
+        );
+        this.crashState.delete(chatId);
+        return;
+      }
+      if ((state.recoveryCount ?? 0) >= 6) {
+        process.stderr.write(
+          `[supervisor] channel ${chatId.slice(-8)} 慢速自愈 6 次仍未恢复，通知Owner并停止（等手动 [↻]）\n`,
+        );
+        void this.notifyChannelDown(chatId);
+        this.crashState.delete(chatId);
+        return;
+      }
+      state.recoveryCount = (state.recoveryCount ?? 0) + 1;
+      process.stderr.write(
+        `[supervisor] channel ${chatId.slice(-8)} 慢速自愈第 ${state.recoveryCount}/6 次尝试重启\n`,
+      );
+      if (ch.status === 'failed') ch.start();
+      this.scheduleSlowRecovery(chatId);
+    }, 5 * 60_000);
+  }
+
+  /** 频道自愈耗尽时给该 chat 发飞书提示——不静默死。复用 supervisor 持有的 Lark 单例。 */
+  private async notifyChannelDown(chatId: string): Promise<void> {
+    try {
+      await getFeishuClient().im.v1.message.create({
+        data: {
+          receive_id: chatId,
+          msg_type: 'text',
+          content: JSON.stringify({
+            text: '⚠️ 我这会儿连接出问题了，自动重试了好几次还没缓过来——多半是网络在抽风。等通了我会自己接上；要是急，可以从启动器手动重启我一下。',
+          }),
+        },
+        params: { receive_id_type: 'chat_id' },
+      });
+    } catch (e) {
+      process.stderr.write(
+        `[supervisor] 下线通知发送失败 chat=${chatId.slice(-8)}: ${e instanceof Error ? e.message : e}\n`,
+      );
+    }
+  }
+
   getWorkSessionStats(): Array<ReturnType<WorkSession['getStats']>> {
     return [...this.workSessions.values()].map((ws) => ws.getStats());
   }
@@ -600,15 +660,28 @@ export class Supervisor extends EventEmitter {
         state = { count: 0, windowStart: now };
         this.crashState.set(chatId, state);
       }
+      // 已进入有界慢速自愈期：快重启与计数都交给慢速链，本次崩溃只记日志
+      // （避免"快重启 + 慢速重启"双重启 + 计数窗口被重置打架）。
+      if (state.slowRecoveryActive) {
+        process.stderr.write(
+          `[supervisor] channel ${chatId.slice(-8)} 慢速自愈期内又崩，等下次慢速尝试\n`,
+        );
+        return;
+      }
       if (now - state.windowStart > 5 * 60_000) {
         state.windowStart = now;
         state.count = 0;
       }
       state.count++;
       if (state.count > 3) {
+        // 抗断线加固：不再"永久等手动"，转入有界慢速自愈（每 5min 一次、上限 6 次≈30min）；
+        // 仍救不回才发飞书通知Owner并彻底交手动 [↻]——绝不无限刷。
+        state.slowRecoveryActive = true;
+        state.recoveryCount = 0;
         process.stderr.write(
-          `[supervisor] channel ${chatId.slice(-8)} 5min 内崩 ${state.count} 次，停止自动重启等Owner手动恢复\n`,
+          `[supervisor] channel ${chatId.slice(-8)} 5min 内崩 ${state.count} 次，转入慢速自愈（每5min，上限6次）\n`,
         );
+        this.scheduleSlowRecovery(chatId);
         return;
       }
       process.stderr.write(

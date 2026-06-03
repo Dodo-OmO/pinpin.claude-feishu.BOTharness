@@ -19,6 +19,9 @@ import { PtyManager, type PtyStats } from './pty-manager.js';
 import { buildInstructions } from '../src/mcp/instructions.js';
 import { DEFAULT_AUTOCOMPACT_PCT } from './channel-config-store.js';
 
+/** 单轮 API 失败重试次数加固（CLI 原生默认 10，env override）。调高 = 多扛网络瞬时抖动、抖动过去自动接上。 */
+const PINPIN_API_MAX_RETRIES = process.env['PINPIN_API_MAX_RETRIES'] ?? '20';
+
 /** node-pty spawn 不走 shell——必须绝对路径。Owner Win11 claude 装在 ~\.local\bin\claude.exe。
  *  优先级：PINPIN_CLAUDE_PATH env → where claude.exe → 'claude' 兜底（会失败但 msg 清晰） */
 function resolveClaudePath(): string {
@@ -157,6 +160,8 @@ export class ChannelCli extends EventEmitter {
       // CLI 到 25% 就地原生压缩（自动留摘要 + system prompt/人格/CLAUDE.md 从磁盘重注入不丢），
       // 无需 supervisor 监测用量阈值（D-6 手工摘要机制已回滚）。
       CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(this.opts.autoCompactPct ?? DEFAULT_AUTOCOMPACT_PCT),
+      // 抗断线加固：多扛 API 瞬时抖动。
+      CLAUDE_CODE_MAX_RETRIES: PINPIN_API_MAX_RETRIES,
     };
 
     const claudePath = resolveClaudePath();
@@ -187,7 +192,13 @@ export class ChannelCli extends EventEmitter {
 
     // 2026-05-28 多 CLI 兜底：PTY 异常退出 → emit 'crashed'（supervisor 监听后自动重启）
     // 用户主动 stop 时 userStopped=true，stop() 已 emit 'stopped'——此 callback 跳过避免重复
+    // 2026-06-03 修重启竞态：restart() = stop() + 500ms 后 start()，但被 kill 的旧进程 PTY ~1s 后才真死。
+    //   届时 start() 已把 userStopped 重置为 false，旧 PtyManager 仍持有自己那个 onExit 闭包（引用本实例），
+    //   失去保护 → 把刚建好的新 pty 置 null + emit 'crashed' → supervisor 自动重启 → 同频道多僵尸进程抢消息
+    //   （间歇连不上根因）。闭包捕获本次 PtyManager 引用 ownPty：若 this.pty 已被新 start() 替换，本回调来自旧进程→跳过。
+    const ownPty = this.pty;
     this.pty.onExit((info) => {
+      if (this.pty !== ownPty) return; // 旧进程的延迟退出回调（this.pty 已被新 start 替换）→ 不当崩溃处理
       if (this.userStopped) return; // stop() 路径已经处理完
       if (this.autoConfirmInterval) {
         clearInterval(this.autoConfirmInterval);

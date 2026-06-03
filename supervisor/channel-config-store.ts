@@ -172,10 +172,11 @@ export class ChannelConfigStore {
       fs.writeFileSync(tmpPath, json, 'utf8');
       fs.renameSync(tmpPath, this.filePath);
     } catch (e) {
-      // tmp 写或 rename 失败 → 清 tmp + 继续（cache 内存里已更新，下次 set 会重试）
+      // tmp 写或 rename 失败 → 清 tmp。⚠️ 后果：本次改动只在内存、整启动器一重启就丢，
+      // 必须显眼报错（旧版写"cache 仍内存有效"语气太轻，会被误当无害）。
       try { fs.unlinkSync(tmpPath); } catch { /* ignore */ }
       process.stderr.write(
-        `[channel-config-store] flush 失败 (cache 仍内存有效): ${e instanceof Error ? e.message : e}\n`,
+        `[channel-config-store] ❌ flush 失败：配置改动未落盘，重启将丢失！path=${this.filePath} err=${e instanceof Error ? e.message : e}\n`,
       );
     }
   }
