@@ -13,6 +13,7 @@
  */
 
 import * as pty from 'node-pty';
+import { execSync } from 'node:child_process';
 
 // === 向 Claude TUI 提交一行的"双段静默门"参数（频道终端 + work 终端共用，真机验证过）===
 /** 写完文本后多久首次检查能否发 \r。Claude Ink TUI 把"文本+回车"一坨到达当输入内容不提交，
@@ -254,31 +255,31 @@ export class PtyManager {
     setTimeout(() => this.waitForQuiet(label, cb, started), SUBMIT_POLL_MS);
   }
 
-  /**
-   * 优雅退出（不强 kill）—— 给 PTY 时间清理 conpty 资源
-   */
-  shutdown(): void {
-    if (!this.alive) return;
-    this.ptyProc.write('\x03'); // Ctrl+C
-    setTimeout(() => {
-      if (this.alive) {
-        try {
-          this.ptyProc.kill();
-        } catch {
-          /* ignore */
-        }
+  /** 树杀：强杀本 PTY spawn 的进程 + 其全部子孙（claude.exe 顶层 → MCP server node / cmd 等子进程）。
+   *  Windows 走 `taskkill /F /T /PID <本pid>`——**按 PID 精确锁定本进程树**，绝不波及别的 claude
+   *  （Owner的 Claude 桌面应用、开发用 Claude Code CLI 都是各自独立的进程树、不在本 pid 子孙内）。
+   *  同步执行：让"完全关闭"在 app 退出前真杀干净，不再依赖会被跳过的延迟定时器、不留孤儿。
+   *  收尾再调 node-pty kill 清理 conpty 句柄（进程多已亡，吞错）。非 win 兜底走 node-pty kill。 */
+  private killTree(): void {
+    const pid = this.ptyProc.pid;
+    if (process.platform === 'win32' && pid) {
+      try {
+        execSync(`taskkill /F /T /PID ${pid}`, { stdio: 'ignore', timeout: 5000 });
+      } catch {
+        /* 进程/子进程可能已退出，taskkill 报"找不到"——忽略 */
       }
-    }, 1000).unref();
-  }
-
-  /** 立即 kill */
-  kill(): void {
-    if (!this.alive) return;
+    }
     try {
       this.ptyProc.kill();
     } catch {
       /* ignore */
     }
+  }
+
+  /** 立即树杀（停止/重启/完全关闭走这条）——同步、决定性、连子孙一起干掉、无延迟竞态。 */
+  kill(): void {
+    if (!this.alive) return;
+    this.killTree();
   }
 
   getStats(): PtyStats {

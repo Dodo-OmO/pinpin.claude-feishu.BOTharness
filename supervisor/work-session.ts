@@ -548,7 +548,7 @@ export class WorkSession extends EventEmitter {
     }
     this.jsonlWatcher?.stop();
     this.jsonlWatcher = null;
-    this.pty?.shutdown();
+    this.pty?.kill(); // 立即树杀：work CLI + 其子进程一起干掉，不留孤儿
     this.pty = null;
     this._status = 'stopped';
     this.emit('ended');

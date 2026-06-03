@@ -274,7 +274,7 @@ export class ChannelCli extends EventEmitter {
     }
     this.autoConfirmStopMonitor?.();
     this.autoConfirmStopMonitor = null;
-    this.pty?.shutdown();
+    this.pty?.kill(); // 立即树杀：连 MCP server / cmd 子进程一起干掉，决定性、无延迟竞态、不留孤儿
     this.pty = null;
     this._status = 'stopped';
     this.startedAt = null;
