@@ -11,7 +11,7 @@ type Client = ReturnType<typeof getFeishuClient>;
 export const readCloudDocTool: Tool = {
   name: "read_cloud_doc",
   description:
-    "读飞书云文档（docx）纯文本内容。doc_token = 文档 id（建文档时返回的 doc_token，或文档 url 里 /docx/ 后那段）。",
+    "读飞书云文档纯文本。支持普通文档 + 知识库(wiki)文档——直接传文档链接即可（自动识别 wiki/普通文档并转换），也可传裸文档 id。注：wiki 里的表格/多维表/思维笔记等非文字文档不支持纯文本读取。",
   inputSchema: {
     type: "object",
     properties: {
@@ -40,9 +40,27 @@ export const editCloudDocTool: Tool = {
 export async function handleReadCloudDoc(args: { doc_token: string }) {
   try {
     const client = getFeishuClient();
-    const res = await client.docx.v1.document.rawContent({
-      path: { document_id: args.doc_token },
-    });
+    let token = args.doc_token.trim();
+    // 传链接时提取 token + 判类型：/wiki/ = 知识库节点，/docx/ = 普通文档；裸 token 不匹配走原路
+    let isWiki = false;
+    const m = token.match(/\/(wiki|docx|docs)\/([A-Za-z0-9]+)/);
+    if (m) {
+      isWiki = m[1] === "wiki";
+      token = m[2];
+    }
+    // 知识库节点：先转成背后真实文档 obj_token，且仅 docx 类支持纯文本读取
+    if (isWiki) {
+      const node = await client.wiki.v2.space.getNode({ params: { token } });
+      const obj = node.data?.node;
+      if (!obj?.obj_token) {
+        return { isError: true, content: [{ type: "text" as const, text: "读 wiki 节点失败：拿不到背后的文档（八成没节点阅读权限）" }] };
+      }
+      if (obj.obj_type !== "docx") {
+        return { content: [{ type: "text" as const, text: `「${obj.title ?? ""}」是 ${obj.obj_type} 类型（非文字文档），暂不支持纯文本读取。` }] };
+      }
+      token = obj.obj_token;
+    }
+    const res = await client.docx.v1.document.rawContent({ path: { document_id: token } });
     const content = res.data?.content ?? "";
     return { content: [{ type: "text" as const, text: content || "（文档为空）" }] };
   } catch (e) {
