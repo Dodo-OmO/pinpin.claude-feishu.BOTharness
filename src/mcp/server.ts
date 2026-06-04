@@ -55,6 +55,7 @@ import './cron/weekly-recap.js';
 import './cron/memory-audit.js';
 import './cron/free-activity.js';
 import './cron/daily-diary.js';
+import './cron/ball-partner-tasks.js';
 // mood-decay.js：已行为层关（空模块 export {}），搬 supervisor/cron-runner.ts，无需 CLI import。
 import { schedulerStart, schedulerStop } from './cron/scheduled-jobs-tick.js';
 // 阶段 4 批次 1 步骤 1.5：read_chat_log tool
@@ -65,6 +66,11 @@ import { createGroupTool, handleCreateGroup } from './tools/create-group.js';
 import { disbandGroupTool, handleDisbandGroup } from './tools/disband-group.js';
 import { listActiveChatsTool, handleListActiveChats } from './tools/list-active-chats.js';
 import { listChatTabsTool, handleListChatTabs } from './tools/list-chat-tabs.js';
+import { deleteCloudDocTool, handleDeleteCloudDoc } from './tools/delete-cloud-doc.js';
+import { readDocTodosTool, handleReadDocTodos, setDocTodoTool, handleSetDocTodo } from './tools/doc-todos.js';
+import { writeSheetTool, handleWriteSheet } from './tools/write-sheet.js';
+import { writeBitableTool, handleWriteBitable } from './tools/write-bitable.js';
+import { listWikiSpacesTool, handleListWikiSpaces } from './tools/list-wiki-spaces.js';
 import { writeDiaryTool, handleWriteDiary } from './tools/write-diary.js';
 import { writeWeeklyRecapTool, handleWriteWeeklyRecap } from './tools/write-weekly-recap.js';
 import { readPushedNewsUrlsTool, handleReadPushedNewsUrls } from './tools/read-pushed-news-urls.js';
@@ -126,11 +132,9 @@ import {
 // 2026-05-28 阶段补齐：卡片家族 4 tool（含 confirm_dangerous_action 降级版）
 import {
   SEND_CARD_TOOL,
-  CREATE_BITABLE_TOOL,
   SEND_POLL_CARD_TOOL,
   CONFIRM_DANGEROUS_ACTION_TOOL,
   handleSendCard,
-  handleCreateBitable,
   handleSendPollCard,
   handleConfirmDangerousAction,
 } from './tools/cards.js';
@@ -182,6 +186,9 @@ async function main() {
       createCloudDocTool,
       readCloudDocTool,
       editCloudDocTool,
+      deleteCloudDocTool,
+      readDocTodosTool,
+      setDocTodoTool,
       readAttachmentTool,
       writeJourneyLogTool,
       triggerFreeActivityTool,
@@ -222,9 +229,12 @@ async function main() {
       ARCHIVE_SEARCH_TOOL,
       // 2026-05-28 阶段补齐：卡片家族 4 tool（send_poll_card 已实装，重新加回）
       SEND_CARD_TOOL,
-      CREATE_BITABLE_TOOL,
       SEND_POLL_CARD_TOOL,
       CONFIRM_DANGEROUS_ACTION_TOOL,
+      // 群云文档：填电子表格 / 填多维表 / 列知识库（create_cloud_doc 已含建表+挂群+权限）
+      writeSheetTool,
+      writeBitableTool,
+      listWikiSpacesTool,
     ],
   }));
 
@@ -281,6 +291,12 @@ async function main() {
         return handleReadCloudDoc(args as unknown as Parameters<typeof handleReadCloudDoc>[0]);
       case 'edit_cloud_doc':
         return handleEditCloudDoc(args as unknown as Parameters<typeof handleEditCloudDoc>[0]);
+      case 'delete_cloud_doc':
+        return handleDeleteCloudDoc(args as unknown as Parameters<typeof handleDeleteCloudDoc>[0]);
+      case 'read_doc_todos':
+        return handleReadDocTodos(args as unknown as Parameters<typeof handleReadDocTodos>[0]);
+      case 'set_doc_todo':
+        return handleSetDocTodo(args as unknown as Parameters<typeof handleSetDocTodo>[0]);
       case 'write_journey_log':
         return handleWriteJourneyLog(args as unknown as Parameters<typeof handleWriteJourneyLog>[0]);
       case 'trigger_free_activity':
@@ -344,8 +360,12 @@ async function main() {
       // 2026-05-28 阶段补齐：卡片家族 4 tool
       case 'send_card':
         return handleSendCard(args as unknown as Parameters<typeof handleSendCard>[0]);
-      case 'create_bitable':
-        return handleCreateBitable(args as unknown as Parameters<typeof handleCreateBitable>[0]);
+      case 'write_sheet':
+        return handleWriteSheet(args as unknown as Parameters<typeof handleWriteSheet>[0]);
+      case 'write_bitable':
+        return handleWriteBitable(args as unknown as Parameters<typeof handleWriteBitable>[0]);
+      case 'list_wiki_spaces':
+        return handleListWikiSpaces();
       case 'send_poll_card':
         return handleSendPollCard(args as unknown as Parameters<typeof handleSendPollCard>[0]);
       case 'confirm_dangerous_action':

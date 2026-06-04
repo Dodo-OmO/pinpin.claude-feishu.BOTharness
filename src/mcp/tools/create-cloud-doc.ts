@@ -3,6 +3,8 @@
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { getFeishuClient } from "./feishu-send.js";
+import { createBitable } from "../feishu/bitable.js";
+import { createSpreadsheet, createWikiNode, makeShareable, attachToChat } from "../feishu/cloud-doc-ops.js";
 
 /**
  * markdown → 飞书 blocks（convert 服务端解析）→ 整树插入 docToken 下 atIndex 处。
@@ -71,51 +73,109 @@ export async function insertMarkdownBlocks(
 export const createCloudDocTool: Tool = {
   name: "create_cloud_doc",
   description:
-    "建飞书云文档（docx）。title = 文档标题；markdown = 文档内容。" +
-    "返回 { doc_token, url }——url 可用于飞书私聊发链接。",
+    "建飞书云文档并可挂到群标签页。format：docx 文档（默认，可带 markdown 内容）/ sheet 电子表格 / bitable 多维表格（表格类建空的，用 write_sheet/write_bitable 填数据）。" +
+    "默认建完设组织内全员可编辑 + 挂当前群（attach_to_chat=false 不挂、chat_id 指定别的群、share='none' 不设权限）。" +
+    "传 wiki_space_id 则建到该知识库（用 list_wiki_spaces 拿 id）。返回 { format, token, url, table_id?(多维表填数据用), attached, shared }。",
   inputSchema: {
     type: "object",
     properties: {
       title: { type: "string", description: "文档标题" },
-      markdown: { type: "string", description: "文档内容 markdown" },
-      folder_token: { type: "string", description: "可选父文件夹 token（不传放在我的空间根）" },
+      format: { type: "string", enum: ["docx", "sheet", "bitable"], description: "文档格式，默认 docx" },
+      markdown: { type: "string", description: "文档内容 markdown（仅 docx 生效）" },
+      folder_token: { type: "string", description: "可选父文件夹 token（不传放我的空间根）" },
+      wiki_space_id: { type: "string", description: "可选，建到该知识库空间（不传=建我的空间）" },
+      wiki_parent_node: { type: "string", description: "可选，知识库内父节点 node_token" },
+      attach_to_chat: { type: "boolean", description: "是否挂到群标签页，默认 true" },
+      chat_id: { type: "string", description: "可选，挂到指定群（不传=当前群）" },
+      share: { type: "string", enum: ["editable", "none"], description: "权限，默认 editable=组织内全员可编辑" },
     },
-    required: ["title", "markdown"],
+    required: ["title"],
   },
 };
 
 export async function handleCreateCloudDoc(args: {
   title: string;
-  markdown: string;
+  format?: "docx" | "sheet" | "bitable";
+  markdown?: string;
   folder_token?: string;
+  wiki_space_id?: string;
+  wiki_parent_node?: string;
+  attach_to_chat?: boolean;
+  chat_id?: string;
+  share?: "editable" | "none";
 }) {
-  const { title, markdown, folder_token } = args;
+  const format = args.format ?? "docx";
+  const attach = args.attach_to_chat !== false; // 默认挂群
+  const share = args.share ?? "editable";
+  const warnings: string[] = [];
   try {
     const client = getFeishuClient();
-    // 1. 创建空 docx
-    const createRes = await client.docx.v1.document.create({
-      data: {
-        title,
-        ...(folder_token ? { folder_token } : {}),
-      },
-    });
-    const docToken = createRes.data?.document?.document_id;
-    if (!docToken) {
-      return { isError: true, content: [{ type: "text" as const, text: "建文档失败：未拿到 doc_token" }] };
+    let token = ""; // 底层文档 token：docx=document_id / sheet=spreadsheet_token / bitable=app_token
+    let url = "";
+    let tableId: string | undefined; // 多维表默认表 id，给 write_bitable 用
+    let asDoc = false; // 挂群标签类型：docx(我的空间)=doc，其它=url
+    let wikiNodeToken = ""; // wiki 节点 token（权限设在它上面，type=wiki）
+
+    if (args.wiki_space_id) {
+      // 建到知识库：飞书按 obj_type 自动建底层文档并挂知识库
+      const node = await createWikiNode(args.wiki_space_id, format, args.title, args.wiki_parent_node);
+      token = node.objToken;
+      wikiNodeToken = node.nodeToken;
+      url = node.url;
+      if (format === "docx" && args.markdown) {
+        try { await insertMarkdownBlocks(client, token, args.markdown, 0); }
+        catch (e) { warnings.push(`markdown 渲染失败：${e instanceof Error ? e.message : e}`); }
+      }
+      if (format === "bitable" && token) {
+        try {
+          const tbl = await client.bitable.v1.appTable.list({ path: { app_token: token }, params: { page_size: 1 } });
+          tableId = tbl.data?.items?.[0]?.table_id;
+        } catch { /* 拿不到 table_id 不致命，write_bitable 可自取 */ }
+      }
+    } else if (format === "docx") {
+      const createRes = await client.docx.v1.document.create({
+        data: { title: args.title, ...(args.folder_token ? { folder_token: args.folder_token } : {}) },
+      });
+      token = createRes.data?.document?.document_id ?? "";
+      if (!token) return { isError: true, content: [{ type: "text" as const, text: "建文档失败：未拿到 doc_token" }] };
+      url = `https://feishu.cn/docx/${token}`;
+      asDoc = true;
+      if (args.markdown) {
+        try { await insertMarkdownBlocks(client, token, args.markdown, 0); }
+        catch (e) { warnings.push(`markdown 渲染失败：${e instanceof Error ? e.message : e}`); }
+      }
+    } else if (format === "sheet") {
+      const ss = await createSpreadsheet(args.title, args.folder_token);
+      token = ss.token; url = ss.url;
+    } else {
+      const bt = await createBitable(args.title, args.folder_token);
+      token = bt.appToken; url = bt.url; tableId = bt.defaultTableId;
     }
-    // 2. markdown → 飞书 blocks（convert 由飞书服务端解析，零自写解析）→ 整树插入（共享 helper）
-    try {
-      await insertMarkdownBlocks(client, docToken, markdown, 0);
-    } catch (e) {
-      // 渲染插入失败不致命——文档已建好，回滚成本太高，仅 warn
-      const msg = e instanceof Error ? e.message : String(e);
-      process.stderr.write(`[create-cloud-doc] markdown 渲染插入失败但文档已建：${msg}\n`);
+
+    let shared = false;
+    if (share === "editable") {
+      // wiki 节点权限设在 node_token + type=wiki；我的空间设在底层文档 token + 其格式
+      const pToken = args.wiki_space_id ? wikiNodeToken : token;
+      const pType = args.wiki_space_id ? "wiki" : format;
+      shared = await makeShareable(pToken, pType, true);
+      if (!shared) warnings.push("设全员可编辑权限失败（文档已建）");
     }
-    const url = `https://feishu.cn/docx/${docToken}`;
+
+    let attached = false;
+    if (attach) {
+      const chatId = args.chat_id || process.env.PINPIN_CHAT_ID;
+      if (!chatId) warnings.push("挂群跳过：拿不到 chat_id");
+      else {
+        attached = await attachToChat(chatId, args.title, url, asDoc);
+        if (!attached) warnings.push("挂群失败（文档已建，可能没群标签页管理权限）");
+      }
+    }
+
     return {
-      content: [
-        { type: "text" as const, text: JSON.stringify({ doc_token: docToken, url, title }) },
-      ],
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ format, token, url, ...(tableId ? { table_id: tableId } : {}), attached, shared, ...(warnings.length ? { warnings } : {}) }),
+      }],
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

@@ -1,9 +1,7 @@
 /**
  * 飞书多维表格 API 封装（channel 版精简）
- *
- * 仅含核心 2 函数：createBitable / makeBitableShareable
- * 早期版本 165 行的完整 createTable / addFields / batchCreateRecords 等暂未搬迁
- * （Owner罕用，按需后续补）。
+ * createBitable：建空多维表（create_cloud_doc format=bitable 复用）。
+ * 权限设置走 feishu/cloud-doc-ops.ts 的 makeShareable；填数据走 tools/write-bitable.ts。
  */
 
 import { getFeishuClient } from "../tools/feishu-send.js";
@@ -26,26 +24,4 @@ export async function createBitable(
     defaultTableId: app.default_table_id,
     url: app.url || `https://feishu.cn/base/${app.app_token}`,
   };
-}
-
-/** 设多维表格为"组织内有链接可阅读"，不设则品品建完别人点开 403 */
-export async function makeBitableShareable(appToken: string): Promise<void> {
-  const client = getFeishuClient();
-  try {
-    const res = await client.drive.v1.permissionPublic.patch({
-      path: { token: appToken },
-      params: { type: "bitable" },
-      data: { link_share_entity: "tenant_readable" },
-    });
-    if (res.code !== 0) {
-      console.warn(
-        `[bitable] 设共享权限失败 code=${res.code} msg=${res.msg}——表格已建但可能仅创建者可见`,
-      );
-    }
-  } catch (e) {
-    console.warn(
-      "[bitable] 设共享权限异常（表格已建，可能仅创建者可见）:",
-      e instanceof Error ? e.message : e,
-    );
-  }
 }

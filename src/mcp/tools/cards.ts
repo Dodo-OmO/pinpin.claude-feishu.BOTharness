@@ -1,8 +1,7 @@
 /**
- * 卡片家族 4 tool —— send_card / send_poll_card / create_bitable / confirm_dangerous_action
+ * 卡片家族 3 tool —— send_card / send_poll_card / confirm_dangerous_action
  *
  * - send_card：DIY 纯展示卡（标题+段落+落款）
- * - create_bitable：建飞书多维表格（仅基础新建，复杂字段配置后续补）
  * - send_poll_card：投票卡（DB diy_polls/diy_poll_votes + 卡片回调实时刷票）
  * - confirm_dangerous_action：危险操作确认卡降级版（发提示卡 + 等用户文字回复）
  */
@@ -16,7 +15,6 @@ import {
   buildConfirmCard,
   type DiyCardSection,
 } from "../feishu/cards/diy-card.js";
-import { createBitable, makeBitableShareable } from "../feishu/bitable.js";
 import { appendBotReply } from "../utils/chat-log.js";
 import {
   insertDiyPoll,
@@ -85,43 +83,6 @@ export async function handleSendCard(args: {
     return textOk(`已发卡片「${args.title}」到当前 chat。本次无需文字复述卡片内容。`);
   } catch (e) {
     return textErr(`发卡片失败：${e instanceof Error ? e.message : String(e)}`);
-  }
-}
-
-// ───────────────────────────────────────────────────────────
-// create_bitable
-// ───────────────────────────────────────────────────────────
-
-export const CREATE_BITABLE_TOOL: Tool = {
-  name: "create_bitable",
-  description:
-    "建飞书多维表格（轻量数据库 / 表格）。人类要新建表格管理某类数据时用。" +
-    "返回 URL 给Owner点开。当前只建空白表，复杂字段配置后续 batch 补。",
-  inputSchema: {
-    type: "object",
-    properties: {
-      name: { type: "string", description: "多维表格名称" },
-      folder_token: { type: "string", description: "（可选）目标文件夹 token，不传则放云盘根目录" },
-    },
-    required: ["name"],
-  },
-};
-
-export async function handleCreateBitable(args: {
-  name: string;
-  folder_token?: string;
-}): Promise<ToolResult> {
-  try {
-    const result = await createBitable(args.name, args.folder_token);
-    await makeBitableShareable(result.appToken);
-    const chatId = process.env.PINPIN_CHAT_ID ?? "unknown";
-    appendBotReply(chatId, `[建多维表格「${args.name}」: ${result.url}]`);
-    return textOk(
-      `多维表格「${args.name}」建好了：${result.url}\n` +
-        `app_token=${result.appToken}, default_table_id=${result.defaultTableId}。组织内有链接可阅读。`,
-    );
-  } catch (e) {
-    return textErr(`建多维表格失败：${e instanceof Error ? e.message : String(e)}`);
   }
 }
 
