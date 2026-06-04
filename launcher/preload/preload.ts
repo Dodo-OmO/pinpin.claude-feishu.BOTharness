@@ -37,6 +37,8 @@ const api = {
       ipcRenderer.invoke('channel.set-effort', chatId, effort),
     setCompactThreshold: (chatId: string, pct: number): Promise<void> =>
       ipcRenderer.invoke('channel.set-compact-threshold', chatId, pct),
+    setFast: (chatId: string, fast: boolean): Promise<void> =>
+      ipcRenderer.invoke('channel.set-fast', chatId, fast),
     setDisplayName: (chatId: string, name: string): Promise<void> =>
       ipcRenderer.invoke('channel.set-display-name', chatId, name),
     forget: (chatId: string): Promise<boolean> =>
@@ -78,6 +80,8 @@ export interface ChannelStatusInfo {
   effort: string;
   /** 自动压缩阈值（上下文用量百分比）。 */
   autoCompactPct?: number;
+  /** fast 模式（Opus 加速输出）。 */
+  fast?: boolean;
   /** P1.3: per-CLI 上下文用量（statusLine sink 推过来） */
   context_pct?: number | null;
   context_tokens?: number | null;
@@ -90,6 +94,7 @@ export interface WorkSessionInfo {
   session_id: string;
   origin_chat_id: string;
   work_dir: string;
+  fast?: boolean;
   status: 'starting' | 'running' | 'stopped' | 'failed';
   pid?: number;
   uptime_ms: number;
@@ -121,6 +126,8 @@ export interface AppSettings {
   default_effort: string;
   work_default_model: string;
   work_default_effort: string;
+  work_default_fast: boolean;
+  default_fast: boolean;
   default_compact_pct: number;
 }
 

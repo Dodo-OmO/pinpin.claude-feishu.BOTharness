@@ -152,6 +152,8 @@ interface ChannelStatusInfo {
   effort: string;
   /** 自动压缩阈值（上下文用量百分比）。 */
   autoCompactPct?: number;
+  /** fast 模式（Opus 加速输出）。 */
+  fast?: boolean;
   /** P1.3: per-CLI 上下文用量（statusLine sink 推过来） */
   context_pct?: number | null;
   context_tokens?: number | null;
@@ -164,6 +166,7 @@ interface WorkSessionInfo {
   session_id: string;
   origin_chat_id: string;
   work_dir: string;
+  fast?: boolean;
   status: 'starting' | 'running' | 'stopped' | 'failed';
   pid?: number;
   uptime_ms: number;
@@ -387,6 +390,11 @@ app.whenReady().then(async () => {
     supervisor?.setChannelConfig(chatId, { autoCompactPct: pct });
     pushState();
   });
+  // 每频道 fast 模式（持久化 + 更新 channel-cli.opts；需 restart 生效）
+  ipcMain.handle('channel.set-fast', (_, chatId: string, fast: boolean) => {
+    supervisor?.setChannelConfig(chatId, { fast });
+    pushState();
+  });
   // P4.Q3 续：改卡片显示名
   ipcMain.handle('channel.set-display-name', (_, chatId: string, name: string) => {
     supervisor?.setChannelDisplayName(chatId, name);
@@ -494,19 +502,23 @@ app.whenReady().then(async () => {
     default_effort: supervisor?.opts.defaultEffort ?? 'high',
     work_default_model: supervisor?.getWorkDefaults().model ?? '',
     work_default_effort: supervisor?.getWorkDefaults().effort ?? 'high',
+    work_default_fast: supervisor?.getWorkDefaults().fast ?? false,
+    default_fast: supervisor?.opts.defaultFast ?? false,
     default_compact_pct: supervisor?.opts.defaultAutoCompactPct ?? 25,
   }));
-  ipcMain.handle('settings.set', (_, s: { default_model?: string; default_effort?: string; work_default_model?: string; work_default_effort?: string; default_compact_pct?: number }) => {
+  ipcMain.handle('settings.set', (_, s: { default_model?: string; default_effort?: string; work_default_model?: string; work_default_effort?: string; work_default_fast?: boolean; default_fast?: boolean; default_compact_pct?: number }) => {
     // P2.2: settings.set 实装——写 channel-config.json 的 __defaults__ / __work_defaults__ + 更新 supervisor opts
     if (!supervisor) return;
     supervisor.setDefaults({
       model: s.default_model,
       effort: s.default_effort,
       autoCompactPct: s.default_compact_pct,
+      fast: s.default_fast,
     });
     supervisor.setWorkDefaults({
       model: s.work_default_model,
       effort: s.work_default_effort,
+      fast: s.work_default_fast,
     });
     pushLog({
       ts: Date.now(),
@@ -682,8 +694,9 @@ function openWorkTerminalWindow(sessionId: string): void {
     });
   }
   win.on('close', () => {
-    // Q5: 关窗 = detach（PTY 继续跑、translatedHistory 继续累积；真结束走 endSession 按钮）
-    supervisor?.getWorkSession(sessionId)?.detachTerminal();
+    // workCLI 窗 X = 真结束这个 work session：ws.end() 走 pty.kill→taskkill /F /T 树杀
+    // work CLI + 其 MCP server + Task 子 agent 等全部衍生进程（Owner要求：X 掉不留僵尸）。
+    supervisor?.getWorkSession(sessionId)?.end();
   });
   win.on('closed', () => {
     workTerminalWindows.delete(sessionId);

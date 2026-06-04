@@ -31,6 +31,22 @@ export function getVaultRoot(): string {
   return process.env.PINPIN_VAULT_DIR ?? process.env.BASE_PROJECT_DIR ?? "/path/to/obsidian-vault";
 }
 
+/** 示例工作群 chat_id——该群享专属待遇（必读规则注入 / 原图 / 读全文件 / 本地库下载）。
+ *  env 优先，硬编码兜底（照 getVaultRoot 不抛异常原则，任何进程上下文都能判）。 */
+export function ballPartnerChatId(): string {
+  return process.env.BALL_PARTNER_CHAT_ID ?? "oc_xxxxxxxx";
+}
+
+/** 当前 chat 是否示例工作群 */
+export function isBallPartner(chatId?: string): boolean {
+  return !!chatId && chatId === ballPartnerChatId();
+}
+
+/** 示例工作组本地文件库根——该群附件下载目标 + 规则资料地图基准 */
+export function ballPartnerDir(): string {
+  return process.env.BALL_PARTNER_DIR ?? "/path/to/work-group-files";
+}
+
 /** ISO 8601 周数 + 年份——给永存记忆自检 / 周回顾文件命名用 */
 export function getISOWeek(d: Date = new Date()): { year: number; week: number } {
   const target = new Date(d.valueOf());

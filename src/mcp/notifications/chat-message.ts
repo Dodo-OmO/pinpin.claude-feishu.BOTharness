@@ -34,6 +34,7 @@ import {
 import type { RelayPayload } from "../db/types.js";
 import { logBackground } from "../utils/background-log.js";
 import { saveInboundImage, saveInboundFile } from "../utils/media-attachments.js";
+import { isBallPartner } from "../utils/helper.js";
 import { downloadMessageResource } from "../tools/feishu-send.js";
 import { transcribeAudio } from "../utils/stt.js";
 
@@ -172,8 +173,10 @@ export async function handleInboundMessage(
     try {
       const imageKey = (JSON.parse(rawContent || "{}") as { image_key?: string }).image_key;
       if (!imageKey) return;
-      const localPath = await saveInboundImage(payload.message_id, imageKey);
-      text = `[图片] 有人发了图片，已压缩存本地——**这轮先用 Read 工具读这张图、看清内容再回应**：${localPath}`;
+      const localPath = await saveInboundImage(payload.message_id, imageKey, chatId);
+      text = isBallPartner(chatId)
+        ? `[图片] 有人发了图片，已存本地原图——**这轮先用 Read 工具读这张图、看清内容再回应**：${localPath}`
+        : `[图片] 有人发了图片，已压缩存本地——**这轮先用 Read 工具读这张图、看清内容再回应**：${localPath}`;
     } catch (e) {
       process.stderr.write(
         `[chat-message] 图片处理失败 msg_id=${payload.message_id}: ${e instanceof Error ? e.message : e}\n`,
@@ -184,8 +187,10 @@ export async function handleInboundMessage(
     try {
       const parsed = JSON.parse(rawContent || "{}") as { file_key?: string; file_name?: string };
       if (!parsed.file_key) return;
-      const localPath = await saveInboundFile(payload.message_id, parsed.file_key, parsed.file_name ?? "file");
-      text = `[文件附件「${parsed.file_name ?? "未命名"}」] 已备份到本地，默认不读——需要时再 Read：${localPath}`;
+      const localPath = await saveInboundFile(payload.message_id, parsed.file_key, parsed.file_name ?? "file", chatId);
+      text = isBallPartner(chatId)
+        ? `[文件附件「${parsed.file_name ?? "未命名"}」] 已存本地——需要看内容就用 read_attachment 工具读（xlsx/docx 都能读），或 Read：${localPath}`
+        : `[文件附件「${parsed.file_name ?? "未命名"}」] 已备份到本地，默认不读——需要时再 Read：${localPath}`;
     } catch (e) {
       process.stderr.write(
         `[chat-message] 文件处理失败 msg_id=${payload.message_id}: ${e instanceof Error ? e.message : e}\n`,
@@ -284,7 +289,7 @@ export async function handleInboundMessage(
         const imagePaths: string[] = [];
         for (const imgKey of allImageKeys) {
           try {
-            imagePaths.push(await saveInboundImage(payload.message_id, imgKey));
+            imagePaths.push(await saveInboundImage(payload.message_id, imgKey, chatId));
           } catch (imgErr) {
             process.stderr.write(
               `[chat-message] post 内嵌图片下载失败 key=${imgKey}: ${imgErr instanceof Error ? imgErr.message : imgErr}\n`,
@@ -303,7 +308,7 @@ export async function handleInboundMessage(
         const imagePaths: string[] = [];
         for (const imgKey of sdkImageKeys) {
           try {
-            imagePaths.push(await saveInboundImage(payload.message_id, imgKey));
+            imagePaths.push(await saveInboundImage(payload.message_id, imgKey, chatId));
           } catch (imgErr) {
             process.stderr.write(
               `[chat-message] post 内嵌图片下载失败 key=${imgKey}: ${imgErr instanceof Error ? imgErr.message : imgErr}\n`,

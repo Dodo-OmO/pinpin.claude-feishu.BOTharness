@@ -53,6 +53,8 @@ export interface ChannelCliOptions {
   statusLineSinkPath: string;
   /** 自动压缩阈值（上下文用量百分比）。缺省走 DEFAULT_AUTOCOMPACT_PCT；注入子 CLI 的 CLAUDE_AUTOCOMPACT_PCT_OVERRIDE。 */
   autoCompactPct?: number;
+  /** fast 模式（Opus 加速输出）。true 时把 fastMode:true 合并进 --settings JSON（自动切 Opus、扣 usage credits）。 */
+  fast?: boolean;
 }
 
 export type ChannelCliStatus = 'starting' | 'running' | 'stopped' | 'failed';
@@ -100,11 +102,14 @@ export class ChannelCli extends EventEmitter {
 
     // P1.3: 内联 statusLine JSON 注入（--settings 接 file-or-JSON-string）
     // 不污染 vault settings.json；sink script 收 stdin JSON 通过 TCP 推 supervisor
+    // fast 开时把 fastMode:true 合并进同一个 --settings JSON（与 statusLine 并存，不另加 --settings）。
+    // fastMode 是唯一程序化开 fast 的途径（无 --fast flag/env）；fast 自动切 Opus、扣 usage credits。
     const statusLineCfg = JSON.stringify({
       statusLine: {
         type: 'command',
         command: `node "${this.opts.statusLineSinkPath}" --chat-id=${this.opts.chatId}`,
       },
+      ...(this.opts.fast ? { fastMode: true } : {}),
     });
 
     // 开场白注入：生成完整人格/协议/记忆/画像/心境写临时文件，--append-system-prompt-file 注入。
@@ -345,6 +350,11 @@ export class ChannelCli extends EventEmitter {
     this.opts.autoCompactPct = pct;
   }
 
+  /** 切换 fast；只改 opts.fast，下次 spawn/restart 生效（fast 仅 spawn 时经 --settings 注入） */
+  setFast(fast: boolean): void {
+    this.opts.fast = fast;
+  }
+
   /** 启动器终端窗口 attach：consumer 收 PTY ring buffer 全量 + 实时 onData */
   attachTerminal(consumer: (data: string) => void): void {
     this.pty?.attach(consumer);
@@ -364,6 +374,7 @@ export class ChannelCli extends EventEmitter {
     model: string;
     effort: string;
     autoCompactPct: number;
+    fast: boolean;
     session_id?: string;
   } {
     const ptyStats = this.pty?.getStats();
@@ -377,6 +388,7 @@ export class ChannelCli extends EventEmitter {
       model: this.opts.model,
       effort: this.opts.effort,
       autoCompactPct: this.opts.autoCompactPct ?? DEFAULT_AUTOCOMPACT_PCT,
+      fast: this.opts.fast ?? false,
       session_id: this._sessionId || undefined,
     };
   }

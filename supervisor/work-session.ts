@@ -58,6 +58,8 @@ export interface WorkSessionOptions {
   supervisorPort: number;
   /** 批2: work-stop-sink.cjs 绝对路径（spawn 时经 --settings hooks.Stop 注入完工信号 hook） */
   stopSinkPath: string;
+  /** fast 模式（Opus 加速输出）。true 时把 fastMode:true 合并进 work CLI 的 --settings JSON。 */
+  fast?: boolean;
 }
 
 export type WorkSessionStatus = 'starting' | 'running' | 'stopped' | 'failed';
@@ -227,6 +229,7 @@ export class WorkSession extends EventEmitter {
     const stopHookCmd = `node "${this.opts.stopSinkPath.replace(/\\/g, '/')}" --ws-id=${this.id}`;
     const settingsJson = JSON.stringify({
       hooks: { Stop: [{ hooks: [{ type: 'command', command: stopHookCmd }] }] },
+      ...(this.opts.fast ? { fastMode: true } : {}),
     });
 
     const args = [
@@ -564,6 +567,7 @@ export class WorkSession extends EventEmitter {
     uptime_ms: number;
     model: string;
     effort: string;
+    fast: boolean;
     /** D3: claude --session-id 的 UUID（jsonl 文件名 = <claude_session_id>.jsonl） */
     claude_session_id: string;
     /** Q4 续: 上下文用量（jsonl assistant.usage 实时解析） */
@@ -580,6 +584,7 @@ export class WorkSession extends EventEmitter {
       uptime_ms: this.startedAt ? Date.now() - this.startedAt : 0,
       model: this.opts.model,
       effort: this.opts.effort,
+      fast: this.opts.fast ?? false,
       claude_session_id: this.sessionId,
       context_tokens: this.latestUsage?.context_tokens,
       context_window_size: this.latestUsage?.context_window_size,

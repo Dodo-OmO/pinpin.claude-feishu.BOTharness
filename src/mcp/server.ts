@@ -73,6 +73,8 @@ import { sendBriefingCardTool, handleSendBriefingCard } from './tools/send-brief
 import { memoryAuditReadTool, handleMemoryAuditRead } from './tools/memory-audit-read.js';
 import { memoryRewriteTool, handleMemoryRewrite } from './tools/memory-rewrite.js';
 import { createCloudDocTool, handleCreateCloudDoc } from './tools/create-cloud-doc.js';
+import { readAttachmentTool, handleReadAttachment } from './tools/read-attachment.js';
+import { readCloudDocTool, handleReadCloudDoc, editCloudDocTool, handleEditCloudDoc } from './tools/cloud-doc-rw.js';
 import { writeJourneyLogTool, handleWriteJourneyLog } from './tools/write-journey-log.js';
 import { triggerFreeActivityTool, handleTriggerFreeActivity } from './tools/trigger-free-activity.js';
 // 阶段 4 批次 3 tools（6 个）
@@ -176,6 +178,9 @@ async function main() {
       memoryAuditReadTool,
       memoryRewriteTool,
       createCloudDocTool,
+      readCloudDocTool,
+      editCloudDocTool,
+      readAttachmentTool,
       writeJourneyLogTool,
       triggerFreeActivityTool,
       // 阶段 4 批次 3（6 个）
@@ -266,6 +271,12 @@ async function main() {
         return handleMemoryRewrite(args as unknown as Parameters<typeof handleMemoryRewrite>[0]);
       case 'create_cloud_doc':
         return handleCreateCloudDoc(args as unknown as Parameters<typeof handleCreateCloudDoc>[0]);
+      case 'read_attachment':
+        return handleReadAttachment(args as unknown as Parameters<typeof handleReadAttachment>[0]);
+      case 'read_cloud_doc':
+        return handleReadCloudDoc(args as unknown as Parameters<typeof handleReadCloudDoc>[0]);
+      case 'edit_cloud_doc':
+        return handleEditCloudDoc(args as unknown as Parameters<typeof handleEditCloudDoc>[0]);
       case 'write_journey_log':
         return handleWriteJourneyLog(args as unknown as Parameters<typeof handleWriteJourneyLog>[0]);
       case 'trigger_free_activity':

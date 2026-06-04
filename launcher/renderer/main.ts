@@ -66,6 +66,8 @@ interface AppSettings {
   default_effort: string;
   work_default_model: string;
   work_default_effort: string;
+  work_default_fast: boolean;
+  default_fast: boolean;
   default_compact_pct: number;
 }
 
@@ -270,6 +272,14 @@ function renderChannels(): void {
         void window.pinpin.channel.setCompactThreshold(cid, v);
       });
     });
+    // fast 勾选框（checkbox）——运行中 disabled，change 时存
+    row.querySelectorAll<HTMLInputElement>('input[data-channel-config="fast"]').forEach((inp) => {
+      inp.addEventListener('change', () => {
+        const cid = inp.getAttribute('data-chat-id');
+        if (!cid) return;
+        void window.pinpin.channel.setFast(cid, inp.checked);
+      });
+    });
   }
   const count = document.getElementById('channels-count');
   if (count) {
@@ -334,6 +344,8 @@ function renderChannelCard(c: ChannelStatusInfo): string {
         <div class="v"><select class="card-select effort-select ${effortClass(c.effort)}" data-channel-config="effort" data-chat-id="${c.chat_id}" ${isRunning ? 'disabled' : ''} title="${lockTitle}">${effortOptions}</select></div>
         <div class="k">压缩%</div>
         <div class="v"><input class="card-num" type="number" min="20" max="50" step="1" data-channel-config="compact" data-chat-id="${c.chat_id}" value="${c.autoCompactPct ?? 25}" ${isRunning ? 'disabled' : ''} title="${isRunning ? lockTitle : '用到上下文百分之几就自动压缩(20-50)，改完重启该频道生效'}"></div>
+        <div class="k">fast</div>
+        <div class="v"><input type="checkbox" data-channel-config="fast" data-chat-id="${c.chat_id}" ${c.fast ? 'checked' : ''} ${isRunning ? 'disabled' : ''} title="${isRunning ? lockTitle : 'Opus 加速输出，改完重启该频道生效（只 Opus、额外扣 usage 额度）'}"></div>
         <div class="k">上下文</div><div class="v ${ctxPctClass(c.context_pct)}">${fmtCtxLine(c)}</div>
         <div class="k">启动</div><div class="v">${fmtStartedAt(c)}</div>
       </div>
@@ -579,10 +591,12 @@ async function init(): Promise<void> {
     const e = (document.getElementById('default-effort') as HTMLSelectElement).value;
     const wm = (document.getElementById('work-default-model') as HTMLSelectElement).value;
     const we = (document.getElementById('work-default-effort') as HTMLSelectElement).value;
+    const wf = (document.getElementById('work-default-fast') as HTMLInputElement | null)?.checked ?? false;
+    const df = (document.getElementById('default-fast') as HTMLInputElement | null)?.checked ?? false;
     let dc = Math.round(Number((document.getElementById('default-compact') as HTMLInputElement).value));
     if (!Number.isFinite(dc)) dc = 25;
     dc = Math.max(20, Math.min(50, dc));
-    await window.pinpin.settings.set({ default_model: m, default_effort: e, work_default_model: wm, work_default_effort: we, default_compact_pct: dc });
+    await window.pinpin.settings.set({ default_model: m, default_effort: e, work_default_model: wm, work_default_effort: we, work_default_fast: wf, default_fast: df, default_compact_pct: dc });
   });
   // footer btn
   // 确认对话框已移到 main process 的 ipcMain.handle('app.restart-bot') 里（dialog.showMessageBox），
@@ -632,6 +646,10 @@ async function init(): Promise<void> {
     const wdm = document.getElementById('work-default-model') as HTMLSelectElement;
     wdm.innerHTML = buildModelOptions(s.work_default_model);
     (document.getElementById('work-default-effort') as HTMLSelectElement).value = s.work_default_effort;
+    const wdf = document.getElementById('work-default-fast') as HTMLInputElement | null;
+    if (wdf) wdf.checked = !!s.work_default_fast;
+    const ndf = document.getElementById('default-fast') as HTMLInputElement | null;
+    if (ndf) ndf.checked = !!s.default_fast;
     (document.getElementById('default-compact') as HTMLInputElement).value = String(s.default_compact_pct ?? 25);
   } catch { /* ignore */ }
 

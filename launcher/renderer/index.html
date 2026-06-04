@@ -134,6 +134,10 @@
           <input id="default-compact" type="number" min="20" max="50" step="1" value="25">
         </div>
         <div class="settings-row">
+          <label>新频道默认 fast（Opus 加速输出，额外扣 usage 额度）</label>
+          <input id="default-fast" type="checkbox">
+        </div>
+        <div class="settings-row">
           <label>work session 默认模型</label>
           <select id="work-default-model"></select>
         </div>
@@ -146,6 +150,10 @@
             <option value="xhigh">xhigh</option>
             <option value="max">max</option>
           </select>
+        </div>
+        <div class="settings-row">
+          <label>workCLI 默认 fast（Opus 加速输出，额外扣 usage 额度）</label>
+          <input id="work-default-fast" type="checkbox">
         </div>
         <button class="btn-big primary" id="save-settings">保存</button>
         <p class="settings-hint">注：全局默认保存后即时写入 channel-config.json，重启生效（仅影响新建群的默认值）。</p>

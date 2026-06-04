@@ -74,6 +74,8 @@ export interface SupervisorOptions {
   defaultEffort?: string;
   /** 频道 CLI 默认自动压缩阈值（上下文用量百分比）。新群 spawn 时 fallback。 */
   defaultAutoCompactPct?: number;
+  /** 频道 CLI 默认 fast 模式。新群 spawn 时 fallback（per-channel 未配时用）。 */
+  defaultFast?: boolean;
 }
 
 /** 完工提醒去重窗口：'stopped' 由 Stop hook 主路径 + idle 兜底两条发出，各自靠文本身份去重，
@@ -117,6 +119,8 @@ export class Supervisor extends EventEmitter {
   /** work session 独立默认 model/effort（启动时从 channel-config.json __work_defaults__ load；null = fallback 频道默认） */
   private workDefaultModel: string | null = null;
   private workDefaultEffort: string | null = null;
+  /** work session 默认 fast（启动时从 __work_defaults__ load；null = 不开） */
+  private workDefaultFast: boolean | null = null;
   private started = false;
   /** 批3: 频道暂停态——构造器默认 true（启动器打开后不自动开启任何频道，完全静默）。
    *  startAllChannels()（「开启所有」按钮）置 false 后才自动 spawn；stop() 不重置它，
@@ -157,10 +161,12 @@ export class Supervisor extends EventEmitter {
     if (persistedDefaults?.model) this.opts.defaultModel = persistedDefaults.model;
     if (persistedDefaults?.effort) this.opts.defaultEffort = persistedDefaults.effort;
     if (persistedDefaults?.autoCompactPct) this.opts.defaultAutoCompactPct = persistedDefaults.autoCompactPct;
+    if (persistedDefaults?.fast !== undefined) this.opts.defaultFast = persistedDefaults.fast;
     // work session 独立默认（无 persisted → null，spawn 时 fallback 频道默认）
     const persistedWorkDefaults = this.channelConfigStore.getWorkDefaults();
     this.workDefaultModel = persistedWorkDefaults?.model ?? null;
     this.workDefaultEffort = persistedWorkDefaults?.effort ?? null;
+    this.workDefaultFast = persistedWorkDefaults?.fast ?? null;
 
     // ── 1. DB ──
     // 方案A：supervisor 自身**不再**碰 DB（彻底卸 better-sqlite3，根治 Electron v130 vs 子进程 v137
@@ -241,6 +247,7 @@ export class Supervisor extends EventEmitter {
         goal: p.goal,
         model: p.model || this.workDefaultModel || this.opts.defaultModel,
         effort: p.effort || this.workDefaultEffort || 'high',
+        fast: this.workDefaultFast ?? false,
         // 批2: work CLI 的 Stop hook 靠 env 端口回连 supervisor（仿 channel-cli 显式注入，不能靠 process.env 继承）
         supervisorPort: this.ipcServer.getPort(),
         stopSinkPath: path.join(this.opts.appRoot, 'scripts', 'work-stop-sink.cjs'),
@@ -563,6 +570,7 @@ export class Supervisor extends EventEmitter {
         model: persisted?.model ?? this.opts.defaultModel,
         effort: persisted?.effort ?? this.opts.defaultEffort ?? 'high',
         autoCompactPct: persisted?.autoCompactPct ?? this.opts.defaultAutoCompactPct ?? DEFAULT_AUTOCOMPACT_PCT,
+        fast: persisted?.fast ?? this.opts.defaultFast ?? false,
         session_id: undefined,
       });
     }
@@ -619,6 +627,7 @@ export class Supervisor extends EventEmitter {
       model: persisted?.model ?? this.opts.defaultModel,
       effort: persisted?.effort ?? this.opts.defaultEffort,
       autoCompactPct: persisted?.autoCompactPct ?? this.opts.defaultAutoCompactPct,
+      fast: persisted?.fast ?? this.opts.defaultFast ?? false,
       supervisorPort: this.ipcServer.getPort(),
       dbPath: this.dbPath,
       // P1.3: statusLine sink 绝对路径
@@ -704,31 +713,35 @@ export class Supervisor extends EventEmitter {
   }
 
   /** P2.2: 改全局默认 model/effort + 持久化。只影响后续 spawn 的新群，不动已 spawn channel */
-  setDefaults(patch: { model?: string; effort?: string; autoCompactPct?: number }): void {
+  setDefaults(patch: { model?: string; effort?: string; autoCompactPct?: number; fast?: boolean }): void {
     if (patch.model !== undefined) this.opts.defaultModel = patch.model;
     if (patch.effort !== undefined) this.opts.defaultEffort = patch.effort;
     if (patch.autoCompactPct !== undefined) this.opts.defaultAutoCompactPct = patch.autoCompactPct;
+    if (patch.fast !== undefined) this.opts.defaultFast = patch.fast;
     this.channelConfigStore.setDefaults(patch);
     process.stderr.write(`[supervisor] defaults set: ${JSON.stringify(patch)}\n`);
   }
 
-  /** work session 默认 model/effort + 持久化。只影响后续 spawn 的 work session，不动已起的 */
-  setWorkDefaults(patch: { model?: string; effort?: string }): void {
+  /** work session 默认 model/effort/fast + 持久化。只影响后续 spawn 的 work session，不动已起的 */
+  setWorkDefaults(patch: { model?: string; effort?: string; fast?: boolean }): void {
     // 空字符串（用户清空输入框保存）不当真实值——过滤掉，让 fallback 链回退到频道默认
-    const clean: { model?: string; effort?: string } = {};
+    const clean: { model?: string; effort?: string; fast?: boolean } = {};
     if (patch.model) clean.model = patch.model;
     if (patch.effort) clean.effort = patch.effort;
+    if (patch.fast !== undefined) clean.fast = patch.fast;
     if (clean.model !== undefined) this.workDefaultModel = clean.model;
     if (clean.effort !== undefined) this.workDefaultEffort = clean.effort;
+    if (clean.fast !== undefined) this.workDefaultFast = clean.fast;
     this.channelConfigStore.setWorkDefaults(clean);
     process.stderr.write(`[supervisor] work defaults set: ${JSON.stringify(clean)}\n`);
   }
 
   /** 暴露 work 默认给 main process settings.get（未设/空时 fallback 频道默认 model / high） */
-  getWorkDefaults(): { model: string; effort: string } {
+  getWorkDefaults(): { model: string; effort: string; fast: boolean } {
     return {
       model: this.workDefaultModel || this.opts.defaultModel,
       effort: this.workDefaultEffort || 'high',
+      fast: this.workDefaultFast ?? false,
     };
   }
 
@@ -738,13 +751,14 @@ export class Supervisor extends EventEmitter {
   }
 
   /** P1.2: 切 channel 配置 + 持久化。channel 在 running 时不强 restart（Owner要求手动控制） */
-  setChannelConfig(chatId: string, patch: { model?: string; effort?: string; autoCompactPct?: number }): void {
+  setChannelConfig(chatId: string, patch: { model?: string; effort?: string; autoCompactPct?: number; fast?: boolean }): void {
     this.channelConfigStore.set(chatId, patch);
     const cli = this.channels.get(chatId);
     if (cli) {
       if (patch.model !== undefined) cli.setModel(patch.model);
       if (patch.effort !== undefined) cli.setEffort(patch.effort);
       if (patch.autoCompactPct !== undefined) cli.setAutoCompactPct(patch.autoCompactPct);
+      if (patch.fast !== undefined) cli.setFast(patch.fast);
     }
     process.stderr.write(`[supervisor] channel config set: ${chatId} ${JSON.stringify(patch)}\n`);
   }

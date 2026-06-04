@@ -39,6 +39,9 @@ export interface ChannelConfig {
   forgotten?: boolean;
   /** 自动压缩阈值（上下文用量百分比，20-50）。缺省走 DEFAULT_AUTOCOMPACT_PCT。改完需重启该频道 CLI 生效。 */
   autoCompactPct?: number;
+  /** fast 模式（Opus 加速输出）。spawn 时注入 --settings 的 fastMode；改完需重启该频道 CLI 生效。
+   *  per-channel / __defaults__ / __work_defaults__ 三处通用。 */
+  fast?: boolean;
 }
 
 export type ChannelConfigMap = Record<string, ChannelConfig>;
