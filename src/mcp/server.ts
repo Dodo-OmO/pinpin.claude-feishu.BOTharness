@@ -64,6 +64,7 @@ import { sendPrivateMessageTool, handleSendPrivateMessage } from './tools/send-p
 import { createGroupTool, handleCreateGroup } from './tools/create-group.js';
 import { disbandGroupTool, handleDisbandGroup } from './tools/disband-group.js';
 import { listActiveChatsTool, handleListActiveChats } from './tools/list-active-chats.js';
+import { listChatTabsTool, handleListChatTabs } from './tools/list-chat-tabs.js';
 import { writeDiaryTool, handleWriteDiary } from './tools/write-diary.js';
 import { writeWeeklyRecapTool, handleWriteWeeklyRecap } from './tools/write-weekly-recap.js';
 import { readPushedNewsUrlsTool, handleReadPushedNewsUrls } from './tools/read-pushed-news-urls.js';
@@ -169,6 +170,7 @@ async function main() {
       // 阶段 4 批次 2（13 个）
       sendPrivateMessageTool,
       listActiveChatsTool,
+      listChatTabsTool,
       writeDiaryTool,
       writeWeeklyRecapTool,
       readPushedNewsUrlsTool,
@@ -253,6 +255,8 @@ async function main() {
         return handleDisbandGroup(args as unknown as Parameters<typeof handleDisbandGroup>[0]);
       case 'list_active_chats':
         return handleListActiveChats();
+      case 'list_chat_tabs':
+        return handleListChatTabs(args as unknown as Parameters<typeof handleListChatTabs>[0]);
       case 'write_diary':
         return handleWriteDiary(args as unknown as Parameters<typeof handleWriteDiary>[0]);
       case 'write_weekly_recap':
