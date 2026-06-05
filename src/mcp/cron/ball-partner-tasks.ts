@@ -1,4 +1,4 @@
-// 示例工作群每日任务提醒 cron：每天 10:00 / 16:00 / 20:00 / 0:00 推 trigger，
+// 示例工作群每日任务提醒 cron：每天 10:00 / 21:00 推 trigger，
 // 让品品盘点《每日安排》云文档未完成待办、在群里 @所有人 提醒。只在示例工作组 CLI 注册（isOwnerOfCron 兜底防多进程重复）。
 
 import { registerCron } from "./registry.js";
@@ -9,9 +9,7 @@ const BALL_CHAT = process.env.BALL_PARTNER_CHAT_ID ?? "";
 
 const SLOTS: { h: number; label: string }[] = [
   { h: 10, label: "上午 10 点" },
-  { h: 16, label: "下午 4 点" },
-  { h: 20, label: "晚上 8 点" },
-  { h: 0, label: "零点" },
+  { h: 21, label: "晚上 9 点" },
 ];
 
 if (isOwnerOfCron("ballpartner")) {
