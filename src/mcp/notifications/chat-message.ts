@@ -92,6 +92,8 @@ const VOICE_DICE_THRESHOLD = 0.1;
 // 防串台 envelope 钉频：真人/bot 入站每 N 条钉一次表态提醒（per-chat 计数、进程内，重启重置）
 const REPLY_DISCIPLINE_EVERY = 20;
 const inboundReplyCount = new Map<string, number>();
+// 示例工作组频道专属维护自检提醒：与回复纪律同周期但错开半个间隔（回复在第 1/21/41，维护在第 11/31/51），不挤同一条
+const BALL_MAINTAIN_OFFSET = REPLY_DISCIPLINE_EVERY / 2;
 
 let botAppId = "";
 export function setBotAppId(appId: string): void {
@@ -379,6 +381,11 @@ export async function handleInboundMessage(
     (replyCnt - 1) % REPLY_DISCIPLINE_EVERY === 0
       ? "\n\n[开启每轮新消息回应时，可直接打 text 当内思锚点（用户看不到）。每轮至少调一个表态工具：要回 → pinpin_reply_text / pinpin_reply_voice / pinpin_react（支持多选/重选/单选）；都不回 → 调 pinpin_no_reply 。]"
       : "";
+  // 示例工作组频道专属：每 REPLY_DISCIPLINE_EVERY 条钉一次维护自检，错开回复纪律半个间隔
+  const maintenanceReminder =
+    isBallPartner(chatId) && (replyCnt - 1) % REPLY_DISCIPLINE_EVERY === BALL_MAINTAIN_OFFSET
+      ? "\n\n[随手自检：有没有新的执行/台本侧要求该落进本地 MD？本群 todo 有没有新进展该维护？→ 维护完群里吱一声。]"
+      : "";
   // parent_id 两种形态：poll 路径在 raw.parent_id（顶层），WSClient 路径在 raw.message.parent_id
   const parentId =
     raw?.parent_id ??
@@ -420,7 +427,7 @@ export async function handleInboundMessage(
     await server.notification({
       method: "notifications/claude/channel",
       params: {
-        content: text + voiceDirective + replyDiscipline,
+        content: text + voiceDirective + replyDiscipline + maintenanceReminder,
         meta: {
           source: "feishu-channel",
           chat_id: chatId,
