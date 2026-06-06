@@ -447,6 +447,12 @@ async function main() {
     ipcClient.on('feishu-message', (p: { message: Parameters<typeof handleInboundMessage>[1] }) => {
       void handleInboundMessage(server, p.message);
     });
+    // 重连兜底耗尽（supervisor 彻底失联）才会触发——不退出进程，保住上下文，仅打日志便于排查
+    ipcClient.on('disconnect', () => {
+      process.stderr.write(
+        `[feishu-channel] ⚠️ IPC 彻底失联 (chat=${chatId})，重连已耗尽；降级运行（tools 可用、无入站消息），等 supervisor 重启重建本 CLI\n`,
+      );
+    });
     ipcClient.on('chat-trigger', async (p: { body: string; meta?: Record<string, string> }) => {
       try {
         await server.notification({

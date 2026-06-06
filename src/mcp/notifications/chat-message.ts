@@ -121,6 +121,66 @@ function resolveMentions(text: string, mentions: FeishuMention[] | undefined): s
 }
 
 /**
+ * 飞书 interactive 卡片正文提取——发卡方多为 app/bot（走 poll，raw.body.content 含完整卡片 JSON）。
+ * 真实结构：{title, elements:[[{tag:"text",text},{tag:"a",text,href},{tag:"hr"},{tag:"note",elements:[...]}]]}
+ *   - 顶层 title / header.title 成行（加粗）；elements 二维数组：外层=段落、内层=同段落元素
+ *   - 段落内元素拼接（text 字段自带 \n），段落间换行；递归覆盖 note/column 等嵌套容器
+ * 注：SDK 的 convertInteractive/walkCard 只认 tag:plain_text+content 字段，认不出 tag:text+text 字段
+ *     的卡片（飞书最常见发卡格式），故此处自解析。
+ */
+function extractCardText(rawContent: string): string {
+  let card: Record<string, unknown>;
+  try {
+    card = JSON.parse(rawContent || "{}") as Record<string, unknown>;
+  } catch {
+    return "";
+  }
+  const lines: string[] = [];
+  if (typeof card.title === "string" && card.title.trim()) lines.push(`**${card.title.trim()}**`);
+  if (card.header && typeof card.header === "object") {
+    const ht = cardLineText((card.header as Record<string, unknown>).title);
+    if (ht.trim()) lines.push(`**${ht.trim()}**`);
+  }
+  const elements = card.elements;
+  if (Array.isArray(elements)) {
+    for (const para of elements) {
+      const line = cardLineText(para);
+      if (line.trim()) lines.push(line);
+    }
+  } else if (elements) {
+    const line = cardLineText(elements);
+    if (line.trim()) lines.push(line);
+  }
+  return lines.join("\n").trim();
+}
+
+/** 拼接卡片一个段落/元素的可读文字（同段落元素不换行，text 内 \n 自带换行） */
+function cardLineText(node: unknown): string {
+  if (node == null) return "";
+  if (typeof node === "string") return node;
+  if (Array.isArray(node)) return node.map(cardLineText).join("");
+  if (typeof node !== "object") return "";
+  const obj = node as Record<string, unknown>;
+  const tag = obj.tag;
+  if (tag === "text" || tag === "a") return typeof obj.text === "string" ? obj.text : "";
+  if (tag === "plain_text" || tag === "lark_md" || tag === "md" || tag === "markdown") {
+    if (typeof obj.content === "string") return obj.content;
+    if (typeof obj.text === "string") return obj.text;
+    return "";
+  }
+  if (tag === "hr") return "";
+  // 标准 v2 卡片标题在 header.title（真实卡片多用顶层 title，此处兼容 header 形态）
+  if (obj.header && typeof obj.header === "object") {
+    return cardLineText((obj.header as Record<string, unknown>).title);
+  }
+  if (obj.text && typeof obj.text === "object") return cardLineText(obj.text);
+  for (const key of ["elements", "fields", "columns"]) {
+    if (Array.isArray(obj[key])) return (obj[key] as unknown[]).map(cardLineText).join("");
+  }
+  return "";
+}
+
+/**
  * IPC 入口：supervisor push 来一条飞书消息 → 做完整后处理 + 推 channel notification 给 CLI。
  * 步骤 3 的 src/mcp/server.ts 接 SupervisorClient.on('feishu-message') 后调本函数。
  */
@@ -329,16 +389,10 @@ export async function handleInboundMessage(
     // rawContent 解析出内容优先；解析不出再 fallback SDK 归一化的 payload.text；都没有给兜底（不 DROP）
     text = parsed || payload.text || "[富文本] 收到一条富文本消息（内容解析失败）";
   } else if (payload.msg_type === "interactive") {
-    // 飞书卡片（interactive）。
-    // WSClient 路径：SDK normalize 的 convertInteractive 已提取卡片文本，填入 payload.text。
-    // poll 路径：payload.text = undefined；卡片 JSON 结构复杂不在此深解析，给可读兜底提示。
-    if (payload.text) {
-      // WSClient 路径：SDK 已归一化
-      text = payload.text;
-    } else {
-      // poll 路径兜底（卡片内容以 WSClient 实时推送为主，poll 补漏时通知品品有卡片即可）
-      text = "[卡片消息] 收到一张飞书卡片（内容通过实时推送读取，此为 poll 补漏提示）";
-    }
+    // 飞书卡片（interactive）。发卡方多为 app/bot（走 poll，rawContent=raw.body.content 含完整卡片 JSON）。
+    // 自解析卡片正文（SDK walkCard 认不出 tag:text 结构）；解析不出再 fallback payload.text / 兜底，不 DROP。
+    const cardText = extractCardText(rawContent);
+    text = cardText || payload.text || "[卡片消息] 收到一张卡片（内容解析失败）";
   } else {
     process.stderr.write(
       `[chat-message] 跳过暂不支持的消息类型 msg_id=${payload.message_id} type=${payload.msg_type}\n`,

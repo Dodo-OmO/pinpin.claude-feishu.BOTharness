@@ -8,8 +8,11 @@
  *   3. send hello { chat_id, pid }
  *   4. 监听 inbound NDJSON 行 → 按 method 分发到注册的 listener
  *
- * 断连：supervisor 挂了 / 进程退出 → 子进程不主动重连（本设计假定 supervisor 是 single source of truth；
- * 它挂了所有 child 也无意义独自存活）。setOnDisconnect 让 server.ts 可以决定怎么处理。
+ * 断连：socket 掉线（如 TCP 抖动 ECONNRESET）→ 指数退避自动重连同端口 + 重发 hello，让 supervisor
+ * 重新注册 chat_id（其 client-hello→flushPendingInbound 机制自动补投断线期间缓冲的消息），全程不杀
+ * 本 CLI、不丢上下文。重连 maxReconnectAttempts 次仍失败（= supervisor 真挂了、端口拒连）才 emit
+ * 'disconnect'——此时 supervisor 重启会换端口并 tree-kill 重建本 CLI，故子进程不会对着死端口空转。
+ * shutdown()（优雅退出）置 closedByShutdown 跳过重连。
  */
 
 import net from 'node:net';
@@ -43,6 +46,13 @@ export class SupervisorClient extends EventEmitter {
   private nextRequestId = 1;
   /** 方案A：子端响应"主→子 request"的 handler 注册表（method → handler） */
   private requestHandlers = new Map<string, (params: unknown) => Promise<unknown>>();
+  /** 断线重连状态：连成功清零；close 时若 < max 走退避重连，达 max 才 emit 'disconnect' */
+  private reconnectAttempts = 0;
+  private readonly maxReconnectAttempts = 5;
+  private readonly reconnectBaseMs = 2000; // 退避 2/4/8/16/30s（上限 30s），5 次约 60s
+  private reconnectTimer: NodeJS.Timeout | null = null;
+  /** shutdown() 主动关时置 true，让 close 回调跳过重连 */
+  private closedByShutdown = false;
 
   /** 注册主端 request 的处理器（子端启动时调，如 POLL_VOTE） */
   setRequestHandler(method: string, handler: (params: unknown) => Promise<unknown>): void {
@@ -83,27 +93,84 @@ export class SupervisorClient extends EventEmitter {
 
   async connect(): Promise<void> {
     return new Promise((resolveConnect, reject) => {
-      this.socket = net.createConnection({ host: '127.0.0.1', port: this.port }, () => {
+      const socket = net.createConnection({ host: '127.0.0.1', port: this.port }, () => {
         this.connected = true;
-        const hello: IpcEnvelope<HelloParams> = {
-          method: IPC_METHODS.HELLO,
-          params: { chat_id: this.chatId, pid: process.pid },
-        };
-        this.socket?.write(encodeFrame(hello));
+        this.reconnectAttempts = 0;
+        this.sendHello();
         process.stderr.write(`[ipc-client] connected ${this.chatId} → supervisor:${this.port}\n`);
         resolveConnect();
       });
-      this.socket.on('data', (chunk) => this.onData(chunk));
-      this.socket.on('close', () => {
-        this.connected = false;
-        process.stderr.write(`[ipc-client] disconnected ${this.chatId}\n`);
-        this.emit('disconnect');
-      });
-      this.socket.on('error', (err) => {
-        process.stderr.write(`[ipc-client] socket error: ${err.message}\n`);
-        if (!this.connected) reject(err);
-      });
+      this.socket = socket;
+      this.bindSocketHandlers(socket, reject); // reject 仅首连用（重连无 Promise）
     });
+  }
+
+  /** 发 hello 注册 chat_id（首连 + 每次重连成功都发，触发 supervisor 重新登记 + flush 缓冲消息） */
+  private sendHello(): void {
+    const hello: IpcEnvelope<HelloParams> = {
+      method: IPC_METHODS.HELLO,
+      params: { chat_id: this.chatId, pid: process.pid },
+    };
+    this.socket?.write(encodeFrame(hello));
+  }
+
+  /** 给 socket 绑 data/close/error。close 走重连退避链；error 仅在首连未连上时 reject。 */
+  private bindSocketHandlers(socket: net.Socket, reject?: (err: Error) => void): void {
+    socket.on('data', (chunk) => this.onData(chunk));
+    socket.on('close', () => {
+      if (this.socket !== socket) return; // 旧 socket 迟到的 close（已被新连接替换）→ 忽略，防误触发重连
+      this.connected = false;
+      // 断线时旧 socket 上 in-flight 的 request 必收不到响应了 → 立即 reject，调用方快速失败可重试，
+      // 不必白等 30s 超时（重连成功后 supervisor 也不会重发断线前那批 request 的响应）。
+      this.rejectAllPending('IPC socket closed');
+      if (this.closedByShutdown) {
+        process.stderr.write(`[ipc-client] disconnected ${this.chatId}（shutdown）\n`);
+        return;
+      }
+      if (this.reconnectAttempts < this.maxReconnectAttempts) {
+        this.scheduleReconnect();
+      } else {
+        process.stderr.write(
+          `[ipc-client] ${this.chatId} 重连 ${this.maxReconnectAttempts} 次仍失败 → 彻底失联（supervisor 可能已挂）\n`,
+        );
+        this.emit('disconnect');
+      }
+    });
+    socket.on('error', (err) => {
+      process.stderr.write(`[ipc-client] socket error (${this.chatId}): ${err.message}\n`);
+      if (!this.connected && reject) reject(err);
+    });
+  }
+
+  private scheduleReconnect(): void {
+    this.reconnectAttempts++;
+    const delay = Math.min(this.reconnectBaseMs * 2 ** (this.reconnectAttempts - 1), 30000);
+    process.stderr.write(
+      `[ipc-client] ${this.chatId} 断线，第 ${this.reconnectAttempts}/${this.maxReconnectAttempts} 次重连将在 ${delay}ms 后\n`,
+    );
+    this.reconnectTimer = setTimeout(() => this.tryReconnect(), delay);
+  }
+
+  private tryReconnect(): void {
+    this.reconnectTimer = null;
+    const socket = net.createConnection({ host: '127.0.0.1', port: this.port }, () => {
+      this.connected = true;
+      this.reconnectAttempts = 0;
+      this.buffer = ''; // 清断线前残留的半截帧，防重连后首帧拼接 parse 失败
+      this.sendHello();
+      process.stderr.write(`[ipc-client] ✅ reconnected ${this.chatId} → supervisor:${this.port}\n`);
+    });
+    this.socket = socket;
+    this.bindSocketHandlers(socket); // 无 reject：重连失败靠 close 触发下一轮退避
+  }
+
+  /** reject 并清空所有等响应的 pending request（断线时调，避免调用方白等 30s 超时）。
+   *  注：value.reject 是 request() 里包过的——会先 clearTimeout 再 reject。 */
+  private rejectAllPending(reason: string): void {
+    for (const p of this.pendingRequests.values()) {
+      p.reject(new Error(reason));
+    }
+    this.pendingRequests.clear();
   }
 
   private onData(chunk: Buffer): void {
@@ -180,6 +247,11 @@ export class SupervisorClient extends EventEmitter {
 
   /** 优雅退出 */
   shutdown(): void {
+    this.closedByShutdown = true; // 让 close 回调跳过重连
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
     if (!this.socket) return;
     const bye: IpcEnvelope = {
       method: IPC_METHODS.BYE,
