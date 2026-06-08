@@ -81,6 +81,14 @@ export interface WorkUsage {
   updated_at: number;
 }
 
+/** 码点安全截断——按 Unicode 码点切，绝不切在 surrogate pair 中间
+ *  （切坏 emoji 会留落单 surrogate → 进 peek 历史 / Claude API 请求体 → 400 no low surrogate）*/
+function truncateCp(s: string, n: number, ellipsis = false): string {
+  const cps = Array.from(s);
+  if (cps.length <= n) return s;
+  return cps.slice(0, n).join('') + (ellipsis ? '…' : '');
+}
+
 /** Q5: jsonl 事件 → 人类可读行（终端窗口 + peek tool 共用）。无可读内容返 null 跳过 */
 function translateJsonlEvent(ev: JsonlEvent): string | null {
   const ts = new Date().toTimeString().slice(0, 8);
@@ -91,7 +99,7 @@ function translateJsonlEvent(ev: JsonlEvent): string | null {
     const msg = (ev as { message?: { content?: unknown } }).message;
     const content = msg?.content;
     if (typeof content === 'string') {
-      return `[${ts}] 👤 ${content.slice(0, 300)}`;
+      return `[${ts}] 👤 ${truncateCp(content, 300)}`;
     }
     if (Array.isArray(content)) {
       const lines: string[] = [];
@@ -101,7 +109,7 @@ function translateJsonlEvent(ev: JsonlEvent): string | null {
             ? part.content
             : JSON.stringify(part.content);
           const icon = part.is_error ? '❌' : '✅';
-          lines.push(`[${ts}] ${icon} 结果: ${txt.slice(0, 200)}${txt.length > 200 ? '…' : ''}`);
+          lines.push(`[${ts}] ${icon} 结果: ${truncateCp(txt, 200, true)}`);
         }
       }
       return lines.length > 0 ? lines.join('\n') : null;
@@ -115,11 +123,11 @@ function translateJsonlEvent(ev: JsonlEvent): string | null {
     const lines: string[] = [];
     for (const part of content) {
       if (part.type === 'text' && typeof part.text === 'string' && part.text.trim()) {
-        lines.push(`[${ts}] 💬 ${part.text.slice(0, 300)}`);
+        lines.push(`[${ts}] 💬 ${truncateCp(part.text, 300)}`);
       } else if (part.type === 'tool_use') {
         const name = part.name ?? '?';
         const input = JSON.stringify(part.input ?? {});
-        lines.push(`[${ts}] 🔧 ${name}: ${input.slice(0, 200)}${input.length > 200 ? '…' : ''}`);
+        lines.push(`[${ts}] 🔧 ${name}: ${truncateCp(input, 200, true)}`);
       }
     }
     return lines.length > 0 ? lines.join('\n') : null;
