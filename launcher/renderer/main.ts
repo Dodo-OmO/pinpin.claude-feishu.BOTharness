@@ -23,6 +23,8 @@ interface ChannelStatusInfo {
   model: string;
   effort: string;
   autoCompactPct?: number;
+  /** fast 模式（Opus 加速输出）。 */
+  fast?: boolean;
   // P1.3: per-CLI 上下文用量
   context_pct?: number | null;
   context_tokens?: number | null;
@@ -101,6 +103,7 @@ declare global {
         setModel: (id: string, model: string) => Promise<void>;
         setEffort: (id: string, effort: string) => Promise<void>;
         setCompactThreshold: (id: string, pct: number) => Promise<void>;
+        setFast: (id: string, fast: boolean) => Promise<void>;
         setDisplayName: (id: string, name: string) => Promise<void>;
         forget: (id: string) => Promise<boolean>;
         listForgotten: () => Promise<Array<{ chat_id: string; display_name?: string }>>;

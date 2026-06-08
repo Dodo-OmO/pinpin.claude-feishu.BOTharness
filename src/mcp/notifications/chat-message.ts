@@ -210,7 +210,7 @@ export async function handleInboundMessage(
   // 按消息类型解析正文：
   //   text  → 直取（含 mention 可读化）
   //   image → 下载 + sharp 压缩存盘 → 注入"图片附件 + 本地路径"（品品可 Read 看，已压缩省 token）
-  //   file  → 下载存盘 → 注入"已备份未读 + 本地路径"（默认不读，需要时再 Read）
+  //   file  → OWNER 发的跳过存档（仅注入提示）/ 他人发的下载存盘 → 注入本地路径（默认不读，需要时再 Read）
   //   其它（audio/post/sticker 等）→ 跳过（voice STT 不在 D 范围）
   const raw = payload.raw as FeishuRawMessage | undefined;
   // 入站 raw 两种形态：poll 路径=message.list item（内容在 body.content）；
@@ -250,10 +250,17 @@ export async function handleInboundMessage(
     try {
       const parsed = JSON.parse(rawContent || "{}") as { file_key?: string; file_name?: string };
       if (!parsed.file_key) return;
-      const localPath = await saveInboundFile(payload.message_id, parsed.file_key, parsed.file_name ?? "file", chatId);
-      text = isBallPartner(chatId)
-        ? `[文件附件「${parsed.file_name ?? "未命名"}」] 已存本地——需要看内容就用 read_attachment 工具读（xlsx/docx 都能读），或 Read：${localPath}`
-        : `[文件附件「${parsed.file_name ?? "未命名"}」] 已备份到本地，默认不读——需要时再 Read：${localPath}`;
+      // Owner（OWNER）自己发的文件不自动存档——她本机已有，存档=冗余（2026-06-08 拍板）。
+      // env 未配则 fail-safe 回落照旧存（避免误把所有人文件都跳过）。图片/语音不受此约束。
+      const ownerOpenId = process.env.FEISHU_OWNER_OPEN_ID;
+      if (ownerOpenId && senderOpenId === ownerOpenId) {
+        text = `[文件附件「${parsed.file_name ?? "未命名"}」] 你发的文件，按设置未自动存档。`;
+      } else {
+        const localPath = await saveInboundFile(payload.message_id, parsed.file_key, parsed.file_name ?? "file", chatId);
+        text = isBallPartner(chatId)
+          ? `[文件附件「${parsed.file_name ?? "未命名"}」] 已存本地——需要看内容就用 read_attachment 工具读（xlsx/docx 都能读），或 Read：${localPath}`
+          : `[文件附件「${parsed.file_name ?? "未命名"}」] 已备份到本地，默认不读——需要时再 Read：${localPath}`;
+      }
     } catch (e) {
       process.stderr.write(
         `[chat-message] 文件处理失败 msg_id=${payload.message_id}: ${e instanceof Error ? e.message : e}\n`,

@@ -1,5 +1,5 @@
 /**
- * ccusage Poller —— 后台每 5min spawn `npx ccusage@latest <subcmd> --json` 拉 quota 数据，
+ * ccusage Poller —— 后台每 5min spawn `npx ccusage@<pin版本> <subcmd> --json` 拉 quota 数据，
  * 解析后 emit 给 supervisor，supervisor 转 IPC push 给启动器 footer chip。
  *
  * 三个 subcmd：
@@ -17,7 +17,12 @@ import { spawn } from 'node:child_process';
 import { EventEmitter } from 'node:events';
 import type { RateLimits } from '../src/ipc/protocol.js';
 
-const SPAWN_TIMEOUT_MS = 30000;
+const SPAWN_TIMEOUT_MS = 60000;
+
+// 钉死版本号（不用 @latest）：@latest 每次 spawn 都回 npm registry 校验最新版，
+// 实测冷调用卡 21.5s 逼近超时线、网络拥堵即破 30s 报 timeout。pin 版本走 npx 纯缓存
+// 不再联网，稳态 ~5s（纯 ccusage 读 transcript 计算耗时）。升 ccusage 改这里一行。
+const CCUSAGE_VERSION = '20.0.6';
 
 export interface CcusageBlock {
   /** 当前 5h 滚动窗口已用 token（百分比/重置时刻改由 statusLine rate_limits 提供，ccusage 仅供 token 数） */
@@ -50,7 +55,7 @@ async function runCcusageSubcommand(subcmd: 'blocks' | 'weekly' | 'daily'): Prom
   return new Promise((resolve, reject) => {
     const proc = spawn(process.platform === 'win32' ? 'npx.cmd' : 'npx', [
       '-y',
-      'ccusage@latest',
+      `ccusage@${CCUSAGE_VERSION}`,
       subcmd,
       '--json',
     ], {
@@ -89,7 +94,7 @@ async function runCcusageSubcommand(subcmd: 'blocks' | 'weekly' | 'daily'): Prom
 }
 
 /** 把 ccusage 各 subcmd 的 JSON 映射成 quota chip 扁平结构。
- *  实测 ccusage@latest blocks --json 输出 schema:
+ *  实测 ccusage 20.0.6 blocks --json 输出 schema:
  *    { blocks: [{ id, startTime, endTime, isActive, totalTokens, costUSD,
  *                 tokenCounts: { inputTokens, outputTokens, cacheCreationInputTokens, cacheReadInputTokens },
  *                 models, entries, burnRate, projection, ... }] }

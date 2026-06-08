@@ -135,6 +135,7 @@ export class Supervisor extends EventEmitter {
       defaultModel: 'claude-opus-4-8 [1m]',
       defaultEffort: 'high',
       defaultAutoCompactPct: DEFAULT_AUTOCOMPACT_PCT,
+      defaultFast: false,
       ...opts,
     };
     this.ipcServer = new IpcServer();
