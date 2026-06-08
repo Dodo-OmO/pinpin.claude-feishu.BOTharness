@@ -58,6 +58,14 @@ export function splitMessage(text: string): string[] {
     if (splitAt === -1 || splitAt < MAX_SINGLE_MESSAGE_LENGTH / 2) {
       splitAt = MAX_SINGLE_MESSAGE_LENGTH;
     }
+    // 避免切在 surrogate pair 中间（high 在 splitAt-1、low 在 splitAt）→ 否则飞书显示半个 emoji 乱码
+    if (
+      splitAt < remaining.length &&
+      remaining.charCodeAt(splitAt - 1) >= 0xd800 && remaining.charCodeAt(splitAt - 1) <= 0xdbff &&
+      remaining.charCodeAt(splitAt) >= 0xdc00 && remaining.charCodeAt(splitAt) <= 0xdfff
+    ) {
+      splitAt -= 1;
+    }
 
     let chunk = remaining.slice(0, splitAt);
     remaining = remaining.slice(splitAt);
