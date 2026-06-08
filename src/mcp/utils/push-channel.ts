@@ -7,6 +7,7 @@
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { randomUUID } from "node:crypto";
 import { logBackground } from "./background-log.js";
+import { sanitizeChannelParams } from "./sanitize-surrogates.js";
 
 // 方案 A §22 PoC-5 修复：trigger channel 让 LLM 必响应
 // 文档明确 meta value 必须是 string（"Record<string, string>"）+ key 必须 identifier
@@ -81,10 +82,7 @@ export async function pushChannelTrigger(
 
     await serverRef.notification({
       method: "notifications/claude/channel",
-      params: {
-        content: payload.body,
-        meta,
-      },
+      params: sanitizeChannelParams(payload.body, meta),
     });
     logBackground("push-channel", `trigger=${payload.trigger}${payload.chat_id ? ` chat=${payload.chat_id}` : ""}`);
   } catch (e) {

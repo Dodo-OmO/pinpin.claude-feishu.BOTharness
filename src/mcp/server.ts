@@ -13,6 +13,7 @@ import { setSupervisorClient } from '../ipc/client-singleton.js';
 import { IPC_METHODS, type PollVoteParams, type PollVoteResult } from '../ipc/protocol.js';
 import { getDiyPoll, upsertPollVote, countPollVotes } from './db/database.js';
 import { initFeishuClient } from './tools/feishu-send.js';
+import { sanitizeToolResult, sanitizeChannelParams } from './utils/sanitize-surrogates.js';
 // 阶段 5 步骤 4：诉求 B 传话筒 3 tools
 import {
   pinpinSpawnWorkSessionTool,
@@ -240,6 +241,8 @@ async function main() {
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const { name, arguments: args } = request.params;
+    // 总闸门：所有 tool 返回送进 Claude 前净化落单 surrogate（防半 emoji 致 API 400）
+    const result = await (async () => {
     switch (name) {
       // 阶段 3 批 2 新 4 tool
       case 'pinpin_reply_text':
@@ -380,6 +383,8 @@ async function main() {
           content: [{ type: 'text' as const, text: `未知 tool: ${name}（可用：pinpin_reply_text / pinpin_reply_voice / pinpin_react / pinpin_memorize）` }],
         };
     }
+    })();
+    return sanitizeToolResult(result);
   });
 
   // ── 飞书 Client 初始化 ──
@@ -457,7 +462,7 @@ async function main() {
       try {
         await server.notification({
           method: 'notifications/claude/channel',
-          params: { content: p.body, meta: { source: 'feishu-channel', chat_id: chatId, ...(p.meta ?? {}) } },
+          params: sanitizeChannelParams(p.body, { source: 'feishu-channel', chat_id: chatId, ...(p.meta ?? {}) }),
         });
       } catch (e) {
         process.stderr.write(`[feishu-channel] chat-trigger notification 失败: ${e instanceof Error ? e.message : e}\n`);
@@ -482,16 +487,13 @@ async function main() {
           `它停下工作了， pinpin_peek_work_session 查看本turn全程，然后用你自己的话把最新进展飞书汇报给Owner。不必深度思考。`;
         await server.notification({
           method: 'notifications/claude/channel',
-          params: {
-            content: summary,
-            meta: {
-              source: 'feishu-channel',
-              chat_id: chatId,
-              trigger: 'work-stopped',
-              session_id: p.session_id,
-              is_error: String(p.is_error),
-            },
-          },
+          params: sanitizeChannelParams(summary, {
+            source: 'feishu-channel',
+            chat_id: chatId,
+            trigger: 'work-stopped',
+            session_id: p.session_id,
+            is_error: String(p.is_error),
+          }),
         });
       } catch (e) {
         process.stderr.write(`[feishu-channel] work-stopped notification 失败: ${e instanceof Error ? e.message : e}\n`);

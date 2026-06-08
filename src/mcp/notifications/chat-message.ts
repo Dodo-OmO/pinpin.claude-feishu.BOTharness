@@ -25,6 +25,7 @@ import { markInboundChat } from "../chat-activity.js";
 import { resolveReplyQuote } from "../utils/reply-quote.js";
 import { appendUserMessage, setChatNameCache, appendRestartHeading } from "../utils/chat-log.js";
 import { pushChannelTrigger } from "../utils/push-channel.js";
+import { sanitizeChannelParams } from "../utils/sanitize-surrogates.js";
 import {
   listPendingSpeakWatchByOpenId,
   findPendingRelayJobByWatcher,
@@ -480,19 +481,16 @@ export async function handleInboundMessage(
   try {
     await server.notification({
       method: "notifications/claude/channel",
-      params: {
-        content: text + voiceDirective + replyDiscipline + maintenanceReminder,
-        meta: {
-          source: "feishu-channel",
-          chat_id: chatId,
-          message_id: payload.message_id,
-          user: senderName,
-          sender_type: isBot ? "bot" : "human",
-          user_open_id: senderOpenId,
-          ...(replyToQuote ? { reply_to_quote: replyToQuote } : {}),
-          ts: fmtLocalTime(Number(payload.create_time_ms)),  // 这条消息的发送时间（含日期，可读本地时间）
-        },
-      },
+      params: sanitizeChannelParams(text + voiceDirective + replyDiscipline + maintenanceReminder, {
+        source: "feishu-channel",
+        chat_id: chatId,
+        message_id: payload.message_id,
+        user: senderName,
+        sender_type: isBot ? "bot" : "human",
+        user_open_id: senderOpenId,
+        ...(replyToQuote ? { reply_to_quote: replyToQuote } : {}),
+        ts: fmtLocalTime(Number(payload.create_time_ms)),  // 这条消息的发送时间（含日期，可读本地时间）
+      }),
     });
   } catch (e) {
     process.stderr.write(
