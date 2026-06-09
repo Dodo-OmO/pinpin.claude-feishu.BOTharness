@@ -1,10 +1,9 @@
 // 任务D：品品发本地文件/图片到飞书群
 // 自动判别：图片扩展名 → 走图片消息（群里直接显示）；其它 → 走文件消息。
-// 可发任意确知频道（不限当前活跃）；安全白名单仍限制只能发 vault/系统临时目录文件。
+// 可发任意确知频道（不限当前活跃）+ 任意本地路径文件；仅黑名单挡凭据/密钥文件。
 
 import fs from "node:fs";
 import path from "node:path";
-import os from "node:os";
 import {
   uploadImage,
   sendImage,
@@ -12,18 +11,22 @@ import {
   sendFile,
 } from "./feishu-send.js";
 import { appendBotReply } from "../utils/chat-log.js";
-import { getVaultRoot } from "../utils/helper.js";
 
-// 安全白名单：只允许发 vault 或系统临时目录里的文件——挡住被社工诱导把
-// .env / .feishu-user-token.json 等凭据文件（在代码包目录）误发到群里（群里不可撤回）。
-const ALLOWED_ROOTS = [
-  getVaultRoot(),
-  os.tmpdir(),
-].map((r) => path.resolve(r));
+// 凭据/密钥黑名单：默认放行任意路径文件，只挡这些一旦误发进群（不可撤回）就泄密的——
+// 挡住被社工诱导把 .env / 飞书 token / 私钥等凭据发到群里。工作文件（.docx/.png 等）一律放行。
+const BLOCKED_EXTS = new Set([".pem", ".key", ".pfx", ".p12"]); // 私钥/证书
+const BLOCKED_NAMES = new Set([
+  ".feishu-user-token.json",
+  ".envrc", "credentials", // direnv 环境 / 云凭据文件
+  "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", // SSH 私钥
+]);
 
-function isAllowedPath(p: string): boolean {
-  const resolved = path.resolve(p);
-  return ALLOWED_ROOTS.some((root) => resolved === root || resolved.startsWith(root + path.sep));
+export function isBlockedCredentialFile(p: string): boolean {
+  const name = path.basename(p).toLowerCase();
+  if (name === ".env" || name.startsWith(".env.")) return true; // .env / .env.local 等
+  if (BLOCKED_NAMES.has(name)) return true;
+  if (BLOCKED_EXTS.has(path.extname(name))) return true;
+  return false;
 }
 
 const IMAGE_EXTS = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"]);
@@ -67,10 +70,10 @@ export async function handlePinpinSendFile(
     return { isError: true, content: [{ type: "text", text: "缺少必填参数 chat_id 或 file_path" }] };
   }
 
-  if (!isAllowedPath(file_path)) {
+  if (isBlockedCredentialFile(file_path)) {
     return {
       isError: true,
-      content: [{ type: "text", text: "只能发 vault 目录或系统临时目录里的文件（防误发配置/凭据文件到群里）。要发别处的，先挪到 vault。" }],
+      content: [{ type: "text", text: "这是凭据/密钥类文件（.env / 飞书 token / 私钥证书等），不能发到群里（群消息撤不回，怕泄密）。" }],
     };
   }
 
