@@ -147,7 +147,7 @@ export class ChannelCli extends EventEmitter {
       '--permission-mode',
       'bypassPermissions',
       '--tools',
-      'Bash,Edit,Read,Write,Glob,Grep,Task,WebFetch,WebSearch,TodoWrite,Skill,AskUserQuestion,NotebookEdit',
+      'Bash,Edit,Read,Write,Glob,Grep,Task,WebFetch,WebSearch,TodoWrite,Skill,AskUserQuestion,NotebookEdit,ToolSearch',
     ];
     for (const a of args) {
       if (a === '-p' || a === '--print') {
@@ -161,6 +161,13 @@ export class ChannelCli extends EventEmitter {
       PINPIN_CHAT_ID: this.opts.chatId,
       PINPIN_SUPERVISOR_PORT: String(this.opts.supervisorPort),
       PINPIN_DB_PATH: this.opts.dbPath,
+      // MCP tool search：强制所有 MCP tool 折叠（按需 ToolSearch 发现），仅 server ListTools 标
+      // app/alwaysLoad 的核心/自动触发工具常驻。省每轮固定 MCP 开销（~40k→~10k）。
+      // true=强制开启（跳过走网络时的 fallback；网络 透传 tool_reference 块）。
+      ENABLE_TOOL_SEARCH: 'true',
+      // 关闭 Claude Code 自动记忆（AutoMem）：品品已有永久记忆50条 + 日记/人物/心境整套记忆系统，
+      // AutoMem 与之重复并行，关掉省启动注入 + 统一到 vault 一套记忆。
+      CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
       // 自动压缩走 CLI 原生 auto-compact：把触发阈值从默认 ~83% 调低到 25%（只能调低不能调高）。
       // CLI 到 25% 就地原生压缩（自动留摘要 + system prompt/人格/CLAUDE.md 从磁盘重注入不丢），
       // 无需 supervisor 监测用量阈值（D-6 手工摘要机制已回滚）。

@@ -158,6 +158,20 @@ export function mapEmojiToFeishu(unicode: string): string | null {
   return EMOJI_MAP[unicode] ?? null;
 }
 
+// emoji_type → unicode 反查（展示用：把飞书事件里的 "OK"/"THUMBSUP" 还原成 👌/👍）。
+// 反向索引一次性构建自 EMOJI_MAP（单源，不另维护表）；同一 type 多 unicode 取首个。
+// EMOJI_MAP 未覆盖的 type（171 全集里大部分冷门表情）返 null，调用方原样显示 type 字符串。
+const TYPE_TO_UNICODE: Record<string, string> = (() => {
+  const out: Record<string, string> = {};
+  for (const [uni, type] of Object.entries(EMOJI_MAP)) {
+    if (!(type in out)) out[type] = uni;
+  }
+  return out;
+})();
+export function feishuEmojiTypeToUnicode(emojiType: string): string | null {
+  return TYPE_TO_UNICODE[emojiType] ?? null;
+}
+
 // ──────────────────────────────────────────
 // 权威 emoji_type 全集（171，精确大小写）
 // 来源：go-lark/lark + illacloud/larksdk emoji.go 双源逐字一致

@@ -1,0 +1,541 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>品品管家</title>
+  <link rel="stylesheet" href="/vendor/xterm/xterm.css" />
+  <link rel="manifest" href="/manifest.webmanifest" />
+  <link rel="icon" href="/icon-192.png" />
+  <meta name="theme-color" content="#0f1115" />
+  <link rel="apple-touch-icon" href="/icon-192.png" />
+  <style>
+    :root { color-scheme: dark; }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; padding: 16px 16px 80px;
+      font-family: -apple-system, "Segoe UI", "Microsoft YaHei", sans-serif;
+      background: #0f1115; color: #e6e8eb; -webkit-font-smoothing: antialiased; }
+    header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+    h1 { font-size: 18px; font-weight: 600; margin: 0; }
+    .launcher-state { font-size: 13px; display: flex; align-items: center; gap: 6px; }
+    .dot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex: none; }
+    .ok { background: #3fb950; box-shadow: 0 0 6px #3fb950; }
+    .warn { background: #d29922; box-shadow: 0 0 6px #d29922; }
+    .bad { background: #f85149; box-shadow: 0 0 6px #f85149; }
+    .gray { background: #6e7681; }
+    .empty { text-align: center; color: #9aa0a6; padding: 40px 16px; font-size: 14px; line-height: 1.7; }
+
+    /* 底部 tab 导航 */
+    nav { position: fixed; left: 0; right: 0; bottom: 0; display: flex; background: #12151c; border-top: 1px solid #232833; z-index: 50; }
+    nav button { flex: 1; background: none; border: none; color: #9aa0a6; padding: 12px 4px calc(12px + env(safe-area-inset-bottom)); font-size: 12px; cursor: pointer; display: flex; flex-direction: column; align-items: center; gap: 3px; }
+    nav button .ic { font-size: 18px; }
+    nav button.active { color: #58a6ff; }
+    .view { display: none; }
+    .view.active { display: block; }
+
+    .sys-card { background: #171a21; border: 1px solid #232833; border-radius: 12px; padding: 12px 16px; margin-bottom: 10px; display: flex; align-items: center; gap: 10px; }
+    .sys-label { font-size: 14px; font-weight: 600; }
+    .sys-info { font-size: 13px; color: #9aa0a6; margin-left: auto; text-align: right; }
+    .btn { background: #232833; color: #e6e8eb; border: none; border-radius: 10px; padding: 12px; font-size: 14px; cursor: pointer; width: 100%; margin-bottom: 10px; }
+    .btn.primary { background: #1f6feb; color: #fff; }
+    .btn.danger { background: #3a2326; color: #ff9b95; }
+    .section-title { font-size: 13px; color: #9aa0a6; margin: 16px 0 8px; }
+
+    .grid { display: flex; flex-direction: column; gap: 10px; }
+    .card { background: #171a21; border: 1px solid #232833; border-radius: 12px; padding: 14px 16px; cursor: pointer; transition: border-color .15s; }
+    .card:active { border-color: #58a6ff; }
+    .card-top { display: flex; align-items: center; gap: 8px; margin-bottom: 8px; }
+    .card-name { font-size: 15px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .card-status { font-size: 12px; color: #9aa0a6; }
+    .meta { display: flex; flex-wrap: wrap; gap: 6px 14px; font-size: 12px; color: #9aa0a6; }
+    .meta b { color: #c9d1d9; font-weight: 500; }
+    .bar { height: 4px; background: #232833; border-radius: 2px; margin-top: 10px; overflow: hidden; }
+    .bar > div { height: 100%; background: #58a6ff; }
+    .bar.hot > div { background: #f85149; }
+
+    /* 全局默认设置 + 已删除列表 + 日志 */
+    .panel { background: #171a21; border: 1px solid #232833; border-radius: 12px; padding: 14px 16px; margin-bottom: 12px; }
+    .panel .row { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 8px; }
+    .panel label { color: #9aa0a6; width: 64px; flex: none; }
+    .panel select, .panel input { flex: 1; background: #0f1115; color: #e6e8eb; border: 1px solid #232833; border-radius: 8px; padding: 8px; font-size: 13px; }
+    .forgotten-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #232833; font-size: 13px; }
+    .forgotten-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .forgotten-row button { background: #1f6feb; color: #fff; border: none; border-radius: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer; flex: none; }
+    #logs { font-family: Consolas, monospace; font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
+    .log-line { padding: 2px 0; border-bottom: 1px solid #181c24; }
+    .log-time { color: #6e7681; }
+    .log-src { color: #58a6ff; }
+    .log-warn { color: #d29922; }
+    .log-error { color: #f85149; }
+
+    #term-overlay { position: fixed; inset: 0; background: #0b0d11; display: none; flex-direction: column; z-index: 100; }
+    .term-bar { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border-bottom: 1px solid #232833; flex: none; }
+    .term-bar button { background: #232833; color: #e6e8eb; border: none; border-radius: 8px; padding: 8px 12px; font-size: 13px; cursor: pointer; }
+    #term-title { font-size: 14px; font-weight: 600; flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    #term-actions { display: flex; gap: 8px; padding: 8px 14px; flex: none; flex-wrap: wrap; }
+    #term-actions button { background: #232833; color: #e6e8eb; border: none; border-radius: 8px; padding: 8px 14px; font-size: 13px; cursor: pointer; }
+    #term-actions button.danger { background: #3a2326; color: #ff9b95; }
+    #term-settings { padding: 8px 14px; flex: none; display: flex; flex-direction: column; gap: 8px; border-bottom: 1px solid #232833; }
+    #term-settings .row { display: flex; align-items: center; gap: 8px; font-size: 13px; }
+    #term-settings label { color: #9aa0a6; width: 56px; flex: none; }
+    #term-settings select, #term-settings input { flex: 1; background: #0f1115; color: #e6e8eb; border: 1px solid #232833; border-radius: 8px; padding: 7px; font-size: 13px; }
+    #term-settings .save { background: #1f6feb; color: #fff; border: none; border-radius: 8px; padding: 9px; cursor: pointer; font-size: 13px; }
+    #term-host { flex: 1; padding: 6px 4px; overflow: hidden; }
+    #term-input-bar { display: none; gap: 8px; padding: 8px 10px; border-top: 1px solid #232833; flex: none; }
+    #term-input { flex: 1; background: #0f1115; color: #e6e8eb; border: 1px solid #232833; border-radius: 8px; padding: 10px; font-size: 14px; }
+    #term-send { background: #1f6feb; color: #fff; border: none; border-radius: 8px; padding: 0 16px; font-size: 14px; cursor: pointer; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🐦 品品管家</h1>
+    <div class="launcher-state" id="launcher"><span class="dot gray"></span>连接中…</div>
+  </header>
+
+  <!-- 频道 -->
+  <div class="view active" id="view-channels">
+    <button id="btn-start-all" class="btn primary">▶ 启动所有频道</button>
+    <button id="btn-launch" class="btn primary" style="display:none">▶ 拉起启动器</button>
+    <div id="content"><div class="empty">加载中…</div></div>
+    <div id="forgotten-wrap"></div>
+  </div>
+
+  <!-- Work 干活 session -->
+  <div class="view" id="view-work">
+    <div id="work-content"><div class="empty">加载中…</div></div>
+  </div>
+
+  <!-- 系统 -->
+  <div class="view" id="view-system">
+    <div class="sys-card">
+      <span class="sys-label">🌐 网络</span>
+      <span id="net-info" class="sys-info">检测中…</span>
+    </div>
+    <div class="sys-card">
+      <span class="sys-label">📊 额度</span>
+      <span id="quota-info" class="sys-info">点下方刷新</span>
+    </div>
+    <button id="btn-quota" class="btn">↻ 刷新额度（约 5 秒）</button>
+
+    <div class="section-title">全局默认设置（仅影响之后新建的频道 / work）</div>
+    <div class="panel" id="defaults-panel"><div class="empty" style="padding:14px">加载中…</div></div>
+
+    <div class="section-title">系统操作</div>
+    <button id="btn-launch2" class="btn">▶ 拉起启动器</button>
+    <button id="btn-restart-pinpin" class="btn danger">↻ 重启品品</button>
+    <button id="btn-quit-pinpin" class="btn danger">⏻ 关闭品品</button>
+  </div>
+
+  <!-- 日志 -->
+  <div class="view" id="view-logs">
+    <button id="btn-logs-refresh" class="btn">↻ 刷新日志</button>
+    <div id="logs"><div class="empty">加载中…</div></div>
+  </div>
+
+  <nav>
+    <button class="nav-btn active" data-tab="channels"><span class="ic">📡</span>频道</button>
+    <button class="nav-btn" data-tab="work"><span class="ic">🛠</span>Work</button>
+    <button class="nav-btn" data-tab="system"><span class="ic">⚙</span>系统</button>
+    <button class="nav-btn" data-tab="logs"><span class="ic">📜</span>日志</button>
+  </nav>
+
+  <div id="term-overlay">
+    <div class="term-bar">
+      <button id="term-back">‹ 返回</button>
+      <span id="term-title"></span>
+      <button id="term-settings-toggle">⚙ 设置</button>
+    </div>
+    <div id="term-actions"></div>
+    <div id="term-settings" style="display:none"></div>
+    <div id="term-host"></div>
+    <div id="term-input-bar">
+      <input id="term-input" placeholder="输入发给品品的话…" autocomplete="off" />
+      <button id="term-send">发送</button>
+    </div>
+  </div>
+
+  <script src="/vendor/xterm/xterm.js"></script>
+  <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});</script>
+  <script>
+    const MODEL_OPTIONS = ['claude-opus-4-8 [1m]', 'claude-opus-4-7 [1m]', 'claude-opus-4-6 [1m]', 'claude-sonnet-4-6'];
+    const EFFORT_OPTIONS = ['low', 'medium', 'high', 'max'];
+    const STATUS = {
+      running:  { cls: 'ok',   label: '运行中' },
+      starting: { cls: 'warn', label: '启动中' },
+      stopped:  { cls: 'gray', label: '已停止' },
+      failed:   { cls: 'bad',  label: '已崩溃' },
+    };
+    let lastClis = [];
+    let lastWork = [];
+    let currentTab = 'channels';
+
+    function $(id) { return document.getElementById(id); }
+    function fmtUptime(ms) {
+      if (!ms || ms < 0) return '—';
+      const s = Math.floor(ms / 1000), h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60);
+      if (h > 0) return `${h}h${m}m`;
+      if (m > 0) return `${m}m`;
+      return `${s}s`;
+    }
+    function esc(s) { return String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c])); }
+
+    // ── tab 切换 ──
+    document.querySelectorAll('.nav-btn').forEach((b) => {
+      b.onclick = () => {
+        currentTab = b.dataset.tab;
+        document.querySelectorAll('.nav-btn').forEach((x) => x.classList.toggle('active', x === b));
+        document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + currentTab));
+        if (currentTab === 'work') refreshWork();
+        if (currentTab === 'system') { refreshNet(); refreshDefaults(); }
+        if (currentTab === 'logs') refreshLogs();
+      };
+    });
+
+    // ── 频道卡片 ──
+    function cliCard(c) {
+      const st = STATUS[c.status] || { cls: 'gray', label: c.status };
+      const name = c.chat_name || ('频道 ' + (c.chat_id || '').slice(-6));
+      const pct = c.usage && typeof c.usage.context_pct === 'number' ? c.usage.context_pct : null;
+      const cost = c.usage && typeof c.usage.cost_usd === 'number' ? c.usage.cost_usd : null;
+      return `
+        <div class="card" data-chat="${esc(c.chat_id)}">
+          <div class="card-top">
+            <span class="dot ${st.cls}"></span>
+            <span class="card-name">${esc(name)}</span>
+            <span class="card-status">${esc(st.label)}</span>
+          </div>
+          <div class="meta">
+            <span><b>${esc(c.model || '—')}</b></span>
+            <span>${esc(c.effort || '—')}${c.fast ? ' ⚡' : ''}</span>
+            <span>运行 <b>${fmtUptime(c.uptime_ms)}</b></span>
+            ${pct !== null ? `<span>上下文 <b>${pct.toFixed(0)}%</b></span>` : ''}
+            ${cost !== null ? `<span>花费 <b>$${cost.toFixed(2)}</b></span>` : ''}
+          </div>
+          ${pct !== null ? `<div class="bar ${pct >= 80 ? 'hot' : ''}"><div style="width:${Math.min(pct,100)}%"></div></div>` : ''}
+        </div>`;
+    }
+
+    async function refresh() {
+      if ($('term-overlay').style.display === 'flex') return;
+      let state;
+      try { state = await (await fetch('/api/state')).json(); }
+      catch { $('launcher').innerHTML = '<span class="dot bad"></span>管家离线'; return; }
+      const L = $('launcher');
+      const btnLaunch = $('btn-launch');
+      const btnStartAll = $('btn-start-all');
+      if (!state.launcher_up) {
+        L.innerHTML = '<span class="dot bad"></span>启动器未运行';
+        btnLaunch.style.display = ''; btnStartAll.style.display = 'none';
+        $('content').innerHTML = '<div class="empty">启动器没在运行。<br>点上方"拉起启动器"开启。</div>';
+        return;
+      }
+      btnLaunch.style.display = 'none'; btnStartAll.style.display = '';
+      L.innerHTML = '<span class="dot ok"></span>启动器在线';
+      lastClis = state.clis || [];
+      $('content').innerHTML = lastClis.length
+        ? '<div class="grid">' + lastClis.map(cliCard).join('') + '</div>'
+        : '<div class="empty">启动器在线，但暂无频道。</div>';
+      refreshForgotten();
+    }
+
+    // ── 已删除频道（恢复）──
+    async function refreshForgotten() {
+      let r;
+      try { r = await (await fetch('/api/forgotten')).json(); } catch { return; }
+      const list = r.channels || [];
+      const wrap = $('forgotten-wrap');
+      if (!list.length) { wrap.innerHTML = ''; return; }
+      wrap.innerHTML = '<div class="section-title">已删除频道</div><div class="panel">' +
+        list.map((c) => `<div class="forgotten-row"><span>${esc(c.display_name || c.chat_id)}</span><button data-restore="${esc(c.chat_id)}">恢复</button></div>`).join('') +
+        '</div>';
+    }
+    $('forgotten-wrap').addEventListener('click', async (e) => {
+      const btn = e.target.closest('[data-restore]');
+      if (!btn) return;
+      if (!confirm('恢复这个频道并立即上线？')) return;
+      const r = await (await fetch('/api/cli/restore?chat=' + encodeURIComponent(btn.dataset.restore), { method: 'POST' })).json();
+      if (!r.ok) alert('恢复失败：' + r.error); else setTimeout(refresh, 1200);
+    });
+
+    $('content').addEventListener('click', (e) => {
+      const card = e.target.closest('.card[data-chat]');
+      if (card) openConsole(card.dataset.chat, 'channel');
+    });
+    $('btn-start-all').onclick = async () => {
+      const r = await (await fetch('/api/cli/start-all', { method: 'POST' })).json();
+      if (!r.ok) alert('启动失败：' + r.error); else setTimeout(refresh, 1500);
+    };
+    async function doLaunch() {
+      const r = await (await fetch('/api/system/launch-launcher', { method: 'POST' })).json();
+      alert(r.ok ? '已拉起启动器，稍候自动刷新' : '拉起失败：' + r.error);
+    }
+    $('btn-launch').onclick = doLaunch;
+    $('btn-launch2').onclick = doLaunch;
+
+    // ── Work session ──
+    function workCard(w) {
+      const st = STATUS[w.status] || { cls: 'gray', label: w.status };
+      const dir = (w.work_dir || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || w.work_dir || '—';
+      const pct = typeof w.context_pct === 'number' ? w.context_pct : null;
+      return `
+        <div class="card" data-work="${esc(w.session_id)}">
+          <div class="card-top">
+            <span class="dot ${st.cls}"></span>
+            <span class="card-name">${esc(dir)}</span>
+            <span class="card-status">${esc(st.label)}</span>
+          </div>
+          <div class="meta">
+            <span title="${esc(w.work_dir)}">${esc(w.work_dir || '')}</span>
+          </div>
+          <div class="meta">
+            <span><b>${esc(w.model || '—')}</b></span>
+            <span>${esc(w.effort || '—')}${w.fast ? ' ⚡' : ''}</span>
+            <span>运行 <b>${fmtUptime(w.uptime_ms)}</b></span>
+            ${pct !== null ? `<span>上下文 <b>${pct.toFixed(0)}%</b></span>` : ''}
+          </div>
+          ${pct !== null ? `<div class="bar ${pct >= 80 ? 'hot' : ''}"><div style="width:${Math.min(pct,100)}%"></div></div>` : ''}
+        </div>`;
+    }
+    async function refreshWork() {
+      if ($('term-overlay').style.display === 'flex') return;
+      let r;
+      try { r = await (await fetch('/api/work')).json(); }
+      catch { return; }
+      lastWork = r.sessions || [];
+      $('work-content').innerHTML = lastWork.length
+        ? '<div class="grid">' + lastWork.map(workCard).join('') + '</div>'
+        : '<div class="empty">当前没有 work 干活 session。<br>Owner在飞书让品品起活儿时会出现在这。</div>';
+    }
+    $('work-content').addEventListener('click', (e) => {
+      const card = e.target.closest('.card[data-work]');
+      if (card) openConsole(card.dataset.work, 'work');
+    });
+
+    // ── 额度 ──
+    $('btn-quota').onclick = async () => {
+      $('quota-info').textContent = '查询中…';
+      try {
+        const r = await (await fetch('/api/quota', { method: 'POST' })).json();
+        const rl = r.rate_limits || {};
+        const fh = rl.five_hour && typeof rl.five_hour.used_percentage === 'number' ? rl.five_hour.used_percentage.toFixed(0) + '%' : '—';
+        const sd = rl.seven_day && typeof rl.seven_day.used_percentage === 'number' ? rl.seven_day.used_percentage.toFixed(0) + '%' : '—';
+        const cost = r.quota && r.quota.daily && typeof r.quota.daily.cost_usd === 'number' ? '$' + r.quota.daily.cost_usd.toFixed(2) : '—';
+        $('quota-info').innerHTML = `今日 ${r.today_messages ?? 0} 条 · ${cost}<br>5h ${fh} · 周 ${sd}`;
+      } catch (e) { $('quota-info').textContent = '查询失败'; }
+    };
+
+    // ── 全局默认设置 ──
+    async function refreshDefaults() {
+      let d;
+      try { d = await (await fetch('/api/defaults')).json(); } catch { return; }
+      if (!d || !d.channel) { $('defaults-panel').innerHTML = '<div class="empty" style="padding:14px">读取失败（启动器未运行？）</div>'; return; }
+      const mo = (sel) => MODEL_OPTIONS.map((m) => `<option ${m === sel ? 'selected' : ''}>${m}</option>`).join('');
+      const eo = (sel) => EFFORT_OPTIONS.map((e) => `<option ${e === sel ? 'selected' : ''}>${e}</option>`).join('');
+      $('defaults-panel').innerHTML = `
+        <div class="row" style="color:#c9d1d9;font-weight:600">频道默认</div>
+        <div class="row"><label>模型</label><select id="def-model">${mo(d.channel.model)}</select></div>
+        <div class="row"><label>Effort</label><select id="def-effort">${eo(d.channel.effort)}</select></div>
+        <div class="row"><label>压缩%</label><input id="def-compact" type="number" min="20" max="50" value="${d.channel.autoCompactPct ?? 25}" /></div>
+        <div class="row"><label>Fast</label><input id="def-fast" type="checkbox" ${d.channel.fast ? 'checked' : ''} style="flex:none;width:auto" /></div>
+        <button class="btn primary" style="margin:4px 0 14px" onclick="saveDefaults()">保存频道默认</button>
+        <div class="row" style="color:#c9d1d9;font-weight:600">Work 默认</div>
+        <div class="row"><label>模型</label><select id="wdef-model">${mo(d.work.model)}</select></div>
+        <div class="row"><label>Effort</label><select id="wdef-effort">${eo(d.work.effort)}</select></div>
+        <div class="row"><label>Fast</label><input id="wdef-fast" type="checkbox" ${d.work.fast ? 'checked' : ''} style="flex:none;width:auto" /></div>
+        <button class="btn primary" style="margin:4px 0 0" onclick="saveWorkDefaults()">保存 Work 默认</button>`;
+    }
+    window.saveDefaults = async () => {
+      const qs = new URLSearchParams({
+        model: $('def-model').value, effort: $('def-effort').value,
+        fast: $('def-fast').checked, autoCompactPct: $('def-compact').value,
+      });
+      const r = await (await fetch('/api/defaults?' + qs, { method: 'POST' })).json();
+      alert(r.ok ? '已保存（影响之后新建频道）' : '保存失败：' + r.error);
+    };
+    window.saveWorkDefaults = async () => {
+      const qs = new URLSearchParams({ model: $('wdef-model').value, effort: $('wdef-effort').value, fast: $('wdef-fast').checked });
+      const r = await (await fetch('/api/defaults/work?' + qs, { method: 'POST' })).json();
+      alert(r.ok ? '已保存（影响之后新建 work）' : '保存失败：' + r.error);
+    };
+
+    // ── 系统：重启 / 关闭品品 ──
+    $('btn-restart-pinpin').onclick = async () => {
+      if (!confirm('重启品品（所有频道 CLI 停后重启，上下文保留）？')) return;
+      if (!confirm('再确认一次：真的重启品品？')) return;
+      const r = await (await fetch('/api/system/restart', { method: 'POST' })).json();
+      alert(r.ok ? '已发出重启指令，品品稍候恢复' : '失败：' + r.error);
+    };
+    $('btn-quit-pinpin').onclick = async () => {
+      if (!confirm('关闭品品（含所有后台频道）？关了只能靠"拉起启动器"或回电脑开。')) return;
+      if (!confirm('再确认一次：真的完全关闭品品？')) return;
+      const r = await (await fetch('/api/system/quit', { method: 'POST' })).json();
+      alert(r.ok ? '已发出关闭指令' : '失败：' + r.error);
+    };
+
+    // ── 日志 ──
+    async function refreshLogs() {
+      let r;
+      try { r = await (await fetch('/api/logs?limit=200')).json(); } catch { return; }
+      const logs = r.logs || [];
+      if (!logs.length) { $('logs').innerHTML = '<div class="empty">暂无日志</div>'; return; }
+      $('logs').innerHTML = logs.slice().reverse().map((l) => {
+        const t = new Date(l.ts).toLocaleTimeString('zh-CN', { hour12: false });
+        const lvl = l.level === 'error' ? 'log-error' : l.level === 'warn' ? 'log-warn' : '';
+        return `<div class="log-line"><span class="log-time">${t}</span> <span class="log-src">[${esc(l.source)}]</span> <span class="${lvl}">${esc(l.message)}</span></div>`;
+      }).join('');
+    }
+    $('btn-logs-refresh').onclick = refreshLogs;
+
+    // ── 控制台（频道 + work 共用；kind='channel'|'work'）──
+    let term = null, ws = null, fitTimer = null, currentKey = null, currentKind = null;
+
+    function fit() {
+      if (!term) return;
+      const host = $('term-host');
+      const cols = Math.max(20, Math.floor(host.clientWidth / 7.8));
+      const rows = Math.max(10, Math.floor(host.clientHeight / 15.6));
+      try { term.resize(cols, rows); } catch {}
+    }
+
+    function openConsole(key, kind) {
+      currentKey = key; currentKind = kind;
+      const isWork = kind === 'work';
+      const item = isWork
+        ? (lastWork.find((x) => x.session_id === key) || { session_id: key, status: 'stopped' })
+        : (lastClis.find((x) => x.chat_id === key) || { chat_id: key, status: 'stopped' });
+      const running = item.status === 'running';
+      $('term-title').textContent = isWork
+        ? ('Work · ' + ((item.work_dir || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || key))
+        : (item.chat_name || ('频道 ' + key.slice(-6)));
+
+      // 操作按钮
+      let acts;
+      if (isWork) {
+        acts = `<button class="danger" onclick="workEnd()">✕ 结束 work</button>`;
+        $('term-settings-toggle').style.display = 'none';
+      } else {
+        acts = running
+          ? `<button onclick="cliAction('restart')">↻ 重启</button>
+             <button onclick="cliAction('compact')">压缩</button>
+             <button class="danger" onclick="cliAction('stop')">✕ 杀掉</button>
+             <button class="danger" onclick="cliForget()">🗑 删除频道</button>`
+          : `<button onclick="cliAction('start')">▶ 启动</button>
+             <button class="danger" onclick="cliForget()">🗑 删除频道</button>`;
+        $('term-settings-toggle').style.display = '';
+        renderSettings(item);
+      }
+      $('term-actions').innerHTML = acts;
+      $('term-settings').style.display = 'none';
+      $('term-overlay').style.display = 'flex';
+
+      const inputBar = $('term-input-bar');
+      term = new Terminal({ fontSize: 13, fontFamily: 'Consolas, "Courier New", monospace', convertEol: false, scrollback: 5000, theme: { background: '#0b0d11' } });
+      term.open($('term-host'));
+      fit();
+      if (running) {
+        inputBar.style.display = 'flex';
+        $('term-input').placeholder = isWork ? '输入发给 work CLI 的指令…' : '输入发给品品的话…';
+        const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+        ws = new WebSocket(`${proto}://${location.host}/ws?chat=${encodeURIComponent(key)}`);
+        ws.onmessage = (e) => term && term.write(e.data);
+        ws.onclose = () => { if (term) term.write('\r\n\x1b[33m[终端连接已断开]\x1b[0m\r\n'); };
+      } else {
+        inputBar.style.display = 'none';
+        term.write(isWork ? '\x1b[90m[work 已停止]\x1b[0m\r\n' : '\x1b[90m[频道已停止，点上方"启动"开启]\x1b[0m\r\n');
+      }
+    }
+
+    function renderSettings(c) {
+      const modelOpts = MODEL_OPTIONS.map((m) => `<option ${m === c.model ? 'selected' : ''}>${m}</option>`).join('');
+      const effortOpts = EFFORT_OPTIONS.map((e) => `<option ${e === c.effort ? 'selected' : ''}>${e}</option>`).join('');
+      $('term-settings').innerHTML = `
+        <div class="row"><label>名称</label><input id="cfg-name" value="${esc(c.chat_name || '')}" placeholder="自定义卡片名" /></div>
+        <div class="row"><label>模型</label><select id="cfg-model">${modelOpts}</select></div>
+        <div class="row"><label>Effort</label><select id="cfg-effort">${effortOpts}</select></div>
+        <div class="row"><label>压缩%</label><input id="cfg-compact" type="number" min="20" max="50" value="${c.autoCompactPct ?? 25}" /></div>
+        <div class="row"><label>Fast</label><input id="cfg-fast" type="checkbox" ${c.fast ? 'checked' : ''} style="flex:none;width:auto" /></div>
+        <button class="save" onclick="saveConfig()">保存（改配置需重启频道生效）</button>`;
+    }
+
+    $('term-settings-toggle').onclick = () => {
+      const s = $('term-settings');
+      s.style.display = s.style.display === 'none' ? 'flex' : 'none';
+    };
+
+    window.saveConfig = async () => {
+      const name = $('cfg-name').value;
+      const qs = new URLSearchParams({
+        chat: currentKey, model: $('cfg-model').value, effort: $('cfg-effort').value,
+        fast: $('cfg-fast').checked, autoCompactPct: $('cfg-compact').value,
+      });
+      const r1 = await (await fetch('/api/cli/config?' + qs, { method: 'POST' })).json();
+      const r2 = await (await fetch('/api/cli/name?chat=' + encodeURIComponent(currentKey) + '&name=' + encodeURIComponent(name), { method: 'POST' })).json();
+      alert(r1.ok && r2.ok ? '已保存（重启该频道生效）' : '保存失败：' + (r1.error || r2.error));
+    };
+
+    window.cliAction = async (action) => {
+      const labels = { start: '启动', restart: '重启', compact: '压缩', stop: '杀掉' };
+      if ((action === 'stop' || action === 'restart') && !confirm(`确定${labels[action]}这个频道？`)) return;
+      const path = action === 'start' ? 'start' : action === 'compact' ? 'compact' : action;
+      try {
+        const r = await (await fetch(`/api/cli/${path}?chat=${encodeURIComponent(currentKey)}`, { method: 'POST' })).json();
+        if (term) term.write(`\r\n\x1b[36m[已${labels[action]}：${r.ok ? '成功' : (r.error || '失败')}]\x1b[0m\r\n`);
+      } catch (e) { if (term) term.write(`\r\n\x1b[31m[${labels[action]}失败：${e}]\x1b[0m\r\n`); }
+    };
+
+    window.cliForget = async () => {
+      if (!confirm('删除这个频道？品品将停止并忘记它（可在"已删除频道"里恢复）。')) return;
+      if (!confirm('再确认一次：真的删除这个频道？')) return;
+      const r = await (await fetch('/api/cli/forget?chat=' + encodeURIComponent(currentKey), { method: 'POST' })).json();
+      if (r.ok) { closeConsole(); setTimeout(refresh, 1000); } else alert('删除失败：' + r.error);
+    };
+
+    window.workEnd = async () => {
+      if (!confirm('结束这个 work 干活 session？')) return;
+      if (!confirm('再确认一次：真的结束？')) return;
+      const r = await (await fetch('/api/work/end?id=' + encodeURIComponent(currentKey), { method: 'POST' })).json();
+      if (r.ok) { closeConsole(); setTimeout(refreshWork, 1000); } else alert('结束失败：' + r.error);
+    };
+
+    function sendInput() {
+      const inp = $('term-input');
+      const text = inp.value;
+      if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
+      const url = currentKind === 'work'
+        ? `/api/work/send?id=${encodeURIComponent(currentKey)}`
+        : `/api/cli/input?chat=${encodeURIComponent(currentKey)}`;
+      // 频道走 PTY 写入（带 \r）；work 走 sendMessage（后端自管提交，不加 \r）
+      fetch(url, { method: 'POST', body: currentKind === 'work' ? text : text + '\r' });
+      inp.value = '';
+    }
+    $('term-send').onclick = sendInput;
+    $('term-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendInput(); });
+
+    function closeConsole() {
+      currentKey = null; currentKind = null;
+      if (ws) { ws.onclose = null; ws.close(); ws = null; }
+      if (term) { term.dispose(); term = null; }
+      $('term-overlay').style.display = 'none';
+    }
+    $('term-back').onclick = closeConsole;
+    window.addEventListener('resize', () => { clearTimeout(fitTimer); fitTimer = setTimeout(fit, 150); });
+
+    // ── 网络 网络只读状态 ──
+    async function refreshNet() {
+      const el = $('net-info');
+      try {
+        const c = await (await fetch('/api/net')).json();
+        if (!c.running) { el.innerHTML = '<span style="color:#f85149">未运行</span>'; return; }
+        el.innerHTML = c.internet_ok ? `<span style="color:#3fb950">正常</span> · ${c.latency_ms}ms` : '<span style="color:#d29922">网络在，外网不通</span>';
+      } catch { el.textContent = '查询失败'; }
+    }
+
+    refresh();
+    setInterval(() => {
+      refresh();
+      if (currentTab === 'work') refreshWork();
+      if (currentTab === 'logs') refreshLogs();
+    }, 3000);
+  </script>
+</body>
+</html>

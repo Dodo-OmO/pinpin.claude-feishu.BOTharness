@@ -163,6 +163,20 @@ async function main() {
 
   // ── tool 注册 ──
 
+  // alwaysLoad 白名单：ENABLE_TOOL_SEARCH=true 下所有 MCP tool 默认折叠（按需 ToolSearch），
+  // 仅本名单内 tool 注入 _meta['app/alwaysLoad'] 豁免常驻。
+  // 划分依据：① 每轮回话必调 ② 每轮 reply 后 trigger 自动触发（心情/记忆）③ cron 必成功
+  // ④ work-stopped 被动触发——这些自动场景多数无法即时实测，保常驻防"搜不到→静默哑"。
+  // 其余（建群/云文档/飞书任务/owner/chrome 等）= 主动随机用，折叠按需（主动场景 ToolSearch 可靠）。
+  const ALWAYS_LOAD = new Set<string>([
+    'pinpin_reply_text', 'pinpin_reply_voice', 'pinpin_react', 'pinpin_no_reply',
+    'pinpin_memorize', 'mood_appraise', 'read_chat_log',
+    'write_diary', 'send_daily_news_card', 'send_briefing_card', 'write_weekly_recap',
+    'write_journey_log', 'memory_rewrite', 'pinpin_peek_work_session',
+    // weekly-recap cron 还调 create_cloud_doc + send_private_message；ball-tasks cron 调 read_doc_todos；
+    // relay-nudge/callback 调 send_private_message——均自动触发、无法即时实测，保常驻防静默哑。
+    'create_cloud_doc', 'send_private_message', 'read_doc_todos',
+  ]);
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       PINPIN_REPLY_TEXT_TOOL,
@@ -236,7 +250,17 @@ async function main() {
       writeSheetTool,
       writeBitableTool,
       listWikiSpacesTool,
-    ],
+    ].map((t) =>
+      ALWAYS_LOAD.has(t.name)
+        ? {
+            ...t,
+            _meta: {
+              ...((t as { _meta?: Record<string, unknown> })._meta ?? {}),
+              'app/alwaysLoad': true,
+            },
+          }
+        : t,
+    ),
   }));
 
   server.setRequestHandler(CallToolRequestSchema, async (request) => {

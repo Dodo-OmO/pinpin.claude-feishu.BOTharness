@@ -17,14 +17,17 @@ import path from 'node:path';
 import { initFeishuClient, getFeishuClient } from './feishu-client.js';
 import { FeishuPoll, type ChatListDiff, type FeishuInboundMessage } from './feishu-poll.js';
 import { FeishuEventSubscriber, type PollActionValue } from './feishu-event-subscriber.js';
-import type { CardActionEvent } from '@larksuiteoapi/node-sdk';
+import type { CardActionEvent, ReactionEvent, BotAddedEvent, CommentEvent } from '@larksuiteoapi/node-sdk';
 import { buildPollCard } from '../src/mcp/feishu/cards/diy-card.js';
+import { feishuEmojiTypeToUnicode } from '../src/mcp/utils/feishu-emoji-map.js';
+import { resolveSenderNameSync } from './sender-resolver.js';
 import { IpcServer } from './ipc-server.js';
 import { ChannelCli } from './channel-cli.js';
 import { ChannelConfigStore, DEFAULT_AUTOCOMPACT_PCT } from './channel-config-store.js';
 import { WorkSession, type WorkSessionStopInfo } from './work-session.js';
 import { CcusagePoller, type QuotaSnapshot } from './ccusage-poller.js';
 import { SupervisorCronRunner } from './cron-runner.js';
+import { createWardenBridge } from './warden-bridge.js';
 import {
   IPC_METHODS,
   type WorkSpawnParams,
@@ -36,6 +39,8 @@ import {
   type WorkPeekResult,
   type StatuslineUpdateParams,
   type RateLimits,
+  type WardenSystemInfo,
+  type WardenLogEntry,
   type WorkStopSignalParams,
   type CompactViaPtyParams,
   type SpawnChannelParams,
@@ -92,6 +97,8 @@ export class Supervisor extends EventEmitter {
   /** P4.Q3: supervisor 入口 message_id 去重（防 WSClient + poll 双源重复推） */
   private supervisorProcessedIds = new Set<string>();
   private ipcServer: IpcServer;
+  /** 管家桥接 server（固定端口，供独立管家进程远程看/控 CLI；旁路，失败不影响品品主功能） */
+  private wardenBridge: IpcServer | null = null;
   private ccusagePoller: CcusagePoller;
   private channelConfigStore: ChannelConfigStore;
   private cronRunner: SupervisorCronRunner;
@@ -114,6 +121,8 @@ export class Supervisor extends EventEmitter {
   private lastQuotaSnapshot: QuotaSnapshot | null = null;
   /** 账号级额度（5h+7天，来自任一 CLI statusLine 的 rate_limits）；逐窗口存最新已知值，无数据为 null */
   private lastRateLimits: RateLimits | null = null;
+  /** 仪表盘日志流 ring buffer（main.ts pushLog 灌入，warden.recent-logs 读）；上限 300 条 */
+  private recentLogs: WardenLogEntry[] = [];
   /** session_id → WorkSession（诉求 B 传话筒） */
   private workSessions = new Map<string, WorkSession>();
   /** work session 独立默认 model/effort（启动时从 channel-config.json __work_defaults__ load；null = fallback 频道默认） */
@@ -127,6 +136,12 @@ export class Supervisor extends EventEmitter {
    *  所以「开启所有」一次后即使重启品品也会恢复频道（符合「重启品品」语义）。 */
   private channelsPaused = true;
   private dbPath: string;
+  /** message_id → {chat_id, 发送者} 有界缓存（reaction 事件不带 chat_id 也不带"被点消息是谁发的"，
+   *  靠它+API 反查：既路由到对应频道，又判断被点的是不是品品自己发的（决定文案口径）。
+   *  onFeishuMessage 每条入站记一笔；>2000 删最老。品品自己发的消息不入站 → 反查走 API 兜底。 */
+  private msgIdToInfo = new Map<string, { chatId: string; senderId: string; senderType: 'user' | 'app'; snippet: string }>();
+  /** resolveReactedMsg 的 in-flight 去重（防同一 message_id 并发重复打 message.get） */
+  private msgInfoResolveInflight = new Map<string, Promise<{ chatId: string; senderId: string; senderType: 'user' | 'app'; snippet: string } | null>>();
 
   constructor(opts: SupervisorOptions) {
     super();
@@ -378,6 +393,9 @@ export class Supervisor extends EventEmitter {
       appSecret: this.opts.feishuAppSecret,
       onMessage: (msg) => this.onFeishuMessage(msg),
       onPollAction: (evt, val) => this.onPollAction(evt, val),
+      onReaction: (evt) => this.onReaction(evt),
+      onBotAdded: (evt) => this.onBotAdded(evt),
+      onComment: (evt) => this.onComment(evt),
     });
     try {
       await this.feishuEventSubscriber.start();
@@ -397,6 +415,59 @@ export class Supervisor extends EventEmitter {
     //         mood-decay / feishu-token-keepalive / daily-restart 编排
     //         这 3 个不依赖 CLI 在线，统一在 main process 跑（避免 N 个 CLI 重复触发） ──
     this.cronRunner.start();
+
+    // ── 5.6 管家桥接 server（固定端口，供独立管家进程手机远程看/控 CLI；旁路，失败不崩品品）──
+    try {
+      this.wardenBridge = await createWardenBridge({
+        getChannels: () => this.channels,
+        getSystemInfo: (): WardenSystemInfo => ({
+          channel_count: this.channels.size,
+          rate_limits: this.lastRateLimits,
+        }),
+        getUsage: (chatId) => this.channelUsage.get(chatId),
+        startChannel: (id) => {
+          const c = this.spawnChannelCli(id);
+          c.start();
+        },
+        startAllChannels: () => this.startAllChannels(),
+        setChannelConfig: (id, cfg) => this.setChannelConfig(id, cfg),
+        setDisplayName: (id, name) => this.setChannelDisplayName(id, name),
+        // 批2 额度 + 删除恢复
+        fetchQuota: async () => {
+          await this.fetchQuotaNow();
+          return {
+            quota: this.lastQuotaSnapshot,
+            today_messages: this.getTodayMessageCount(),
+            rate_limits: this.lastRateLimits,
+          };
+        },
+        forgetChannel: (id) => this.forgetChannel(id),
+        listForgotten: () => this.listForgottenChannels(),
+        restoreChannel: (id) => this.restoreForgottenChannel(id),
+        // 批3 work session
+        getWorkSessions: () => this.workSessions,
+        getWorkSession: (sid) => this.getWorkSession(sid),
+        // 批4 全局设置 + 系统 + 日志
+        getDefaults: () => ({
+          channel: {
+            model: this.opts.defaultModel,
+            effort: this.opts.defaultEffort,
+            fast: this.opts.defaultFast ?? false,
+            autoCompactPct: this.opts.defaultAutoCompactPct,
+          },
+          work: this.getWorkDefaults(),
+        }),
+        setDefaults: (patch) => this.setDefaults(patch),
+        setWorkDefaults: (patch) => this.setWorkDefaults(patch),
+        restartSupervisor: () => this.restart(),
+        quitApp: () => this.emit('warden-request-quit'),
+        getRecentLogs: (limit) => this.recentLogs.slice(-limit),
+      });
+    } catch (e) {
+      process.stderr.write(
+        `[supervisor] warden-bridge 启动失败（不影响品品主功能）: ${e instanceof Error ? e.message : e}\n`,
+      );
+    }
 
     // ── 6. ccusage poller (P1.3 改：Owner要求不轮询，删 5min interval；改按需 fetchQuotaNow 触发) ──
     // 不再自动 start interval；用户从 footer "获取 quota" 按钮触发 fetchQuotaNow()
@@ -426,6 +497,8 @@ export class Supervisor extends EventEmitter {
     await this.feishuEventSubscriber?.stop();
     this.feishuEventSubscriber = null;
     await this.ipcServer.stop();
+    await this.wardenBridge?.stop();
+    this.wardenBridge = null;
     process.stderr.write('[supervisor] stopped\n');
   }
 
@@ -785,6 +858,12 @@ export class Supervisor extends EventEmitter {
     if (persisted.autoCompactPct !== undefined) cli.setAutoCompactPct(persisted.autoCompactPct);
   }
 
+  /** main.ts pushLog 同步灌入仪表盘日志 ring buffer（warden 手机端读）。上限 300 条，超丢最旧 */
+  recordLog(entry: WardenLogEntry): void {
+    this.recentLogs.push(entry);
+    if (this.recentLogs.length > 300) this.recentLogs.splice(0, this.recentLogs.length - 300);
+  }
+
   /** 今日入站消息数（YYYY-MM-DD 本地时区） */
   getTodayMessageCount(): number {
     const today = new Date();
@@ -843,6 +922,18 @@ export class Supervisor extends EventEmitter {
     if (this.supervisorProcessedIds.size > 5000) {
       const arr = [...this.supervisorProcessedIds];
       for (let i = 0; i < arr.length - 5000; i++) this.supervisorProcessedIds.delete(arr[i]);
+    }
+
+    // reaction 事件不带 chat_id/发送者 → 在此记 message_id→{chat_id,发送者}，reaction 来时优先查缓存命中（免 API）
+    this.msgIdToInfo.set(msg.message_id, {
+      chatId: msg.chat_id,
+      senderId: msg.sender_open_id,
+      senderType: msg.sender_type,
+      snippet: this.msgSnippet(msg.text, msg.msg_type),
+    });
+    if (this.msgIdToInfo.size > 2000) {
+      const firstKey = this.msgIdToInfo.keys().next().value;
+      if (firstKey !== undefined) this.msgIdToInfo.delete(firstKey);
     }
 
     // 频道常驻 + forget 守卫：若Owner主动 forgotten 过此频道，直接丢消息不重新 spawn
@@ -981,6 +1072,160 @@ export class Supervisor extends EventEmitter {
         resolve(false);
       }, timeoutMs);
       this.on('channel-mcp-ready', onReady);
+    });
+  }
+
+  /** 被点消息摘要：text 取内容前 30 字，非文字取类型友好标签——让品品知道被 react 的是哪条 */
+  private msgSnippet(text: string | undefined, msgType: string): string {
+    if (text && text.trim()) {
+      const t = text.trim().replace(/\s+/g, ' ');
+      return t.length > 30 ? `${t.slice(0, 30)}…` : t;
+    }
+    const labels: Record<string, string> = {
+      image: '图片', file: '文件', audio: '语音', media: '视频', post: '图文',
+      interactive: '卡片', sticker: '表情', share_chat: '分享群', share_user: '名片',
+    };
+    return `非文字内容·${labels[msgType] ?? msgType}`;
+  }
+
+  /** reaction 事件无 chat_id 也无"被点消息发送者/内容" → 先查缓存，未命中调飞书 message.get 反查
+   *  （一次拿 chat_id + 发送者 + 内容摘要；in-flight 去重防风暴） */
+  private async resolveReactedMsg(
+    messageId: string,
+  ): Promise<{ chatId: string; senderId: string; senderType: 'user' | 'app'; snippet: string } | null> {
+    const cached = this.msgIdToInfo.get(messageId);
+    if (cached) return cached;
+    const inflight = this.msgInfoResolveInflight.get(messageId);
+    if (inflight) return inflight;
+    const p = (async () => {
+      try {
+        const res = await getFeishuClient().im.v1.message.get({ path: { message_id: messageId } });
+        const item = res.data?.items?.[0] as
+          | { chat_id?: string; msg_type?: string; sender?: { id?: string; sender_type?: string }; body?: { content?: string } }
+          | undefined;
+        const chatId = item?.chat_id;
+        const senderId = item?.sender?.id;
+        if (chatId && senderId) {
+          // text 类型从 body.content JSON 抽文字（同 feishu-poll 解析），其它类型留类型标签
+          let text: string | undefined;
+          if (item?.msg_type === 'text') {
+            try { text = (JSON.parse(item.body?.content ?? '{}') as { text?: string }).text; } catch { /* 解析失败留空 */ }
+          }
+          const info = {
+            chatId,
+            senderId,
+            senderType: (item?.sender?.sender_type === 'app' ? 'app' : 'user') as 'user' | 'app',
+            snippet: this.msgSnippet(text, item?.msg_type ?? 'text'),
+          };
+          this.msgIdToInfo.set(messageId, info);
+          return info;
+        }
+        return null;
+      } catch (e) {
+        process.stderr.write(
+          `[supervisor] resolveReactedMsg(${messageId}) 失败: ${e instanceof Error ? e.message : e}\n`,
+        );
+        return null;
+      } finally {
+        this.msgInfoResolveInflight.delete(messageId);
+      }
+    })();
+    this.msgInfoResolveInflight.set(messageId, p);
+    return p;
+  }
+
+  /** 事件投递前确保目标频道 CLI 就绪（find-or-spawn + 等 hello，仿 onPollAction 离线兜底） */
+  private async ensureChannelReadyForEvent(chatId: string): Promise<boolean> {
+    if (!this.channels.has(chatId)) this.spawnChannelCli(chatId);
+    return this.waitForChannelReady(chatId, 15000);
+  }
+
+  /** 别人加表情回复 → 唤醒该频道品品（供参考、不强制回复）。撤表情(removed)不通知。 */
+  private async onReaction(evt: ReactionEvent): Promise<void> {
+    if (evt.action === 'removed') return; // Not-Doing：撤回表情不算"发来的 react"，不打扰
+    const info = await this.resolveReactedMsg(evt.messageId);
+    if (!info) {
+      process.stderr.write(`[supervisor] onReaction: 反查被点消息失败 (msg ${evt.messageId})，丢弃\n`);
+      return;
+    }
+    const chatId = info.chatId;
+    // 守卫与 onFeishuMessage 同语义：forgotten 频道丢；完全静默期不为表情唤醒未启动频道
+    if (this.channelConfigStore.isForgotten(chatId)) return;
+    if (this.channelsPaused && !this.channels.has(chatId)) return;
+    if (!(await this.ensureChannelReadyForEvent(chatId))) {
+      process.stderr.write(`[supervisor] onReaction: chat ${chatId.slice(-8)} CLI 未就绪，放弃\n`);
+      return;
+    }
+    const reactor = resolveSenderNameSync(evt.operator.openId, 'user');
+    const uni = feishuEmojiTypeToUnicode(evt.emojiType);
+    const emojiShow = uni ? `${uni}（${evt.emojiType}）` : evt.emojiType;
+    // 被点的消息是不是品品自己发的（app 类型 + sender.id 是本 bot 的 app_id，同 feishu-poll 自环判定）
+    const isPinpinOwn = info.senderType === 'app' && info.senderId === this.opts.feishuAppId;
+    let body: string;
+    if (isPinpinOwn) {
+      body = `【表情信号·供参考】${reactor} 给你这条消息「${info.snippet}」点了 ${emojiShow}。这通常表示认可/回应——你看情况决定要不要继续推进，不必专门回复。`;
+    } else {
+      const whose = info.senderId === evt.operator.openId
+        ? '自己'
+        : resolveSenderNameSync(info.senderId, info.senderType);
+      body = `【表情信号·供参考】${reactor} 给${whose}的这条消息「${info.snippet}」点了 ${emojiShow}。群里的小互动，供你了解，一般不用回应。`;
+    }
+    this.ipcServer.pushChatTrigger(chatId, body, {
+      user: reactor,
+      sender_type: 'human',
+      message_id: `reaction-${evt.messageId}-${evt.operator.openId}-${evt.emojiType}`,
+      trigger: 'reaction',
+    });
+  }
+
+  /** 品品被拉进新群 → spawn 该群 CLI + 提示品品可打招呼。forgotten / 完全静默期不打招呼。 */
+  private async onBotAdded(evt: BotAddedEvent): Promise<void> {
+    const chatId = evt.chatId;
+    if (this.channelConfigStore.isForgotten(chatId)) {
+      process.stderr.write(`[supervisor] onBotAdded: chat ${chatId.slice(-8)} 已被 forget，不打招呼\n`);
+      return;
+    }
+    if (this.channelsPaused) {
+      process.stderr.write(`[supervisor] onBotAdded: paused（完全静默），不自动打招呼 chat=${chatId.slice(-8)}\n`);
+      return;
+    }
+    if (!(await this.ensureChannelReadyForEvent(chatId))) {
+      process.stderr.write(`[supervisor] onBotAdded: chat ${chatId.slice(-8)} CLI 未就绪，放弃\n`);
+      return;
+    }
+    let chatName: string | undefined;
+    try {
+      const res = await getFeishuClient().im.v1.chat.get({ path: { chat_id: chatId } });
+      chatName = res.data?.name;
+    } catch { /* 拿不到群名不影响打招呼 */ }
+    const body = `【系统】我刚被拉进这个群${chatName ? `「${chatName}」` : ''}。要不要打个招呼 / 做个自我介绍，你看情况决定。`;
+    this.ipcServer.pushChatTrigger(chatId, body, {
+      user: '系统',
+      sender_type: 'system',
+      message_id: `botadded-${chatId}-${evt.operator.openId}`,
+      trigger: 'bot-added',
+    });
+  }
+
+  /** 云文档评论 → 投到兜底频道（PINPIN_COMMENT_CHAT_ID ?? 主聊 PINPIN_OWNER_CHAT_ID）。评论正文未取。 */
+  private async onComment(evt: CommentEvent): Promise<void> {
+    const targetChatId = process.env.PINPIN_COMMENT_CHAT_ID || process.env.PINPIN_OWNER_CHAT_ID;
+    if (!targetChatId) {
+      process.stderr.write(`[supervisor] onComment: 未配 PINPIN_COMMENT_CHAT_ID / PINPIN_OWNER_CHAT_ID，丢弃评论事件\n`);
+      return;
+    }
+    if (this.channelConfigStore.isForgotten(targetChatId)) return;
+    if (!(await this.ensureChannelReadyForEvent(targetChatId))) {
+      process.stderr.write(`[supervisor] onComment: 兜底频道 ${targetChatId.slice(-8)} CLI 未就绪，放弃\n`);
+      return;
+    }
+    const who = resolveSenderNameSync(evt.operator.openId, 'user');
+    const body = `【云文档评论】${who} 在一个云文档（${evt.fileType}）里发了评论${evt.mentionedBot ? '，并 @了你' : ''}。（评论正文未取，需要的话可去查该文件）`;
+    this.ipcServer.pushChatTrigger(targetChatId, body, {
+      user: who,
+      sender_type: 'human',
+      message_id: `comment-${evt.commentId}`,
+      trigger: 'doc-comment',
     });
   }
 

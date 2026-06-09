@@ -51,9 +51,70 @@ export const IPC_METHODS = {
   FORGET_CHANNEL: 'forget-channel',    // request → returns WorkOkResult
   // 方案A：投票点击 → supervisor 把记票请求路由到有 DB 的频道子进程执行（main → child request）
   POLL_VOTE: 'poll.vote',              // main → child request → returns PollVoteResult
+  // ── 管家(warden)桥接：独立管家进程连 supervisor 固定端口，手机远程看/控 CLI ──
+  WARDEN_LIST_CLIS: 'warden.list-clis',           // request → { clis: ChannelCli.getStats()[] }
+  WARDEN_RESTART_CLI: 'warden.restart-cli',       // request {chat_id} → WorkOkResult
+  WARDEN_STOP_CLI: 'warden.stop-cli',             // request {chat_id} → WorkOkResult
+  WARDEN_SUB_TERMINAL: 'warden.sub-terminal',     // request {chat_id} → WorkOkResult（订阅后 server push TERMINAL_DATA）
+  WARDEN_UNSUB_TERMINAL: 'warden.unsub-terminal', // request {chat_id} → WorkOkResult
+  WARDEN_TERMINAL_DATA: 'warden.terminal-data',   // notification main→warden {chat_id, data}
+  WARDEN_SYSTEM_INFO: 'warden.system-info',       // request → WardenSystemInfo
+  // 批1 频道完整管理
+  WARDEN_START_CLI: 'warden.start-cli',           // request {chat_id} → WorkOkResult（spawn+start）
+  WARDEN_START_ALL: 'warden.start-all',           // request → WorkOkResult
+  WARDEN_COMPACT_CLI: 'warden.compact-cli',       // request {chat_id} → WorkOkResult
+  WARDEN_SET_CONFIG: 'warden.set-config',         // request {chat_id, model?/effort?/fast?/autoCompactPct?} → WorkOkResult（持久化，重启生效）
+  WARDEN_SET_NAME: 'warden.set-name',             // request {chat_id, name} → WorkOkResult
+  WARDEN_SEND_INPUT: 'warden.send-input',         // request {chat_id, text} → WorkOkResult（写 PTY，跟 CLI 对话）
+  // 批2 额度 + 频道删除/恢复
+  WARDEN_FETCH_QUOTA: 'warden.fetch-quota',       // request → 透传 {quota, today_messages, rate_limits}（先触发 fetchQuotaNow 刷新）
+  WARDEN_FORGET_CHANNEL: 'warden.forget-channel', // request {chat_id} → WorkOkResult
+  WARDEN_LIST_FORGOTTEN: 'warden.list-forgotten', // request → {channels: [{chat_id, display_name?}]}
+  WARDEN_RESTORE_CHANNEL: 'warden.restore-channel', // request {chat_id} → WorkOkResult
+  // 批3 work session（Owner"干活"session 全复刻：列表/终端看写/结束）
+  WARDEN_LIST_WORK: 'warden.list-work',           // request → 透传 {sessions: WorkSession.getStats()[]}
+  WARDEN_WORK_SUB_TERMINAL: 'warden.work-sub-terminal',     // request {session_id} → WorkOkResult（attach，push TERMINAL_DATA 以 session_id 作路由 key）
+  WARDEN_WORK_UNSUB_TERMINAL: 'warden.work-unsub-terminal', // request {session_id} → WorkOkResult
+  WARDEN_WORK_SEND: 'warden.work-send',           // request {session_id, text} → WorkOkResult（给 work CLI 发指令）
+  WARDEN_WORK_END: 'warden.work-end',             // request {session_id} → WorkOkResult（结束 work）
+  // 批4 全局设置 + 系统 + 日志
+  WARDEN_GET_DEFAULTS: 'warden.get-defaults',     // request → {channel:{model,effort,fast,autoCompactPct}, work:{model,effort,fast}}
+  WARDEN_SET_DEFAULTS: 'warden.set-defaults',     // request {model?,effort?,fast?,autoCompactPct?} → WorkOkResult
+  WARDEN_SET_WORK_DEFAULTS: 'warden.set-work-defaults', // request {model?,effort?,fast?} → WorkOkResult
+  WARDEN_RESTART_SUPERVISOR: 'warden.restart-supervisor', // request → WorkOkResult（重启品品 supervisor）
+  WARDEN_QUIT_APP: 'warden.quit-app',             // request → WorkOkResult（关闭品品，经 main.ts isQuiting）
+  WARDEN_RECENT_LOGS: 'warden.recent-logs',       // request {limit?} → {logs: WardenLogEntry[]}
 } as const;
 
 export type IpcMethod = (typeof IPC_METHODS)[keyof typeof IPC_METHODS];
+
+// ── 管家桥接固定端口（区别于子进程动态端口；管家与 supervisor 两端共享此单源）──
+export const WARDEN_BRIDGE_PORT = 47900;
+
+/** 管家在桥接上注册用的固定 client id（hello 注册后 supervisor 才能 push TERMINAL_DATA 回来） */
+export const WARDEN_CLIENT_ID = '__warden__';
+
+// ── 管家协议 params/result（CLI 状态结构不在此重复定义，直接透传 ChannelCli.getStats()）──
+export interface WardenTerminalDataParams {
+  chat_id: string;
+  /** PTY ring buffer 增量 / 回放（ANSI 文本） */
+  data: string;
+}
+/** 仪表盘日志流条目（supervisor ring buffer 存、warden.recent-logs 透传给手机；同 launcher LogEntry 结构） */
+export interface WardenLogEntry {
+  ts: number;
+  level: 'info' | 'warn' | 'error';
+  source: string;
+  message: string;
+}
+
+/** 账号级用量（手机仪表盘头部展示）；字段缺失为 null */
+export interface WardenSystemInfo {
+  /** 当前在册频道数（supervisor.channels.size） */
+  channel_count: number;
+  /** 账号额度（5h/7天），同 statusLine rate_limits */
+  rate_limits?: RateLimits | null;
+}
 
 // ── 子 → 主 params ──
 

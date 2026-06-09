@@ -16,7 +16,7 @@
  */
 
 import * as Lark from '@larksuiteoapi/node-sdk';
-import type { CardActionEvent } from '@larksuiteoapi/node-sdk';
+import type { CardActionEvent, ReactionEvent, BotAddedEvent, CommentEvent } from '@larksuiteoapi/node-sdk';
 import type { FeishuInboundMessage } from './feishu-poll.js';
 
 /** 卡片投票回调结构（action.value.poll_id + option_idx） */
@@ -32,6 +32,12 @@ export interface FeishuEventSubscriberOptions {
   onMessage: (msg: FeishuInboundMessage) => void | Promise<void>;
   /** 收到卡片投票点击时调用（supervisor 处理计票 + 刷卡片） */
   onPollAction?: (evt: CardActionEvent, value: PollActionValue) => void | Promise<void>;
+  /** 别人加/撤消息表情回复（reaction 无 chat_id，supervisor 侧反查路由） */
+  onReaction?: (evt: ReactionEvent) => void | Promise<void>;
+  /** 品品被拉进某群（evt.chatId 即新群） */
+  onBotAdded?: (evt: BotAddedEvent) => void | Promise<void>;
+  /** 云文档评论（无 chat_id，supervisor 侧投兜底频道） */
+  onComment?: (evt: CommentEvent) => void | Promise<void>;
 }
 
 export class FeishuEventSubscriber {
@@ -111,6 +117,37 @@ export class FeishuEventSubscriber {
               `[feishu-event] cardAction handler 同步异常: ${e instanceof Error ? e.message : e}\n`,
             );
           }
+        });
+      });
+    }
+
+    // 表情回复 / 被拉进群 / 云文档评论 —— 均 fire-and-forget（飞书 3s ack 约束，不阻塞）
+    // SDK 封装层已归一化好事件（dispatcher 注册 im.message.reaction.*_v1 / im.chat.member.bot.added_v1 /
+    // drive.notice.comment_add_v1），这里只把归一化 evt 转交 supervisor 路由投递。
+    if (this.opts.onReaction) {
+      this.channel.on('reaction', (evt: ReactionEvent) => {
+        setImmediate(() => {
+          Promise.resolve(this.opts.onReaction!(evt)).catch((e) => {
+            process.stderr.write(`[feishu-event] onReaction 异步异常: ${e instanceof Error ? e.message : e}\n`);
+          });
+        });
+      });
+    }
+    if (this.opts.onBotAdded) {
+      this.channel.on('botAdded', (evt: BotAddedEvent) => {
+        setImmediate(() => {
+          Promise.resolve(this.opts.onBotAdded!(evt)).catch((e) => {
+            process.stderr.write(`[feishu-event] onBotAdded 异步异常: ${e instanceof Error ? e.message : e}\n`);
+          });
+        });
+      });
+    }
+    if (this.opts.onComment) {
+      this.channel.on('comment', (evt: CommentEvent) => {
+        setImmediate(() => {
+          Promise.resolve(this.opts.onComment!(evt)).catch((e) => {
+            process.stderr.write(`[feishu-event] onComment 异步异常: ${e instanceof Error ? e.message : e}\n`);
+          });
         });
       });
     }

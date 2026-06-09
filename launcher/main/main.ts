@@ -213,6 +213,8 @@ interface LogEntry {
 }
 
 function pushLog(entry: LogEntry): void {
+  // 同步灌进 supervisor ring buffer，供管家手机端 warden.recent-logs 读
+  supervisor?.recordLog(entry);
   if (mainWindow && !mainWindow.isDestroyed()) {
     mainWindow.webContents.send('log', entry);
   }
@@ -294,6 +296,13 @@ app.whenReady().then(async () => {
     if (!snap.available && snap.error) {
       pushLog({ ts: Date.now(), level: 'warn', source: 'ccusage', message: `quota 暂不可用: ${snap.error.slice(0, 80)}` });
     }
+  });
+  // 管家手机端"关闭品品"：经 supervisor 事件转 app.quit（带 isQuiting 标志，否则只最小化到托盘）。
+  // 不弹桌面确认框——Owner远程不在电脑前，手机端已二次确认。
+  supervisor.on('warden-request-quit', () => {
+    pushLog({ ts: Date.now(), level: 'warn', source: 'app', message: '管家手机端请求关闭品品' });
+    isQuiting = true;
+    app.quit();
   });
   // P1.2: channel 状态变即推 state（事件驱动，替代 1Hz 心跳 race）
   supervisor.on('channel-state-changed', () => pushState());

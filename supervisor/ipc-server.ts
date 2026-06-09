@@ -163,6 +163,18 @@ export class IpcServer extends EventEmitter {
     }
   }
 
+  /** 通用：往指定已注册 client 推一条 notification（无 id）。管家终端流 TERMINAL_DATA 用。 */
+  pushNotification(chatId: string, method: string, params: unknown): boolean {
+    const c = this.clients.get(chatId);
+    if (!c) return false;
+    try {
+      c.socket.write(encodeFrame({ method, params }));
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
   /**
    * 方案A：主 → 子 request（往该 chat 的子进程发带 id 的请求帧，等响应帧配对）。30s 超时。
    * 找不到该 chat 的 client → reject（调用方负责离线兜底 spawn + 重试）。
