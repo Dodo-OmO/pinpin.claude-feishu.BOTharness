@@ -10,7 +10,7 @@
 export const PINPIN_NO_REPLY_TOOL = {
   name: "pinpin_no_reply",
   description:
-    "决定这轮不回飞书时调（空操作，不外发给用户）。给「我看过、决定不回」留个痕——是真不该回时用（纯噪声 / 别人正事 / 近5条全AI），不是偷懒挡箭牌。",
+    "决定这轮不回飞书时调（空操作，不外发给用户）。给「我看过、决定不回」留个痕——是真不该回时用（纯噪声 / 别人正事），不是偷懒挡箭牌。",
   inputSchema: {
     type: "object" as const,
     properties: {},
