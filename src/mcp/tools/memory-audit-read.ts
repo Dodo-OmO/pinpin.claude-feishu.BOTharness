@@ -3,16 +3,13 @@
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import fs from "node:fs";
-import path from "node:path";
 import { readChatLog } from "../utils/chat-log.js";
-import { getVaultRoot } from "../utils/helper.js";
-
-const MEMORY_FILE = path.join(getVaultRoot(), "记忆系统", "永存记忆50条.md");
+import { MEMORY_FILE } from "../utils/memory.js";
 
 export const memoryAuditReadTool: Tool = {
   name: "memory_audit_read",
   description:
-    "memory-audit-agent 用：拿当前 50 条永存记忆全文 + 最近 7 天对话日志节选（按 chat 聚合）。" +
+    "拿当前 50 条永存记忆全文 + 最近 7 天对话日志节选（按 chat 聚合）。" +
     "sub-agent 拿到后推理判定哪些条目要 update / merge / delete，再调 memory_rewrite tool 写盘。",
   inputSchema: { type: "object", properties: {} },
 };

@@ -205,10 +205,6 @@ export class IpcServer extends EventEmitter {
   }
 
   private onConnection(socket: net.Socket): void {
-    process.stderr.write(
-      `[ipc-server] client connected from ${socket.remoteAddress}:${socket.remotePort}\n`,
-    );
-
     // entry 占位——hello 来了再填 chatId / pid
     const entry: ClientEntry = { chatId: '', pid: 0, socket, buffer: '' };
 

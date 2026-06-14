@@ -5,16 +5,7 @@
  * 因为 stdio MCP server 的 stdin/stdout 是被 Claude Code CLI 占用的 JSON-RPC channel。
  *
  * 协议风格类似 LSP：单向 notification + 双向 request/response（id 配对）。
- *
- * **子 → 主** notifications:
- *   - hello              { chat_id, pid }                        子进程上线，注册映射
- *   - bye                { chat_id }                             子进程优雅退出
- *
- * **主 → 子** notifications:
- *   - feishu.message     { message: FeishuInboundMessage }       新消息推过来
- *   - chat-trigger       { body, meta? }                         cron / 手动 trigger（push-channel 用）
- *
- * 步骤 3 实装：以上 4 个 notification。其它（tool RPC 等）后续步骤补。
+ * 方法全集见下方 IPC_METHODS 逐条注释（hello/bye、push、request、warden 桥接四类，40+ method）。
  */
 
 export interface IpcEnvelope<T = unknown> {
@@ -86,7 +77,6 @@ export const IPC_METHODS = {
   WARDEN_RECENT_LOGS: 'warden.recent-logs',       // request {limit?} → {logs: WardenLogEntry[]}
 } as const;
 
-export type IpcMethod = (typeof IPC_METHODS)[keyof typeof IPC_METHODS];
 
 // ── 管家桥接固定端口（区别于子进程动态端口；管家与 supervisor 两端共享此单源）──
 export const WARDEN_BRIDGE_PORT = 47900;
@@ -139,6 +129,10 @@ export interface FeishuInboundMessagePayload {
   sender_type: 'user' | 'app';
   text?: string;
   create_time_ms: number;
+  /** supervisor/index.ts 单点提取，子端不再钻 raw 取这三字段 */
+  content?: string;
+  mentions?: unknown[];
+  parent_id?: string;
   /** 原始飞书消息（含 mentions / parent_id / body / sender 全字段），传给子端做后续协议 #33 mention 解析等 */
   raw?: unknown;
 }

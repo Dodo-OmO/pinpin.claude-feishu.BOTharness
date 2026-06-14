@@ -4,7 +4,7 @@
  * 阶段 4 批次 0 步骤 0.3：从 早期版本 src/feishu/feishu-token.ts (376 行) CLI 优雅重写
  * CLI 优雅化改动：
  *   1. 砍 ../utils/config.js 抽象层 → 直接 process.env（MCP 版无需独立 config）
- *   2. alertReauth 复用 feishu-send getFeishuClient 直发 OWNER open_id 私聊（发送失败回落 console.warn 留痕）
+ *   2. alertReauth 复用 feishu-send getFeishuClient 直发 OWNER open_id 私聊（发送失败回落 stderr 留痕）
  *   3. 保留所有核心三态机 / Promise 锁 / 原子写 / 24h 告警去重逻辑
  *
  * source-driven（已对飞书官方文档 + @larksuiteoapi/node-sdk 1.65.0）：
@@ -81,14 +81,13 @@ function readToken(): FeishuUserToken | null {
     const raw = fs.readFileSync(TOKEN_FILE, "utf-8");
     const t = JSON.parse(raw) as FeishuUserToken;
     if (!t.access_token || !t.refresh_token) {
-      console.warn("[feishu-token] token 文件字段缺失，按未授权处理");
+      process.stderr.write("[feishu-token] token 文件字段缺失，按未授权处理\n");
       return null;
     }
     return t;
   } catch (e) {
-    console.warn(
-      "[feishu-token] token 文件解析失败，按未授权处理:",
-      e instanceof Error ? e.message : e
+    process.stderr.write(
+      `[feishu-token] token 文件解析失败，按未授权处理: ${e instanceof Error ? e.message : e}\n`
     );
     return null;
   }
@@ -239,7 +238,7 @@ export async function exchangeCodeForToken(code: string): Promise<void> {
   }
   writeToken(token);
   clearReauthAlert();
-  console.log("[feishu-token] 授权成功，user_access_token 已落盘");
+  process.stderr.write("[feishu-token] 授权成功，user_access_token 已落盘\n");
 }
 
 // ── 刷新 + 三态机 ──────────────────────────────────────────
@@ -358,7 +357,7 @@ async function alertReauth(reason: string): Promise<void> {
 
   const ownerOpenId = process.env.FEISHU_OWNER_OPEN_ID;
   if (!ownerOpenId) {
-    console.warn(`[feishu-token] 需重新授权但未配 FEISHU_OWNER_OPEN_ID，无法私聊告警：${reason}`);
+    process.stderr.write(`[feishu-token] 需重新授权但未配 FEISHU_OWNER_OPEN_ID，无法私聊告警：${reason}\n`);
     return;
   }
 
@@ -385,8 +384,8 @@ async function alertReauth(reason: string): Promise<void> {
       },
     });
   } catch (e) {
-    // 私聊发不出去时回落 console.warn，至少终端/日志留痕，不静默吞掉
+    // 私聊发不出去时回落 stderr 留痕，不静默吞掉
     const msg = e instanceof Error ? e.message : String(e);
-    console.warn(`[feishu-token] 重授权私聊告警发送失败（${msg}），原文：\n${text}`);
+    process.stderr.write(`[feishu-token] 重授权私聊告警发送失败（${msg}），原文：\n${text}\n`);
   }
 }

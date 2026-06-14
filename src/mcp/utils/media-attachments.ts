@@ -5,7 +5,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import sharp from "sharp";
-import { dateYYYYMM, timeHHMM, getVaultRoot, isBallPartner, ballPartnerDir } from "./helper.js";
+import { dateYYYYMM, timeHHMM, getVaultRoot, isBallPartner, ballPartnerDir, ensureDir, safeName } from "./helper.js";
 import { downloadMessageResource } from "../tools/feishu-send.js";
 
 const VAULT_ROOT = getVaultRoot();
@@ -23,16 +23,6 @@ function fileDirFor(chatId?: string): string {
 const STATIC_MAX_EDGE = 384;
 const GIF_MAX_EDGE = 256;
 const JPEG_QUALITY = 80;
-
-function ensureDir(dir: string): void {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
-
-/** 文件名清洗——去路径分隔符 / 控制字符，限长，防写盘越权 */
-function safeName(name: string): string {
-  const cleaned = (name || "file").replace(/[\\/:*?"<>|\r\n\t\x00]/g, "_").slice(0, 80);
-  return cleaned || "file";
-}
 
 // 超此尺寸不压缩（直接存原图）——避免超大图 sharp 解压吃爆内存（libjpeg 峰值约原图×几倍）
 const COMPRESS_SIZE_LIMIT = 30 * 1024 * 1024;

@@ -39,16 +39,11 @@ import { PINPIN_REACT_TOOL, handlePinpinReact } from './tools/pinpin-react.js';
 import { PINPIN_MEMORIZE_TOOL, handlePinpinMemorize } from './tools/pinpin-memorize.js';
 import { PINPIN_NO_REPLY_TOOL, handlePinpinNoReply } from './tools/pinpin-no-reply.js';
 import { PINPIN_SEND_FILE_TOOL, handlePinpinSendFile } from './tools/pinpin-send-file.js';
-// reply.ts 保留作兜底（"弃用默认留码、行为层关"）：ListTools 不注册=base 看不到，
-// case 仍走原 handler 兜底（防 base 缓存误调时静默执行不破回话）。
-import { handleReply } from './tools/reply.js';
 // 阶段 4：DB 初始化 + cron 注册（import 触发 registerCron 副作用）
 import { initDatabase, closeDatabase } from './db/database.js';
 import { startAllCrons, stopAllCrons } from './cron/registry.js';
 import { logBackground } from './utils/background-log.js';
 import { setServerInstance } from './utils/push-channel.js';
-// feishu-token-keepalive.js / daily-restart.js：已行为层关（空模块 export {}），
-// 对应逻辑已搬 supervisor/cron-runner.ts，无需在 CLI 子进程 import。
 // 阶段 4 批次 2：定时播报类 cron（import 触发 registerCron 副作用）
 import './cron/daily-news.js';
 import './cron/daily-briefing.js';
@@ -57,7 +52,6 @@ import './cron/memory-audit.js';
 import './cron/free-activity.js';
 import './cron/daily-diary.js';
 import './cron/ball-partner-tasks.js';
-// mood-decay.js：已行为层关（空模块 export {}），搬 supervisor/cron-runner.ts，无需 CLI import。
 import { schedulerStart, schedulerStop } from './cron/scheduled-jobs-tick.js';
 // 阶段 4 批次 1 步骤 1.5：read_chat_log tool
 import { readChatLogTool, handleReadChatLog } from './tools/read-chat-log.js';
@@ -129,7 +123,7 @@ import {
   ARCHIVE_SEARCH_TOOL,
   handleResolveOpenId,
   handleArchiveSearch,
-} from './tools/helpers.js';
+} from './tools/misc-tools.js';
 // 2026-05-28 阶段补齐：卡片家族 4 tool（含 confirm_dangerous_action 降级版）
 import {
   SEND_CARD_TOOL,
@@ -397,10 +391,6 @@ async function main() {
         return handleSendPollCard(args as unknown as Parameters<typeof handleSendPollCard>[0]);
       case 'confirm_dangerous_action':
         return handleConfirmDangerousAction(args as unknown as Parameters<typeof handleConfirmDangerousAction>[0]);
-      // reply 兜底（已从 ListTools 移除；如 base 因缓存仍调，走原 handler 静默执行避免破回话）
-      case 'reply':
-        process.stderr.write(`[server] 收到旧 reply 调用（已废弃）→ 兜底走原 handler\n`);
-        return handleReply(args as unknown as Parameters<typeof handleReply>[0]);
       default:
         return {
           isError: true,

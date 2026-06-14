@@ -27,12 +27,6 @@ import {
   type WorkStoppedPush,
 } from './protocol.js';
 
-export interface SupervisorClientEvents {
-  'feishu-message': (params: FeishuMessageParams) => void;
-  'chat-trigger': (params: ChatTriggerParams) => void;
-  disconnect: () => void;
-}
-
 export class SupervisorClient extends EventEmitter {
   private socket: net.Socket | null = null;
   private buffer = '';
@@ -237,7 +231,8 @@ export class SupervisorClient extends EventEmitter {
     }
     try {
       const result = await handler(env.params);
-      this.socket?.write(encodeFrame({ id: env.id, result }));
+      // result ?? null：防 undefined 被 JSON.stringify 丢字段，导致请求方误判无响应而 30s 白挂
+      this.socket?.write(encodeFrame({ id: env.id, result: result ?? null }));
     } catch (e) {
       this.socket?.write(
         encodeFrame({ id: env.id, error: { code: -32000, message: e instanceof Error ? e.message : String(e) } }),

@@ -1,6 +1,13 @@
 // 通用小函数集合——日期 / 字符串 / 文件名安全化
 // 从 早期版本 src/utils/helper.ts 整体搬迁，无改动
 
+import fs from "node:fs";
+
+/** 确保目录存在（不存在则递归创建） */
+export function ensureDir(dir: string): void {
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+}
+
 /** 数字补 2 位前导 0——普遍用于 月/日/时分秒 拼接 */
 export const pad2 = (n: number): string => n.toString().padStart(2, "0");
 
@@ -19,9 +26,11 @@ export function timeHHMM(d: Date = new Date()): string {
   return `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
-/** 文件名安全化：替换 Windows/Linux 不允许的字符 */
+/** 文件名安全化：替换路径/特殊字符 + 控制字符，码点安全截断 80 字，空值兜底 "unnamed" */
 export function safeName(name: string): string {
-  return name.replace(/[\\/:*?"<>|]/g, "_");
+  const cleaned = (name || "unnamed")
+    .replace(/[\\/:*?"<>|\r\n\t\x00]/g, "_");
+  return Array.from(cleaned).slice(0, 80).join("") || "unnamed";
 }
 
 /** vault 根目录——优先 env（PINPIN_VAULT_DIR / BASE_PROJECT_DIR，子进程加载 .env 后有值），

@@ -18,25 +18,13 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { execSync } from 'node:child_process';
 import { randomBytes, randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import { PtyManager } from './pty-manager.js';
 import { JsonlWatcher, type JsonlEvent } from './jsonl-watcher.js';
-
-function resolveClaudePath(): string {
-  if (process.env['PINPIN_CLAUDE_PATH']) return process.env['PINPIN_CLAUDE_PATH'];
-  const cmd = process.platform === 'win32' ? 'where claude.exe' : 'which claude';
-  try {
-    const out = execSync(cmd, { encoding: 'utf8' }).trim().split('\n')[0].trim();
-    if (out) return out;
-  } catch {
-    /* fall through */
-  }
-  return 'claude';
-}
+import { resolveClaudePath, stripAnsi } from './utils.js';
 
 /** model name → context window size（用于上下文 % 计算）。未识别 model 返 null（UI 显示 tokens 不显 %） */
 function contextWindowSize(model: string): number | null {
@@ -315,8 +303,6 @@ export class WorkSession extends EventEmitter {
     // 停止锚点：检测到 TUI 主界面就绪特征（bypassPermissions 状态栏 = claude 已过所有启动确认），
     // 最长兜底 15s 后无论如何停 auto-confirm、再等 500ms 注入 goal。
     {
-      const stripAnsi = (s: string): string =>
-        s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
       let promptBuf = '';
       let lastAutoEnterAt = 0;
       let autoConfirmDone = false;
@@ -517,12 +503,13 @@ export class WorkSession extends EventEmitter {
     return parts.length > 0 ? parts.join('\n') : null;
   }
 
-  sendMessage(text: string): void {
-    if (this._status !== 'running' || !this.pty) return;
+  sendMessage(text: string): boolean {
+    if (this._status !== 'running' || !this.pty) return false;
     // 遥控修复 Bug1: 走 submitToPty（文本 + 延迟独立 \r），不再一次性 text+'\r\n'。
     // 注：不需手动重置判停闸——新指令会让工作 CLI 产出**新的**最终回复，
     // idle watch 用文本身份去重（lastNotifiedText），新回复天然能再唤醒品品一次。
     this.submitToPty(text);
+    return true;
   }
 
   /** Q5 v2: 终端窗口 attach —— 直接走 PtyManager 的 ring buffer + 实时 PTY 字节流

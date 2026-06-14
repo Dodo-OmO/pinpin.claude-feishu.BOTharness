@@ -192,6 +192,11 @@ export class Supervisor extends EventEmitter {
 
     // ── 2. IPC server start ──
     const port = await this.ipcServer.start();
+    // supervisor.restart() 复用同一 ipcServer 实例，先清旧 listener 防重注册累积
+    this.ipcServer.removeAllListeners('client-hello');
+    this.ipcServer.removeAllListeners('client-disconnected');
+    this.ipcServer.removeAllListeners('statusline-update');
+    this.ipcServer.removeAllListeners('worksession-stop-signal');
     this.ipcServer.on('client-hello', (info: { chat_id: string; pid: number }) => {
       process.stderr.write(`[supervisor] IPC client up: chat=${info.chat_id} pid=${info.pid}\n`);
       // 通知对应 ChannelCli 启动期结束（停止 auto-confirm 启动 prompts）
@@ -309,8 +314,8 @@ export class Supervisor extends EventEmitter {
         const result: WorkOkResult = { ok: false, error: `unknown session: ${p.session_id}` };
         return result;
       }
-      session.sendMessage(p.message);
-      const result: WorkOkResult = { ok: true };
+      const sent = session.sendMessage(p.message);
+      const result: WorkOkResult = sent ? { ok: true } : { ok: false, error: 'work CLI not running' };
       return result;
     });
 
@@ -984,6 +989,31 @@ export class Supervisor extends EventEmitter {
     const chatName =
       this.channelConfigStore.get(msg.chat_id)?.display_name ??
       this.feishuPoll?.getChats().find((c) => c.chat_id === msg.chat_id)?.name;
+    // 单点提取 content/mentions/parent_id（子端不再钻 raw 取这三字段）
+    // poll 形态：raw 即 API list item，字段在顶层（raw.body.content / raw.mentions / raw.parent_id）
+    // WS 形态：raw = SDK EventDispatcher 摊平体，内容在 raw.message.*
+    function extractInboundFields(raw: unknown): { content?: string; mentions?: unknown[]; parent_id?: string } {
+      if (!raw || typeof raw !== 'object') return {};
+      const r = raw as Record<string, unknown>;
+      // poll 形态
+      const pollContent = (r.body as { content?: string } | undefined)?.content;
+      const pollMentions = Array.isArray(r.mentions) ? r.mentions : undefined;
+      const pollParentId = typeof r.parent_id === 'string' ? r.parent_id : undefined;
+      if (pollContent !== undefined || pollMentions !== undefined || pollParentId !== undefined) {
+        return { content: pollContent, mentions: pollMentions, parent_id: pollParentId };
+      }
+      // WS 形态
+      const msgNode = r.message as Record<string, unknown> | undefined;
+      if (msgNode) {
+        return {
+          content: typeof msgNode.content === 'string' ? msgNode.content : undefined,
+          mentions: Array.isArray(msgNode.mentions) ? msgNode.mentions : undefined,
+          parent_id: typeof msgNode.parent_id === 'string' ? msgNode.parent_id : undefined,
+        };
+      }
+      return {};
+    }
+    const { content, mentions, parent_id } = extractInboundFields(msg.raw);
     // IPC push 到对应 chat_id 的子 MCP server 进程
     const payload: FeishuInboundMessagePayload = {
       chat_id: msg.chat_id,
@@ -994,6 +1024,9 @@ export class Supervisor extends EventEmitter {
       sender_type: msg.sender_type,
       text: msg.text,
       create_time_ms: msg.create_time_ms,
+      content,
+      mentions,
+      parent_id,
       raw: msg.raw,
     };
     const ok = this.ipcServer.pushFeishuMessage(msg.chat_id, payload);
@@ -1214,6 +1247,7 @@ export class Supervisor extends EventEmitter {
       process.stderr.write(`[supervisor] onComment: 未配 PINPIN_COMMENT_CHAT_ID / PINPIN_OWNER_CHAT_ID，丢弃评论事件\n`);
       return;
     }
+    if (this.channelsPaused && !this.channels.has(targetChatId)) return;
     if (this.channelConfigStore.isForgotten(targetChatId)) return;
     if (!(await this.ensureChannelReadyForEvent(targetChatId))) {
       process.stderr.write(`[supervisor] onComment: 兜底频道 ${targetChatId.slice(-8)} CLI 未就绪，放弃\n`);

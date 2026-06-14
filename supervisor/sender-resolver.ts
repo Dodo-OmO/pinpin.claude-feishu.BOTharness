@@ -11,38 +11,11 @@
  */
 
 import { getFeishuClient } from './feishu-client.js';
+import { parseEnvMap, resolveMentions } from '../src/shared/sender-shared.js';
+export type { FeishuMentionShared as FeishuMention } from '../src/shared/sender-shared.js';
 
-// ── BOT_NAME_MAP env 解析（同 sender-names.ts:parseBotRosterEnv） ──
-function parseEnvMap(envName: string): Record<string, string> {
-  const raw = process.env[envName];
-  const m: Record<string, string> = {};
-  if (!raw || !raw.trim()) return m;
-  const trimmed = raw.trim();
-  if (trimmed.startsWith('{')) {
-    try {
-      const obj = JSON.parse(trimmed) as Record<string, string>;
-      for (const [k, v] of Object.entries(obj)) {
-        if (typeof k === 'string' && typeof v === 'string') m[k] = v;
-      }
-    } catch (e) {
-      process.stderr.write(
-        `[sender-resolver] ${envName} JSON 解析失败: ${e instanceof Error ? e.message : e}\n`,
-      );
-    }
-    return m;
-  }
-  for (const pair of trimmed.split(',')) {
-    const idx = pair.indexOf(':');
-    if (idx <= 0) continue;
-    const k = pair.slice(0, idx).trim();
-    const v = pair.slice(idx + 1).trim();
-    if (k && v) m[k] = v;
-  }
-  return m;
-}
-
-const BOT_NAME_MAP = parseEnvMap('FEISHU_BOT_ROSTER');
-const ENV_KNOWN_USERS = parseEnvMap('FEISHU_KNOWN_USERS');
+const BOT_NAME_MAP = parseEnvMap(process.env['FEISHU_BOT_ROSTER']);
+const ENV_KNOWN_USERS = parseEnvMap(process.env['FEISHU_KNOWN_USERS']);
 
 /** 同步 user 缓存（首次返 fallback，async 预热后下次命中） */
 const userNameCache = new Map<string, string>();
@@ -95,21 +68,4 @@ async function primeUserName(openId: string): Promise<void> {
   }
 }
 
-// ── 飞书 mention 字段（raw.mentions 数组） ──
-export interface FeishuMention {
-  key?: string;       // "@_user_1"
-  id?: { open_id?: string; user_id?: string; union_id?: string };
-  name?: string;      // 真名
-  tenant_key?: string;
-}
-
-/** 把消息 text 里的 @_user_N / @_chat_N 占位符替换为 @<真名>（同 chat-message.ts:resolveMentions） */
-export function resolveMentions(text: string, mentions: FeishuMention[] | undefined): string {
-  if (!text || !mentions || mentions.length === 0) return text;
-  let out = text;
-  for (const m of mentions) {
-    if (!m.key || !m.name) continue;
-    out = out.split(m.key).join(`@${m.name}`);
-  }
-  return out;
-}
+export { resolveMentions };

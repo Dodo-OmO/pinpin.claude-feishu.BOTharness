@@ -113,7 +113,10 @@ function scheduleNext(job: CronJob): void {
 function nextRunFor(job: CronJob, now: number): number {
   if (job.schedule.kind === "interval") {
     const lastRun = getLastRunMs(job.name);
-    return lastRun != null ? lastRun + job.schedule.ms : now + job.schedule.ms;
+    const next = lastRun != null ? lastRun + job.schedule.ms : now + job.schedule.ms;
+    // handler 失败时 lastRun 未刷新，算出的 next 可能 <= now（导致 100ms 紧循环）。
+    // 改为：若 next 已过期，等完整周期再试（now + intervalMs），避免空转。
+    return next > now ? next : now + job.schedule.ms;
   }
   return computeNextRunAt(job.schedule, now);
 }

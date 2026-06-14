@@ -5,15 +5,11 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { dateYYYYMM, dateYYYYMMDD, timeHHMM, getVaultRoot } from "./helper.js";
+import { dateYYYYMM, dateYYYYMMDD, timeHHMM, getVaultRoot, ensureDir } from "./helper.js";
 
 const LOG_ROOT = path.join(getVaultRoot(), "系统日志", "后台账本");
 
 let writeQueue: Promise<void> = Promise.resolve();
-
-function ensureDir(dir: string): void {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
 
 function getLogPath(): string {
   const monthDir = path.join(LOG_ROOT, dateYYYYMM());
@@ -47,30 +43,4 @@ async function tryAppend(filePath: string, content: string): Promise<void> {
 export function logBackground(category: string, content: string): void {
   const line = `${dateYYYYMMDD()} ${timeHHMM()} [${category}] ${content.trim()}\n`;
   writeQueue = writeQueue.then(() => tryAppend(getLogPath(), line));
-}
-
-/**
- * 读后台账本——读某月目录下所有按天文件（拼接），支持按 category 过滤
- * @param month YYYY-MM（默认本月）
- * @param category 可选过滤
- */
-export function readBackgroundLog(month?: string, category?: string): string {
-  const m = month ?? dateYYYYMM();
-  const monthDir = path.join(LOG_ROOT, m);
-  if (!fs.existsSync(monthDir)) return "";
-  let content: string;
-  try {
-    const files = fs
-      .readdirSync(monthDir)
-      .filter((f) => f.endsWith(".md"))
-      .sort();
-    content = files.map((f) => fs.readFileSync(path.join(monthDir, f), "utf-8")).join("");
-  } catch {
-    return "";
-  }
-  if (!category) return content;
-  return content
-    .split("\n")
-    .filter((line) => line.includes(`[${category}]`))
-    .join("\n");
 }

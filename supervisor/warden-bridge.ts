@@ -209,8 +209,8 @@ export async function createWardenBridge(deps: WardenBridgeDeps): Promise<IpcSer
     const { session_id, text } = (params ?? {}) as { session_id?: string; text?: string };
     const ws = session_id ? deps.getWorkSession(session_id) : undefined;
     if (!ws) return { ok: false, error: `no work session ${session_id}` };
-    ws.sendMessage(text ?? '');
-    return { ok: true };
+    const sent = ws.sendMessage(text ?? '');
+    return sent ? { ok: true } : { ok: false, error: 'work CLI not running' };
   });
 
   bridge.setRequestHandler(IPC_METHODS.WARDEN_WORK_END, async (params): Promise<WorkOkResult> => {

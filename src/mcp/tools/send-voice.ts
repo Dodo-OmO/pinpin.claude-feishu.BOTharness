@@ -2,7 +2,6 @@
 // 流程：text → emotion 拼前缀 → 长度检查 → 去重检查 → TTS 合成 → upload opus → sendAudio
 // 任一环节失败 → 抛异常给 pinpin_reply_voice handler 自动降级文字
 
-import path from "node:path";
 import {
   countLanguageChars,
   VOICE_TEXT_LIMIT,
@@ -59,14 +58,14 @@ export async function sendVoice(
   }
 
   // 4. TTS 合成（OGG Opus）
-  const { filePath, durationSecs, buffer } = await synthesizeVoice(ttsPrompt);
+  const { fileName, durationSecs, buffer } = await synthesizeVoice(ttsPrompt);
   process.stderr.write(
-    `[send-voice] TTS 合成 OK: ${path.basename(filePath)} (${durationSecs.toFixed(1)}s)\n`,
+    `[send-voice] TTS 合成 OK: ${fileName} (${durationSecs.toFixed(1)}s)\n`,
   );
 
   // 5. 上传 opus 到飞书拿 file_key（飞书 duration 字段单位 ms）
   const durationMs = Math.max(1, Math.round(durationSecs * 1000));
-  const fileKey = await uploadOpus(buffer, path.basename(filePath), durationMs);
+  const fileKey = await uploadOpus(buffer, fileName, durationMs);
 
   // 6. 发 audio 消息
   const messageId = await sendAudio(chatId, fileKey, replyToMessageId);

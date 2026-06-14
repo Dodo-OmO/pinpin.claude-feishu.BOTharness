@@ -6,7 +6,7 @@
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import fs from "node:fs";
 import path from "node:path";
-import { getFeishuClient } from "./feishu-send.js";
+import { sendText } from "./feishu-send.js";
 import { dateYYYYMMDD, getVaultRoot } from "../utils/helper.js";
 
 const PUSHED_FILE = path.join(getVaultRoot(), "品品work", "早报", "已推送.md");
@@ -56,22 +56,20 @@ export async function handleSendDailyNewsCard(args: { chat_id: string; items: Ne
   const text = lines.join("\n");
 
   try {
-    const client = getFeishuClient();
-    await client.im.v1.message.create({
-      params: { receive_id_type: "chat_id" },
-      data: {
-        receive_id: chat_id,
-        msg_type: "text",
-        content: JSON.stringify({ text }),
-      },
-    });
-    // 落已推送.md 供 30 天去重
-    const pushedDir = path.dirname(PUSHED_FILE);
-    if (!fs.existsSync(pushedDir)) fs.mkdirSync(pushedDir, { recursive: true });
-    const appendLines = items.map((it) => `${today} ${it.url}`).join("\n") + "\n";
-    fs.appendFileSync(PUSHED_FILE, appendLines, "utf-8");
+    await sendText(chat_id, text);
+    // 落已推送.md 供 30 天去重（写盘失败仅 stderr 留痕，不影响 delivered 状态）
+    let dedupWriteFailed = false;
+    try {
+      const pushedDir = path.dirname(PUSHED_FILE);
+      if (!fs.existsSync(pushedDir)) fs.mkdirSync(pushedDir, { recursive: true });
+      const appendLines = items.map((it) => `${today} ${it.url}`).join("\n") + "\n";
+      fs.appendFileSync(PUSHED_FILE, appendLines, "utf-8");
+    } catch (writeErr) {
+      dedupWriteFailed = true;
+      process.stderr.write(`[send-daily-news-card] 已推送.md 写盘失败: ${writeErr instanceof Error ? writeErr.message : writeErr}\n`);
+    }
     return {
-      content: [{ type: "text" as const, text: JSON.stringify({ delivered: true, count: items.length }) }],
+      content: [{ type: "text" as const, text: JSON.stringify({ delivered: true, count: items.length, ...(dedupWriteFailed ? { dedup_write_failed: true } : {}) }) }],
     };
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);

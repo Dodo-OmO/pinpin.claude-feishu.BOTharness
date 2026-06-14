@@ -13,7 +13,7 @@ import { IPC_METHODS, type WorkOkResult } from "../../ipc/protocol.js";
 export const sendPrivateMessageTool: Tool = {
   name: "send_private_message",
   description:
-    "私聊某个认识的人。person_name 走 known_users 表反查 open_id（先精确再模糊匹配）；或直接传 open_id。" +
+    "私聊某个认识的人。person_name 经 known_users 反查 open_id；或直接传 open_id。" +
     "用于：传话 / 报告周回顾 / 告警 / 主动联系。content 是纯文本（飞书 text 消息）。",
   inputSchema: {
     type: "object",
@@ -63,7 +63,10 @@ export async function handleSendPrivateMessage(args: {
         content: JSON.stringify({ text: content }),
       },
     });
-    const messageId = res.data?.message_id ?? "unknown";
+    const messageId = res.data?.message_id;
+    if (!messageId) {
+      return { isError: true, content: [{ type: "text" as const, text: `私聊发出但未收到 message_id（飞书响应异常），无法确认送达` }] };
+    }
     const dmChatId = res.data?.chat_id;
     logBackground("send-private", `to=${targetOpenId} msg=${messageId} chat=${dmChatId ?? "?"}`);
     // 主动单聊后即时挂该单聊频道监听 + 写日志——飞书不回推 bot 自己发的消息，

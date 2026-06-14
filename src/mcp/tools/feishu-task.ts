@@ -218,6 +218,7 @@ export async function handleFeishuTaskCreate(args: {
     );
   }
   let taskGuid: string | undefined;
+  const createdSubGuids: string[] = [];
   try {
     let tlGuid: string | undefined;
     let secGuid: string | undefined;
@@ -247,6 +248,7 @@ export async function handleFeishuTaskCreate(args: {
       const d = desc.trim();
       if (!d) continue;
       const subGuid = await createSubtask(taskGuid, { summary: d });
+      createdSubGuids.push(subGuid);
       subLines.push(`    - [ ] ${d} <!--fts:${subGuid}-->`);
     }
     const today = dateYYYYMMDD();
@@ -270,7 +272,7 @@ export async function handleFeishuTaskCreate(args: {
       return textErr(
         `飞书任务「${args.summary}」建好了（含 ${subLines.length} 个子步骤），` +
           `但本地台账没写成：${we instanceof Error ? we.message : we}。` +
-          `这条暂没进本地清单也没纳入同步——台账整好后让我重新同步一次，或手动补到「${project}」。`,
+          `这条暂没进本地清单——请让品品删除该任务后重建，或手动补到「${project}」台账。`,
       );
     }
     insertFeishuTaskMap({
@@ -290,11 +292,11 @@ export async function handleFeishuTaskCreate(args: {
     );
   } catch (e) {
     if (taskGuid) {
-      try {
-        await deleteTask(taskGuid);
-      } catch {
-        /* 回滚失败吞掉 */
+      // 倒序删已建子任务（官方未明确删父是否级联，走最稳路径），每个失败吞错继续
+      for (const sg of [...createdSubGuids].reverse()) {
+        try { await deleteTask(sg); } catch { /* 吞错继续 */ }
       }
+      try { await deleteTask(taskGuid); } catch { /* 吞错继续 */ }
     }
     return textErr(
       `建飞书任务没成：${e instanceof Error ? e.message : String(e)}。` +
@@ -521,7 +523,7 @@ export async function handleFeishuSubtaskAdd(args: {
     appendBotReply(chatId, `[追加子步骤「${t.summary}」+${created.length}]`);
     const localNote = wrote
       ? "本地台账也接上了"
-      : "（本地台账里没找到这条父任务的锚，子步骤进了飞书但台账没接上——把台账整好后让我重新同步一次）";
+      : "（本地台账里没找到这条父任务的锚，子步骤进了飞书但台账没接上——请让品品删除该任务后重建，或手动在飞书侧处理）";
     return textOk(`已给「${t.summary}」追加 ${created.length} 个子步骤，飞书子任务建好了，${localNote}。本次无需文字复述。`);
   } catch (e) {
     return textErr(`追加子步骤时出了点问题（${e instanceof Error ? e.message : String(e)}）。本地台账没动，过会儿再试一次，或跟我说下具体哪步要加我重来。`);

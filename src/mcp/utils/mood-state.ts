@@ -12,7 +12,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { dateYYYYMMDD, dateYYYYMM, timeHHMM, getVaultRoot } from "./helper.js";
+import { dateYYYYMMDD, dateYYYYMM, timeHHMM, getVaultRoot, ensureDir } from "./helper.js";
 
 const MOOD_ROOT = path.join(getVaultRoot(), "记忆系统", "心境");
 const CURRENT_FILE = path.join(MOOD_ROOT, "当前.md");
@@ -43,10 +43,6 @@ const DEFAULT_STATE: MoodState = {
   bonds: {},
   updatedAt: "",
 };
-
-function ensureDir(dir: string): void {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
 
 function clamp(x: number, lo: number, hi: number): number {
   return Math.max(lo, Math.min(hi, x));

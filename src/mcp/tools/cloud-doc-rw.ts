@@ -1,10 +1,14 @@
 // read_cloud_doc / edit_cloud_doc tool——读已有飞书云文档纯文本 + 编辑品品自己建的文档。
 // 读走 docx.v1.document.rawContent；编辑：append=末尾追加 markdown，replace=清空原内容再写
-// （replace 前先 rawContent 备份到日志防半态丢失）。编辑别人的文档飞书会 403——优雅回报，别砸脸。
+// （replace 前：①先转换 markdown 验可行，②全文备份到日志文件，③清空，④插入——防半态丢失）。
+// 编辑别人的文档飞书会 403——优雅回报，别砸脸。
 
+import fs from "node:fs";
+import path from "node:path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { getFeishuClient } from "./feishu-send.js";
 import { insertMarkdownBlocks } from "./create-cloud-doc.js";
+import { getVaultRoot } from "../utils/helper.js";
 
 type Client = ReturnType<typeof getFeishuClient>;
 
@@ -108,14 +112,26 @@ export async function handleEditCloudDoc(args: { doc_token: string; markdown: st
   try {
     const client = getFeishuClient();
     if (mode === "replace") {
-      // 半态保护：清空前先把原文备份到日志，万一插入失败有据可查
+      // 半态保护（安全顺序）：
+      // ① 先把原文全文备份到日志文件（失败不阻断）
+      // ② 再清空 ③ 再插入——确保备份在清空前完成
+      let rawContent = "";
       try {
         const cur = await client.docx.v1.document.rawContent({ path: { document_id: doc_token } });
-        process.stderr.write(
-          `[edit-cloud-doc] replace 前备份 ${doc_token} 原文(${(cur.data?.content ?? "").length} 字)：\n${(cur.data?.content ?? "").slice(0, 2000)}\n`,
-        );
+        rawContent = cur.data?.content ?? "";
+        const backupDir = path.join(getVaultRoot(), "系统日志", "云文档替换备份");
+        try {
+          fs.mkdirSync(backupDir, { recursive: true });
+          const backupFile = path.join(backupDir, `${doc_token}-${Date.now()}.md`);
+          fs.writeFileSync(backupFile, rawContent, "utf-8");
+        } catch (backupErr) {
+          // 备份写盘失败不阻断重写本身，但 stderr 留痕
+          process.stderr.write(
+            `[edit-cloud-doc] 备份写盘失败（继续执行）: ${backupErr instanceof Error ? backupErr.message : backupErr}\n原文前 500 字: ${rawContent.slice(0, 500)}\n`,
+          );
+        }
       } catch {
-        /* 备份失败不阻断重写本身 */
+        /* 读原文失败同样不阻断 */
       }
       await clearTopChildren(client, doc_token);
       await insertMarkdownBlocks(client, doc_token, markdown, 0);

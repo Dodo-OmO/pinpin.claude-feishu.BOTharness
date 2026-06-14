@@ -11,6 +11,7 @@
 
 import { getFeishuClient } from "../tools/feishu-send.js";
 import { getKnownUserName, seedKnownUsers } from "../db/database.js";
+import { parseEnvMap } from "../../shared/sender-shared.js";
 
 export { resolveBotName, loadBotRoster, logUnknownBotOnce } from "./bot-roster.js";
 
@@ -21,37 +22,8 @@ export { resolveBotName, loadBotRoster, logUnknownBotOnce } from "./bot-roster.j
 let _envKnownUsersCache: Map<string, string> | null = null;
 function getEnvKnownUsers(): Map<string, string> {
   if (_envKnownUsersCache) return _envKnownUsersCache;
-  const raw = process.env.FEISHU_KNOWN_USERS;
-  const m = new Map<string, string>();
-  if (!raw) {
-    _envKnownUsersCache = m;
-    return m;
-  }
-  const trimmed = raw.trim();
-  if (trimmed.startsWith("{")) {
-    // 格式 ② JSON
-    try {
-      const obj = JSON.parse(trimmed) as Record<string, string>;
-      for (const [k, v] of Object.entries(obj)) {
-        if (typeof k === "string" && typeof v === "string") m.set(k, v);
-      }
-    } catch (e) {
-      process.stderr.write(
-        `[sender-names] FEISHU_KNOWN_USERS JSON 解析失败: ${e instanceof Error ? e.message : e}\n`,
-      );
-    }
-  } else {
-    // 格式 ① 冒号+逗号
-    for (const pair of trimmed.split(",")) {
-      const idx = pair.indexOf(":");
-      if (idx <= 0) continue;
-      const k = pair.slice(0, idx).trim();
-      const v = pair.slice(idx + 1).trim();
-      if (k && v) m.set(k, v);
-    }
-  }
-  _envKnownUsersCache = m;
-  return m;
+  _envKnownUsersCache = new Map(Object.entries(parseEnvMap(process.env.FEISHU_KNOWN_USERS)));
+  return _envKnownUsersCache;
 }
 
 // C2 身份归一：known_users DB 是真人映射的**单一运行时权威源**。

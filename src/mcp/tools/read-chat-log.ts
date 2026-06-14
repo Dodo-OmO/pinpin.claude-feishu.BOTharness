@@ -16,8 +16,8 @@ import { readChatLog } from "../utils/chat-log.js";
 export const readChatLogTool: Tool = {
   name: "read_chat_log",
   description:
-    "读对话日志。sub-agent 用——拿指定 chat / 指定日期 / 近 N 天或 N 小时的对话原文。" +
-    "调用约定：① chat_id 不传 = 所有 chat（量大慎用）；② date / days / hours 三选一（优先级 hours > days > date）；" +
+    "读对话日志——拿指定 chat / 指定日期 / 近 N 天或 N 小时的对话原文。" +
+    "调用约定：① chat_id 不传 = 所有 chat（量大慎用）；② date / days / hours 三选一（优先级 date > days > hours）；" +
     "③ 默认（全不传）= 今天所有 chat。返回 JSON 字典 chat_name → 文本。",
   inputSchema: {
     type: "object",
@@ -36,7 +36,7 @@ export const readChatLogTool: Tool = {
       },
       hours: {
         type: "number",
-        description: "近 N 小时（按行内 HH:MM 时间戳过滤；隐式 days=1）。例：hours=12 = 近 12 小时。优先级最高。",
+        description: "近 N 小时（按行内 HH:MM 时间戳过滤，自动含昨天+今天文件支持跨午夜）。例：hours=12 = 近 12 小时。优先级低于 date/days。",
       },
     },
   },

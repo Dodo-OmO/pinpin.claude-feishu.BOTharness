@@ -20,9 +20,8 @@ export const relayMessageTool: Tool = {
   name: "relay_message",
   description:
     "帮委托人 A 传话给 B，并开启自动催回音机制。" +
-    "⚠️ 必须先调 send_private_message 把原话发给 B，再调本 tool 登记催办；漏了第一步 B 永远收不到原话、系统却已开始催。" +
-    "用法：①品品先调 send_private_message 私聊 B 转达原话，②再调本 tool 记录 relay 任务。" +
-    "系统会在 B 没回时自动催（最多 2 次，+30min/+60min 线性退避），B 一回就把回音报给 A。" +
+    "⚠️ 先调 send_private_message 发原话给 B，再调本 tool 登记催办——漏第一步 B 收不到原话。" +
+    "B 没回时自动催（最多 2 次，+30min/+60min 退避），B 一回就把回音报给 A。" +
     "to_open_id 与 to_name 二选一；from_open_id 与 from_name 二选一。",
   inputSchema: {
     type: "object",

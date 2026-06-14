@@ -9,7 +9,7 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { dateYYYYMMDD, timeHHMM, safeName, getVaultRoot } from "./helper.js";
+import { dateYYYYMMDD, timeHHMM, safeName, getVaultRoot, ensureDir } from "./helper.js";
 
 // 对话记录根目录：vault 根（getVaultRoot）下「对话记录」子目录
 const LOG_ROOT = path.join(getVaultRoot(), "对话记录");
@@ -35,10 +35,6 @@ const channelStates = new Map<string, ChannelState>();
 
 // 按 chat 分串行队列：同 chat 串行避 EBUSY，不同 chat 独立 Promise 链可并行
 const writeQueues = new Map<string, Promise<void>>();
-
-function ensureDir(dir: string): void {
-  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-}
 
 function getLogPath(date: string, chatName: string): string {
   const month = date.slice(0, 7); // YYYY-MM
@@ -142,11 +138,6 @@ export function appendBotReply(chatId: string, content: string): void {
   appendLine(chatId, `${timeHHMM()} 品品｜${trimmed}\n\n`);
 }
 
-/** 系统触发：append `HH:MM [系统]｜标签`（cron 触发 / 自由活动等） */
-export function appendSystemTrigger(chatId: string, label: string): void {
-  appendLine(chatId, `${timeHHMM()} [系统]｜${label}\n\n`);
-}
-
 // ── 读接口（优雅清单 4：read_chat_log tool 统一签名）────
 
 export interface ReadChatLogOpts {
@@ -190,6 +181,12 @@ export function readChatLog(opts: ReadChatLogOpts = {}): Record<string, string> 
       d.setDate(d.getDate() - i);
       dates.push(dateYYYYMMDD(d));
     }
+  } else if (opts.hours && opts.hours > 0) {
+    // hours 模式：跨午夜时需要昨天+今天两天文件
+    dates.push(dateYYYYMMDD()); // 今天
+    const yesterday = new Date();
+    yesterday.setDate(yesterday.getDate() - 1);
+    dates.push(dateYYYYMMDD(yesterday)); // 昨天（窗口可能跨午夜）
   } else {
     dates.push(dateYYYYMMDD()); // 默认今天
   }
@@ -208,7 +205,7 @@ export function readChatLog(opts: ReadChatLogOpts = {}): Record<string, string> 
         continue;
       }
       if (opts.hours && opts.hours > 0) {
-        content = filterByRecentHours(content, opts.hours);
+        content = filterByRecentHours(content, opts.hours, date);
       }
       if (content.trim()) parts.push(`### ${date}\n${content.trim()}`);
     }
@@ -218,20 +215,31 @@ export function readChatLog(opts: ReadChatLogOpts = {}): Record<string, string> 
   return result;
 }
 
-/** 按行内 HH:MM 时间戳过滤近 N 小时（仅对今日内容有意义） */
-function filterByRecentHours(content: string, hours: number): string {
-  const cutoffMs = Date.now() - hours * 3600 * 1000;
-  const cutoffDate = new Date(cutoffMs);
-  const cutoffHHMM = `${String(cutoffDate.getHours()).padStart(2, "0")}:${String(
-    cutoffDate.getMinutes()
-  ).padStart(2, "0")}`;
+/**
+ * 按行内 HH:MM 时间戳过滤近 N 小时。
+ * fileDate: 该行所属文件的日期（YYYY-MM-DD），用于跨午夜场景下正确组成完整 Date 再比较。
+ * 弃 HH:MM 字符串比较——跨午夜时昨天 23:xx > 今天 01:xx 字符串比较会误判。
+ */
+function filterByRecentHours(content: string, hours: number, fileDate?: string): string {
+  const cutoffMs = Date.now() - hours * 3600_000;
   const lines = content.split("\n");
   const out: string[] = [];
   for (const line of lines) {
     const m = line.match(/^(\d{2}):(\d{2})\s/);
-    if (m && `${m[1]}:${m[2]}` >= cutoffHHMM) out.push(line);
-    // H1/H2 标题行（如 "# 2026-05-27 第 N 轮重启"）总保留作上下文
-    else if (line.startsWith("# ") || line.startsWith("## ")) out.push(line);
+    if (m) {
+      let lineMs: number;
+      if (fileDate) {
+        // 用文件日期 + 行内 HH:MM 组成完整时间戳比较
+        lineMs = new Date(`${fileDate}T${m[1]}:${m[2]}:00`).getTime();
+      } else {
+        // 降级：用今天日期（无 fileDate 时）
+        lineMs = new Date(`${dateYYYYMMDD()}T${m[1]}:${m[2]}:00`).getTime();
+      }
+      if (lineMs >= cutoffMs) out.push(line);
+    } else if (line.startsWith("# ") || line.startsWith("## ")) {
+      // H1/H2 标题行（如 "# 2026-05-27 第 N 轮重启"）总保留作上下文
+      out.push(line);
+    }
   }
   return out.join("\n");
 }

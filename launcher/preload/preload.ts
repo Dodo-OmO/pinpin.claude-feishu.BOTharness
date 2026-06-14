@@ -1,4 +1,13 @@
 import { contextBridge, ipcRenderer } from 'electron';
+import type {
+  ChannelStatusInfo,
+  WorkSessionInfo,
+  SupervisorStateSnapshot,
+  LogEntry,
+  AppSettings,
+  QuotaSnapshot,
+  RateLimitWindow,
+} from '../shared-types.js';
 
 const api = {
   ping: (): Promise<string> => ipcRenderer.invoke('ping'),
@@ -70,78 +79,15 @@ const api = {
   },
 };
 
-export interface ChannelStatusInfo {
-  chat_id: string;
-  chat_name?: string;
-  status: 'starting' | 'running' | 'stopped' | 'failed';
-  pid?: number;
-  uptime_ms: number;
-  model: string;
-  effort: string;
-  /** 自动压缩阈值（上下文用量百分比）。 */
-  autoCompactPct?: number;
-  /** fast 模式（Opus 加速输出）。 */
-  fast?: boolean;
-  /** P1.3: per-CLI 上下文用量（statusLine sink 推过来） */
-  context_pct?: number | null;
-  context_tokens?: number | null;
-  context_window_size?: number | null;
-  cost_usd?: number | null;
-  usage_updated_at?: number;
-}
-
-export interface WorkSessionInfo {
-  session_id: string;
-  origin_chat_id: string;
-  work_dir: string;
-  fast?: boolean;
-  status: 'starting' | 'running' | 'stopped' | 'failed';
-  pid?: number;
-  uptime_ms: number;
-  model: string;
-  effort: string;
-  /** Q4 续: work session 上下文用量 */
-  context_tokens?: number;
-  context_window_size?: number | null;
-  context_pct?: number | null;
-}
-
-export interface SupervisorStateSnapshot {
-  ipc_port: number;
-  chats: Array<{ chat_id: string; name?: string }>;
-  channels: ChannelStatusInfo[];
-  work_sessions: WorkSessionInfo[];
-  today_messages: number;
-}
-
-export interface LogEntry {
-  ts: number;
-  level: 'info' | 'warn' | 'error';
-  source: string;
-  message: string;
-}
-
-export interface AppSettings {
-  default_model: string;
-  default_effort: string;
-  work_default_model: string;
-  work_default_effort: string;
-  work_default_fast: boolean;
-  default_fast: boolean;
-  default_compact_pct: number;
-}
-
-interface RateLimitWindow { used_percentage: number | null; resets_at: number | null }
-export interface QuotaSnapshot {
-  ts: number;
-  available: boolean;
-  blocks?: { tokens?: number };
-  daily?: { tokens?: number; cost_usd?: number };
-  weekly?: { tokens?: number };
-  /** 账号级额度 5h+7天（来自 statusLine rate_limits，非 ccusage）：各窗口 used_percentage + resets_at */
-  rate_limits?: { five_hour?: RateLimitWindow | null; seven_day?: RateLimitWindow | null } | null;
-  error?: string;
-}
+export type {
+  ChannelStatusInfo,
+  WorkSessionInfo,
+  SupervisorStateSnapshot,
+  LogEntry,
+  AppSettings,
+  QuotaSnapshot,
+  RateLimitWindow,
+} from '../shared-types.js';
 
 contextBridge.exposeInMainWorld('pinpin', api);
 

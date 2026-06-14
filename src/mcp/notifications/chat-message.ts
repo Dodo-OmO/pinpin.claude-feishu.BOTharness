@@ -17,9 +17,6 @@
 //   - resolveMentions       协议 #33 mention 可读化
 
 import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
-import * as fs from "node:fs";
-import * as os from "node:os";
-import * as path from "node:path";
 import { getUserName, resolveBotName, logUnknownBotOnce } from "../utils/sender-names.js";
 import { markInboundChat } from "../chat-activity.js";
 import { resolveReplyQuote } from "../utils/reply-quote.js";
@@ -34,38 +31,14 @@ import {
 } from "../db/database.js";
 import type { RelayPayload } from "../db/types.js";
 import { logBackground } from "../utils/background-log.js";
-import { saveInboundImage, saveInboundFile } from "../utils/media-attachments.js";
-import { isBallPartner } from "../utils/helper.js";
-import { downloadMessageResource } from "../tools/feishu-send.js";
-import { transcribeAudio } from "../utils/stt.js";
+import { isBallPartner, pad2 } from "../utils/helper.js";
+import { PARSERS, type ParseCtx } from "./parse-inbound.js";
 
 // 本地时间格式化 YYYY-MM-DD HH:MM（用系统时区=Owner机器所在时区）——
 // 给品品注入可读的「消息发送时间」+「当前时间」，让她随时感知时间。
 function fmtLocalTime(ms: number): string {
   const d = new Date(ms);
-  const p = (n: number): string => String(n).padStart(2, "0");
-  return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
-}
-
-interface FeishuMention {
-  key: string;
-  // poll 路径 id 是 string；WSClient 事件路径 id 是 {open_id/user_id/union_id} 对象。
-  // resolveMentions 只用 key+name 不碰 id，此处类型如实声明两形态即可。
-  id: string | { open_id?: string; user_id?: string; union_id?: string };
-  id_type?: string;
-  name: string;
-  tenant_key?: string;
-}
-
-interface FeishuRawMessage {
-  message_id: string;
-  msg_type: string;
-  create_time: string;
-  parent_id?: string;
-  sender: { id: string; id_type: string; sender_type: string };
-  body: { content: string };
-  mentions?: FeishuMention[];
-  deleted?: boolean;
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
 }
 
 /** IPC payload shape — 跟 src/ipc/protocol.ts FeishuInboundMessagePayload 一致 */
@@ -78,6 +51,10 @@ export interface InboundPayload {
   sender_type: "user" | "app";
   text?: string;
   create_time_ms: number;
+  /** supervisor 单点提取，子端不再钻 raw */
+  content?: string;
+  mentions?: unknown[];
+  parent_id?: string;
   raw?: unknown;
 }
 
@@ -99,86 +76,6 @@ const BALL_MAINTAIN_OFFSET = REPLY_DISCIPLINE_EVERY / 2;
 let botAppId = "";
 export function setBotAppId(appId: string): void {
   botAppId = appId;
-}
-
-/** text 消息的 body.content 是 JSON 字符串 {"text": "..."}——解析失败留空 */
-function parseTextContent(raw: string): string {
-  try {
-    return (JSON.parse(raw ?? "{}") as { text?: string }).text ?? "";
-  } catch {
-    return "";
-  }
-}
-
-/** 协议 #33：mention 可读化——把 text 里的 @_user_N 占位符替换为 @<真实姓名> */
-function resolveMentions(text: string, mentions: FeishuMention[] | undefined): string {
-  if (!text || !mentions || mentions.length === 0) return text;
-  let out = text;
-  for (const m of mentions) {
-    if (!m.key || !m.name) continue;
-    out = out.split(m.key).join(`@${m.name}`);
-  }
-  return out;
-}
-
-/**
- * 飞书 interactive 卡片正文提取——发卡方多为 app/bot（走 poll，raw.body.content 含完整卡片 JSON）。
- * 真实结构：{title, elements:[[{tag:"text",text},{tag:"a",text,href},{tag:"hr"},{tag:"note",elements:[...]}]]}
- *   - 顶层 title / header.title 成行（加粗）；elements 二维数组：外层=段落、内层=同段落元素
- *   - 段落内元素拼接（text 字段自带 \n），段落间换行；递归覆盖 note/column 等嵌套容器
- * 注：SDK 的 convertInteractive/walkCard 只认 tag:plain_text+content 字段，认不出 tag:text+text 字段
- *     的卡片（飞书最常见发卡格式），故此处自解析。
- */
-function extractCardText(rawContent: string): string {
-  let card: Record<string, unknown>;
-  try {
-    card = JSON.parse(rawContent || "{}") as Record<string, unknown>;
-  } catch {
-    return "";
-  }
-  const lines: string[] = [];
-  if (typeof card.title === "string" && card.title.trim()) lines.push(`**${card.title.trim()}**`);
-  if (card.header && typeof card.header === "object") {
-    const ht = cardLineText((card.header as Record<string, unknown>).title);
-    if (ht.trim()) lines.push(`**${ht.trim()}**`);
-  }
-  const elements = card.elements;
-  if (Array.isArray(elements)) {
-    for (const para of elements) {
-      const line = cardLineText(para);
-      if (line.trim()) lines.push(line);
-    }
-  } else if (elements) {
-    const line = cardLineText(elements);
-    if (line.trim()) lines.push(line);
-  }
-  return lines.join("\n").trim();
-}
-
-/** 拼接卡片一个段落/元素的可读文字（同段落元素不换行，text 内 \n 自带换行） */
-function cardLineText(node: unknown): string {
-  if (node == null) return "";
-  if (typeof node === "string") return node;
-  if (Array.isArray(node)) return node.map(cardLineText).join("");
-  if (typeof node !== "object") return "";
-  const obj = node as Record<string, unknown>;
-  const tag = obj.tag;
-  if (tag === "text" || tag === "a") return typeof obj.text === "string" ? obj.text : "";
-  if (tag === "plain_text" || tag === "lark_md" || tag === "md" || tag === "markdown") {
-    if (typeof obj.content === "string") return obj.content;
-    if (typeof obj.text === "string") return obj.text;
-    return "";
-  }
-  if (tag === "hr") return "";
-  // 标准 v2 卡片标题在 header.title（真实卡片多用顶层 title，此处兼容 header 形态）
-  if (obj.header && typeof obj.header === "object") {
-    return cardLineText((obj.header as Record<string, unknown>).title);
-  }
-  if (obj.text && typeof obj.text === "object") return cardLineText(obj.text);
-  for (const key of ["elements", "fields", "columns"]) {
-    if (Array.isArray(obj[key])) return (obj[key] as unknown[]).map(cardLineText).join("");
-  }
-  return "";
 }
 
 /**
@@ -207,206 +104,25 @@ export async function handleInboundMessage(
     appendRestartHeading(chatId);
   }
 
-  // 按消息类型解析正文：
-  //   text  → 直取（含 mention 可读化）
-  //   image → 下载 + sharp 压缩存盘 → 注入"图片附件 + 本地路径"（品品可 Read 看，已压缩省 token）
-  //   file  → OWNER 发的跳过存档（仅注入提示）/ 他人发的下载存盘 → 注入本地路径（默认不读，需要时再 Read）
-  //   其它（audio/post/sticker 等）→ 跳过（voice STT 不在 D 范围）
-  const raw = payload.raw as FeishuRawMessage | undefined;
-  // 入站 raw 两种形态：poll 路径=message.list item（内容在 body.content）；
-  // WSClient/P2P 路径=飞书 v2 事件体——SDK EventDispatcher.parse 把 header/event 字段摊平到顶层
-  // （Object.assign({}, rest, header, event)），所以内容在 raw.message.content，无 .event 这层。
-  // 文字消息靠 payload.text 兜底两种都行，但图片/文件的 image_key/file_key 只能从 content JSON 取，
-  // 故必须同时认这两种形态——否则 P2P 单聊发的图/文件 image_key 取不到被丢弃。
-  const wsContent = (payload.raw as { message?: { content?: string } } | undefined)
-    ?.message?.content;
-  const rawContent = raw?.body?.content ?? wsContent ?? "";
-  let text: string;
-  if (payload.msg_type === "text") {
-    const rawText = parseTextContent(rawContent) || payload.text || "";
-    if (!rawText) return;
-    // mentions 两种形态：poll 路径在 raw.mentions（顶层），WSClient 路径在 raw.message.mentions
-    // （SDK EventDispatcher.parse 把 header/event 摊平到顶层，event.message 变成 raw.message，
-    //  event.message.mentions 变成 raw.message.mentions，不在 raw.mentions）
-    const mentions =
-      raw?.mentions ??
-      (raw as { message?: { mentions?: FeishuMention[] } } | undefined)?.message?.mentions;
-    text = resolveMentions(rawText, mentions);
-  } else if (payload.msg_type === "image") {
-    try {
-      const imageKey = (JSON.parse(rawContent || "{}") as { image_key?: string }).image_key;
-      if (!imageKey) return;
-      const localPath = await saveInboundImage(payload.message_id, imageKey, chatId);
-      text = isBallPartner(chatId)
-        ? `[图片] 有人发了图片，已存本地原图——**这轮先用 Read 工具读这张图、看清内容再回应**：${localPath}`
-        : `[图片] 有人发了图片，已压缩存本地——**这轮先用 Read 工具读这张图、看清内容再回应**：${localPath}`;
-    } catch (e) {
-      process.stderr.write(
-        `[chat-message] 图片处理失败 msg_id=${payload.message_id}: ${e instanceof Error ? e.message : e}\n`,
-      );
-      return;
-    }
-  } else if (payload.msg_type === "file") {
-    try {
-      const parsed = JSON.parse(rawContent || "{}") as { file_key?: string; file_name?: string };
-      if (!parsed.file_key) return;
-      // Owner（OWNER）自己发的文件不自动存档——她本机已有，存档=冗余（2026-06-08 拍板）。
-      // env 未配则 fail-safe 回落照旧存（避免误把所有人文件都跳过）。图片/语音不受此约束。
-      const ownerOpenId = process.env.FEISHU_OWNER_OPEN_ID;
-      if (ownerOpenId && senderOpenId === ownerOpenId) {
-        text = `[文件附件「${parsed.file_name ?? "未命名"}」] 你发的文件，按设置未自动存档。`;
-      } else {
-        const localPath = await saveInboundFile(payload.message_id, parsed.file_key, parsed.file_name ?? "file", chatId);
-        text = isBallPartner(chatId)
-          ? `[文件附件「${parsed.file_name ?? "未命名"}」] 已存本地——需要看内容就用 read_attachment 工具读（xlsx/docx 都能读），或 Read：${localPath}`
-          : `[文件附件「${parsed.file_name ?? "未命名"}」] 已备份到本地，默认不读——需要时再 Read：${localPath}`;
-      }
-    } catch (e) {
-      process.stderr.write(
-        `[chat-message] 文件处理失败 msg_id=${payload.message_id}: ${e instanceof Error ? e.message : e}\n`,
-      );
-      return;
-    }
-  } else if (payload.msg_type === "audio") {
-    // 飞书语音消息：下载 OGG Opus → ElevenLabs Scribe v2 转写 → 注入 [语音] 前缀文字
-    const parsed = JSON.parse(rawContent || "{}") as { file_key?: string };
-    if (!parsed.file_key) {
-      // audio 消息但拿不到 file_key，回退到错误引导
-      text = "[语音转写失败] 收到一条语音但找不到音频附件，可请对方打字发送";
-    } else {
-      // 下载到临时文件 → 读 buffer → 转写 → 删临时文件
-      const tmpPath = path.join(os.tmpdir(), `pinpin_audio_${payload.message_id}.ogg`);
-      try {
-        // 飞书语音附件走 "file" 类型下载——messageResource.get 的 type 只认 "image"|"file"，
-        // 传 "audio" 会下载失败/拿到坏数据（SDK 退役版踩过的坑，注释留此防再犯）。
-        await downloadMessageResource(payload.message_id, parsed.file_key, "file", tmpPath);
-        const audioBuffer = fs.readFileSync(tmpPath);
-        const transcribed = await transcribeAudio(audioBuffer, "audio.ogg");
-        if (transcribed.trim()) {
-          text = `[语音] ${transcribed.trim()}`;
-        } else {
-          text = "[语音转写失败] 收到一条语音没听清内容，可请对方打字";
-        }
-      } catch (e) {
-        const detail = e instanceof Error ? e.message : String(e);
-        process.stderr.write(`[chat-message] 语音转写失败 msg_id=${payload.message_id}: ${detail}\n`);
-        // 落 background log 便于排查（stderr 不进可查日志）——真实报错(statusCode/网络等)看这里
-        logBackground("stt-error", `语音转写失败 [${chatId.slice(-6)}]: ${detail.slice(0, 200)}`);
-        text = "[语音转写失败] 收到一条语音没听清，可请对方打字";
-      } finally {
-        try {
-          fs.rmSync(tmpPath, { force: true });
-        } catch {
-          /* 删临时文件失败不影响主流程 */
-        }
-      }
-    }
-  } else if (payload.msg_type === "post") {
-    // 飞书富文本（post）= 图文混合消息，同一条含文字段落 + 可选图片。
-    // 图片来源优先级（双保险）：
-    //   ① _sdk_resources（feishu-event-subscriber 从 SDK NormalizedMessage.resources 注入，
-    //      WSClient 路径专有；SDK convertPost 已正确提取内嵌图片 key 进此数组）
-    //   ② rawContent 手动解析（poll 路径 raw.body.content / WSClient 路径 raw.message.content；
-    //      解析 post JSON 遍历 tag='img' 元素提取 image_key）
-    // 文字提取走 rawContent 手动解析（优先），fallback SDK 归一化 payload.text。
-    // 结构：{"zh_cn":{"title":"...","content":[[{"tag":"text","text":"..."},{"tag":"img","image_key":"..."},...],...]}}
-    let parsed = "";
-    try {
-      // ── 文字提取（rawContent 手动解析）──
-      const postJson = JSON.parse(rawContent || "{}") as {
-        [locale: string]: {
-          title?: string;
-          content?: Array<Array<{ tag: string; text?: string; image_key?: string; href?: string }>>;
-        };
-      };
-      // 取第一个 locale（zh_cn 优先，否则取第一个）
-      const localeKeys = Object.keys(postJson);
-      const body = postJson["zh_cn"] ?? (localeKeys.length > 0 ? postJson[localeKeys[0]] : undefined);
-
-      // ── 图片 key 提取（双保险）──
-      // ① 优先用 SDK 已解析的 _sdk_resources（WSClient 路径，最可靠）
-      const sdkResources = (payload.raw as { _sdk_resources?: Array<{ type: string; fileKey: string }> } | undefined)
-        ?._sdk_resources;
-      const sdkImageKeys: string[] = (sdkResources ?? [])
-        .filter((r) => r.type === "image")
-        .map((r) => r.fileKey);
-
-      if (body) {
-        const parts: string[] = [];
-        if (body.title) parts.push(`**${body.title}**`);
-        const jsonImageKeys: string[] = [];
-        for (const para of body.content ?? []) {
-          if (!Array.isArray(para)) continue;
-          let line = "";
-          for (const el of para) {
-            if (el.tag === "text") {
-              line += el.text ?? "";
-            } else if (el.tag === "a") {
-              line += el.text ?? el.href ?? "";
-            } else if (el.tag === "img" && el.image_key) {
-              jsonImageKeys.push(el.image_key);
-            }
-          }
-          if (line.trim()) parts.push(line);
-        }
-        // ② rawContent 解析补充（poll 路径 + WSClient 兜底）
-        // 合并两来源，去重（两路径都有时避免重复下载）
-        const allImageKeys = [...new Set([...sdkImageKeys, ...jsonImageKeys])];
-        process.stderr.write(
-          `[chat-message] post msg_id=${payload.message_id} rawContent_len=${rawContent.length} sdk_imgs=${sdkImageKeys.length} json_imgs=${jsonImageKeys.length} total=${allImageKeys.length}\n`,
-        );
-        // 下载 post 内嵌图片（复用现有 saveInboundImage 逻辑）
-        const imagePaths: string[] = [];
-        for (const imgKey of allImageKeys) {
-          try {
-            imagePaths.push(await saveInboundImage(payload.message_id, imgKey, chatId));
-          } catch (imgErr) {
-            process.stderr.write(
-              `[chat-message] post 内嵌图片下载失败 key=${imgKey}: ${imgErr instanceof Error ? imgErr.message : imgErr}\n`,
-            );
-          }
-        }
-        if (imagePaths.length > 0) {
-          parts.push(`[图片×${imagePaths.length}] 已存本地，用 Read 工具查看：${imagePaths.join(" | ")}`);
-        }
-        parsed = parts.join("\n").trim();
-      } else if (sdkImageKeys.length > 0) {
-        // rawContent 解析不出 body（JSON 结构异常），但 SDK resources 里有图片——纯图 post 兜底
-        process.stderr.write(
-          `[chat-message] post body 解析失败但 SDK resources 有 ${sdkImageKeys.length} 张图，尝试下载\n`,
-        );
-        const imagePaths: string[] = [];
-        for (const imgKey of sdkImageKeys) {
-          try {
-            imagePaths.push(await saveInboundImage(payload.message_id, imgKey, chatId));
-          } catch (imgErr) {
-            process.stderr.write(
-              `[chat-message] post 内嵌图片下载失败 key=${imgKey}: ${imgErr instanceof Error ? imgErr.message : imgErr}\n`,
-            );
-          }
-        }
-        if (imagePaths.length > 0) {
-          parsed = `[图片×${imagePaths.length}] 已存本地，用 Read 工具查看：${imagePaths.join(" | ")}`;
-        }
-      }
-    } catch (e) {
-      process.stderr.write(
-        `[chat-message] post 解析失败 msg_id=${payload.message_id}: ${e instanceof Error ? e.message : e}\n`,
-      );
-    }
-    // rawContent 解析出内容优先；解析不出再 fallback SDK 归一化的 payload.text；都没有给兜底（不 DROP）
-    text = parsed || payload.text || "[富文本] 收到一条富文本消息（内容解析失败）";
-  } else if (payload.msg_type === "interactive") {
-    // 飞书卡片（interactive）。发卡方多为 app/bot（走 poll，rawContent=raw.body.content 含完整卡片 JSON）。
-    // 自解析卡片正文（SDK walkCard 认不出 tag:text 结构）；解析不出再 fallback payload.text / 兜底，不 DROP。
-    const cardText = extractCardText(rawContent);
-    text = cardText || payload.text || "[卡片消息] 收到一张卡片（内容解析失败）";
-  } else {
+  // 按消息类型解析正文，六类走 PARSERS 路由表（parse-inbound.ts），其余丢弃。
+  const rawContent = payload.content ?? "";
+  const parser = PARSERS[payload.msg_type];
+  if (!parser) {
     process.stderr.write(
       `[chat-message] 跳过暂不支持的消息类型 msg_id=${payload.message_id} type=${payload.msg_type}\n`,
     );
     return;
   }
+  const ctx: ParseCtx = {
+    chatId,
+    payload,
+    rawContent,
+    isBallPartner: isBallPartner(chatId),
+    senderOpenId,
+  };
+  const parsed = await parser(ctx);
+  if (parsed === null) return;
+  const text = parsed;
 
   // ── sender 昵称解析 ──
   let senderName: string;
@@ -448,10 +164,7 @@ export async function handleInboundMessage(
     isBallPartner(chatId) && (replyCnt - 1) % REPLY_DISCIPLINE_EVERY === BALL_MAINTAIN_OFFSET
       ? "\n\n[随手自检：有没有新的执行/台本侧要求该落进本地 MD？本群 todo 有没有新进展该维护？→ 维护完群里吱一声。]"
       : "";
-  // parent_id 两种形态：poll 路径在 raw.parent_id（顶层），WSClient 路径在 raw.message.parent_id
-  const parentId =
-    raw?.parent_id ??
-    (raw as { message?: { parent_id?: string } } | undefined)?.message?.parent_id;
+  const parentId = payload.parent_id;
   const replyToQuote = parentId
     ? await resolveReplyQuote(parentId, botAppId)
     : undefined;

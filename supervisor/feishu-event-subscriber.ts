@@ -164,6 +164,15 @@ export class FeishuEventSubscriber {
       process.stderr.write('[feishu-event] ✅ WS 重连成功\n');
     });
 
+    // 平台订阅但无业务处理的 3 个事件——注册空 handler 消 SDK "no xxx handle" warn 刷屏
+    // SDK 升级需复查此 cast
+    (this.channel as unknown as { dispatcher: { register(h: Record<string, () => void>): void } })
+      .dispatcher.register({
+        'im.chat.access_event.bot_p2p_chat_entered_v1': () => {},
+        'im.message.message_read_v1': () => {},
+        'im.message.recalled_v1': () => {},
+      });
+
     // **关键**：createLarkChannel 只返回 channel 实例，不自动建 WS 握手——必须显式 connect()
     // (reviewer 实测发现：v1 漏 connect 导致 "买了手机从没开机"，所有事件永远不触发)
     await this.channel.connect();

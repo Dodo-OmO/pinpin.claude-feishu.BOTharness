@@ -3,7 +3,7 @@
 // **阶段 4 MVP**：text 消息（飞书 interactive 卡片留阶段后续）
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { getFeishuClient } from "./feishu-send.js";
+import { sendText } from "./feishu-send.js";
 import { dateYYYYMMDD } from "../utils/helper.js";
 
 interface BriefingItem {
@@ -45,11 +45,7 @@ export async function handleSendBriefingCard(args: { chat_id: string; items: Bri
   }
   const text = lines.join("\n");
   try {
-    const client = getFeishuClient();
-    await client.im.v1.message.create({
-      params: { receive_id_type: "chat_id" },
-      data: { receive_id: chat_id, msg_type: "text", content: JSON.stringify({ text }) },
-    });
+    await sendText(chat_id, text);
     return {
       content: [{ type: "text" as const, text: JSON.stringify({ delivered: true, count: items.length }) }],
     };

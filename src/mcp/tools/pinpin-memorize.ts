@@ -12,7 +12,7 @@ import { writeMemoryLine } from "../utils/memory.js";
 export const PINPIN_MEMORIZE_TOOL = {
   name: "pinpin_memorize",
   description:
-    "永存记忆 50 条写盘（只记希望不要被明天的品品忘记的难忘事件）。⚠️ 人物的稳定信息/偏好/内梗改走 Edit 记忆系统\\人物\\<人>.md 对应小节，不用本 tool。\n\n判断口径见 vault\\CLAUDE.md 永存记忆段：沾边即 write 合并到对应 NN，不另起炉灶（覆盖过时）/ 全新主题 write 到最弱 NN / 列表已满且不想替换 → skip。一个 turn 最多调 1 次。",
+    "永存记忆 50 条写盘（只记希望不要被明天的品品忘记的难忘事件）。一个 turn 最多调 1 次。⚠️ 人物的稳定信息/偏好/内梗改走 Edit 记忆系统\\人物\\<人>.md 对应小节，不用本 tool。判断口径见 vault\\CLAUDE.md〔永存记忆 50 条〕段。",
   inputSchema: {
     type: "object" as const,
     properties: {

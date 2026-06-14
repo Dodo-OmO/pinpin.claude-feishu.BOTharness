@@ -176,7 +176,7 @@ export function feishuEmojiTypeToUnicode(emojiType: string): string | null {
 // 权威 emoji_type 全集（171，精确大小写）
 // 来源：go-lark/lark + illacloud/larksdk emoji.go 双源逐字一致
 // ──────────────────────────────────────────
-export const FEISHU_EMOJI_TYPES: ReadonlySet<string> = new Set<string>([
+const FEISHU_EMOJI_TYPES: ReadonlySet<string> = new Set<string>([
   "OK", "THUMBSUP", "THANKS", "MUSCLE", "FINGERHEART", "APPLAUSE", "FISTBUMP",
   "JIAYI", "DONE", "SMILE", "BLUSH", "LAUGH", "SMIRK", "LOL", "FACEPALM", "LOVE",
   "WINK", "PROUD", "WITTY", "SMART", "SCOWL", "THINKING", "SOB", "CRY", "ERROR",

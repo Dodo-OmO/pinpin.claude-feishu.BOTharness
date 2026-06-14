@@ -10,37 +10,24 @@
  */
 
 import { EventEmitter } from 'node:events';
-import { execSync } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import { PtyManager, type PtyStats } from './pty-manager.js';
+import { PtyManager } from './pty-manager.js';
 import { buildInstructions } from '../src/mcp/instructions.js';
 import { DEFAULT_AUTOCOMPACT_PCT } from './channel-config-store.js';
+import { resolveClaudePath, stripAnsi } from './utils.js';
 
 /** 单轮 API 失败重试次数加固（CLI 原生默认 10，env override）。调高 = 多扛网络瞬时抖动、抖动过去自动接上。 */
 const PINPIN_API_MAX_RETRIES = process.env['PINPIN_API_MAX_RETRIES'] ?? '20';
 
-/** node-pty spawn 不走 shell——必须绝对路径。Owner Win11 claude 装在 ~\.local\bin\claude.exe。
- *  优先级：PINPIN_CLAUDE_PATH env → where claude.exe → 'claude' 兜底（会失败但 msg 清晰） */
-function resolveClaudePath(): string {
-  if (process.env['PINPIN_CLAUDE_PATH']) return process.env['PINPIN_CLAUDE_PATH'];
-  const cmd = process.platform === 'win32' ? 'where claude.exe' : 'which claude';
-  try {
-    const out = execSync(cmd, { encoding: 'utf8' }).trim().split('\n')[0].trim();
-    if (out) return out;
-  } catch {
-    /* fall through */
-  }
-  return 'claude';
-}
 
 export interface ChannelCliOptions {
   chatId: string;
   chatName?: string;
   vaultCwd: string;
-  /** 模型——任务 MD §其他对齐：默认 opus 4.6 [1M]，可热切换需先关闭 */
+  /** 模型——默认值见 supervisor/index.ts DEFAULT_MODEL；热切换需先关闭再启动 */
   model: string;
   /** effort：low / medium / high / max。默认 high（Owner 2026-05-28 实测反馈改） */
   effort: string;
@@ -232,7 +219,6 @@ export class ChannelCli extends EventEmitter {
     // "Enter to confirm" 拆成 "Enter\x1b[1Cto\x1b[1Cconfirm" — strip + \s* 兼容。
     let lastAutoEnterAt = 0;
     let autoConfirmDone = false;
-    const stripAnsi = (s: string): string => s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
     let promptBuffer = '';
 
     const tryAutoConfirm = (): void => {
@@ -250,6 +236,8 @@ export class ChannelCli extends EventEmitter {
     };
 
     // IPC client 上线后停止 auto-confirm（启动期结束）
+    // start() 可被崩溃重启多次调用，先清掉旧 listener 防累积
+    this.removeAllListeners('ipc-ready');
     this.on('ipc-ready', () => {
       autoConfirmDone = true;
       if (this.autoConfirmInterval) {

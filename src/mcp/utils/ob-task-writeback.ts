@@ -16,6 +16,11 @@
 import fs from "node:fs";
 import { dateYYYYMMDD } from "./helper.js";
 
+/** 检测文件原始行尾符，用于写回时保持 EOL 不变（Windows CRLF 文件不被破坏）。 */
+function detectEol(content: string): string {
+  return content.includes("\r\n") ? "\r\n" : "\n";
+}
+
 /**
  * 把本地台账里带 `<!--ft:marker-->` 隐藏锚的那条任务**就地**标完成（方案 B：不挪区）。
  * 父行 `[ ]`→`[x]`+完成日期，其下连续缩进子步骤行一并 `[ ]`→`[x]`。
@@ -27,6 +32,7 @@ export function applyTaskDoneToOB(obFile: string, marker: string): void {
   }
   const markerToken = `<!--ft:${marker}-->`;
   const content = fs.readFileSync(obFile, "utf-8");
+  const eol = detectEol(content);
   const lines = content.split(/\r?\n/);
 
   const idx = lines.findIndex((l) => l.includes(markerToken));
@@ -60,7 +66,7 @@ export function applyTaskDoneToOB(obFile: string, marker: string): void {
     }
   }
 
-  fs.writeFileSync(obFile, lines.join("\n"), "utf-8");
+  fs.writeFileSync(obFile, lines.join(eol), "utf-8");
 }
 
 /**
@@ -79,6 +85,7 @@ export function writeLedger(
   const proj = project.trim();
   const section = sectionName?.trim() || "";
   const content = fs.readFileSync(obFile, "utf-8");
+  const eol = detectEol(content);
   const lines = content.split(/\r?\n/);
   const block = [parentLine, ...subtaskLines];
 
@@ -93,7 +100,7 @@ export function writeLedger(
     lines.push(`## ${proj}`, "");
     if (section) lines.push(`### ${section}`);
     lines.push(...block);
-    fs.writeFileSync(obFile, lines.join("\n"), "utf-8");
+    fs.writeFileSync(obFile, lines.join(eol), "utf-8");
     return;
   }
   let projEnd = lines.length;
@@ -157,7 +164,7 @@ export function writeLedger(
     lines.splice(lastContent + 1, 0, ...block);
   }
 
-  fs.writeFileSync(obFile, lines.join("\n"), "utf-8");
+  fs.writeFileSync(obFile, lines.join(eol), "utf-8");
 }
 
 const SUBTASK_LINE = /^\s+- \[( |x)\]\s*(.*?)\s*<!--fts:([0-9a-fA-F-]+)-->/;
@@ -189,7 +196,9 @@ export function markLedgerSubtaskDone(
   subGuid: string,
 ): { parentMarker: string | null; allDone: boolean } | null {
   if (!fs.existsSync(obFile)) return null;
-  const lines = fs.readFileSync(obFile, "utf-8").split(/\r?\n/);
+  const content = fs.readFileSync(obFile, "utf-8");
+  const eol = detectEol(content);
+  const lines = content.split(/\r?\n/);
   const subToken = `<!--fts:${subGuid}-->`;
   const idx = lines.findIndex((l) => l.includes(subToken));
   if (idx < 0) return null;
@@ -218,7 +227,7 @@ export function markLedgerSubtaskDone(
       }
     }
   }
-  fs.writeFileSync(obFile, lines.join("\n"), "utf-8");
+  fs.writeFileSync(obFile, lines.join(eol), "utf-8");
   return { parentMarker, allDone };
 }
 
@@ -242,13 +251,15 @@ export function collectLedgerSubtaskGuids(
 /** 从台账整块删除某父任务行 + 其连续缩进子步骤行（两边删不留痕）。 */
 export function removeLedgerTask(obFile: string, marker: string): boolean {
   if (!fs.existsSync(obFile)) return false;
-  const lines = fs.readFileSync(obFile, "utf-8").split(/\r?\n/);
+  const content = fs.readFileSync(obFile, "utf-8");
+  const eol = detectEol(content);
+  const lines = content.split(/\r?\n/);
   const idx = lines.findIndex((l) => l.includes(`<!--ft:${marker}-->`));
   if (idx < 0) return false;
   let end = idx + 1;
   while (end < lines.length && /^\s+\S/.test(lines[end])) end++;
   lines.splice(idx, end - idx);
-  fs.writeFileSync(obFile, lines.join("\n"), "utf-8");
+  fs.writeFileSync(obFile, lines.join(eol), "utf-8");
   return true;
 }
 
@@ -260,12 +271,14 @@ export function appendLedgerSubtasks(
 ): boolean {
   if (subtaskLines.length === 0) return true;
   if (!fs.existsSync(obFile)) return false;
-  const lines = fs.readFileSync(obFile, "utf-8").split(/\r?\n/);
+  const content = fs.readFileSync(obFile, "utf-8");
+  const eol = detectEol(content);
+  const lines = content.split(/\r?\n/);
   const idx = lines.findIndex((l) => l.includes(`<!--ft:${marker}-->`));
   if (idx < 0) return false;
   let end = idx + 1;
   while (end < lines.length && /^\s+\S/.test(lines[end])) end++;
   lines.splice(end, 0, ...subtaskLines);
-  fs.writeFileSync(obFile, lines.join("\n"), "utf-8");
+  fs.writeFileSync(obFile, lines.join(eol), "utf-8");
   return true;
 }

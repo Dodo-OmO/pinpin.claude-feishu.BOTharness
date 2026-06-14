@@ -10,10 +10,9 @@ import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import fs from "node:fs";
 import path from "node:path";
 import { dateYYYYMMDD, getVaultRoot } from "../utils/helper.js";
+import { MEMORY_FILE } from "../utils/memory.js";
 
-const MEMORY_ROOT = path.join(getVaultRoot(), "记忆系统");
-const MEMORY_FILE = path.join(MEMORY_ROOT, "永存记忆50条.md");
-const BACKUP_DIR = path.join(MEMORY_ROOT, "备份");
+const BACKUP_DIR = path.join(getVaultRoot(), "记忆系统", "备份");
 
 // 大小阈值：新内容 byte 不得 < 旧 50%（极宽松，防完全失误，不挡正常增删）
 const MIN_SIZE_RATIO = 0.5;
@@ -23,13 +22,13 @@ const EXPECTED_LINES = 50;
 export const memoryRewriteTool: Tool = {
   name: "memory_rewrite",
   description:
-    "memory-audit-agent 用：用新内容（必须恰好 50 行）重写 永存记忆50条.md。" +
+    "用新内容（必须恰好 50 行）重写 永存记忆50条.md。" +
     "内部三重保护：先备份 → 大小校验（新内容 byte ≥ 旧 50%）→ 行数校验（必须 50 行）。" +
     "任一校验失败回滚 + 返 isError，主 session 收到 isError 应 send_private_message 私聊Owner告警。",
   inputSchema: {
     type: "object",
     properties: {
-      new_content: { type: "string", description: "新的 50 条永存记忆全文（必须恰好 50 行）" },
+      new_content: { type: "string", description: "50 行全文" },
       summary: { type: "string", description: "本周改动摘要（写到 vault\\记忆系统\\记忆自检\\YYYY-WW.md 的 sub-agent 用）" },
     },
     required: ["new_content"],

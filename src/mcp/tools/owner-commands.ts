@@ -63,7 +63,7 @@ export async function handleRestartSelf(): Promise<ToolResult> {
 // ───────────────────────────────────────────────────────────
 
 /** sleep marker 文件路径：跟 supervisor appRoot 对齐（= data.db 所在目录）。
- *  supervisor/index.ts:420 用 this.opts.appRoot 检查，本函数用 dirname(PINPIN_DB_PATH)
+ *  supervisor/index.ts crashed 分支用 this.opts.appRoot 检查同名 marker，本函数用 dirname(PINPIN_DB_PATH)
  *  两者天然一致（supervisor dbPath = path.join(appRoot, 'data.db')） */
 function getSleepMarkerPath(chatId: string): string {
   const dbPath = process.env.PINPIN_DB_PATH;
@@ -105,10 +105,7 @@ export async function handleSleepSelf(): Promise<ToolResult> {
 export const COMPACT_CHAT_TOOL: Tool = {
   name: "compact_chat",
   description:
-    "【仅Owner】压缩本频道 CLI 的上下文——触发**就地原生压缩**（CLI 原生 /compact）。调本 tool 前先发飞书告知Owner即可，无需派 agent / 写摘要。\n" +
-    "⚠️ **严防误触发**：只在Owner**明确要你压缩自己的上下文/脑子**时调——明确信号是 " +
-    "『/压缩』『压缩你的上下文』『整理一下你的脑子』『清下你的上下文』这类指向「你品品的记忆/上下文」的话。" +
-    "Owner只是顺口提到『压缩』别的东西（压缩文件/压缩包/压缩图片/把内容压缩一下篇幅 等）时**绝不调本 tool**。拿不准就先问Owner「是要我整理自己脑子吗」，别擅自压缩。",
+    "【仅Owner】就地压缩本频道 CLI 上下文（执行 /compact）。Owner明确说『压缩/整理你的上下文/脑子』时才调；与文件/图片压缩无关。",
   inputSchema: { type: "object", properties: {} },
 };
 

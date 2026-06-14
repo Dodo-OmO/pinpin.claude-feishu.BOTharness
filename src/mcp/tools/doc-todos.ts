@@ -45,7 +45,7 @@ export async function handleReadDocTodos(args: { doc_token: string }) {
     do {
       const res = await client.docx.v1.documentBlockChildren.get({
         path: { document_id: args.doc_token, block_id: args.doc_token },
-        params: { page_size: 500, ...(pageToken ? { page_token: pageToken } : {}) },
+        params: { page_size: 500, with_descendants: true, ...(pageToken ? { page_token: pageToken } : {}) },
       });
       for (const b of (res.data?.items ?? []) as DocBlock[]) {
         if (!b.todo) continue;

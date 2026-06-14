@@ -14,12 +14,9 @@
 
 import fs from "node:fs";
 import path from "node:path";
-import { pad2, dateYYYYMMDD as todayDateStr } from "./helper.js";
+import { pad2, dateYYYYMMDD as todayDateStr, getVaultRoot } from "./helper.js";
 
-const MEMORY_FILE = path.join(
-  process.env.BASE_PROJECT_DIR ?? "/path/to/obsidian-vault",
-  "记忆系统/永存记忆50条.md",
-);
+export const MEMORY_FILE = path.join(getVaultRoot(), "记忆系统/永存记忆50条.md");
 
 const DEFAULT_HEADER = `# 品品的永存记忆 50 条
 > 50 条上限，写满替换/并入。每条 ≤80 字（软目标 50 字、碎片化只留关键点）。NN. YYYY-MM-DD ｜ 内容。Owner可在 OB 手改任意行。
@@ -60,7 +57,7 @@ interface MemoryLine {
  * 读 50 行记忆。文件不存在/缺行时按空位补齐。
  * 严格保证返回 50 条。
  */
-export function loadMemoryLines(vaultRoot?: string): MemoryLine[] {
+function loadMemoryLines(vaultRoot?: string): MemoryLine[] {
   const memFile = vaultRoot ? path.join(vaultRoot, "记忆系统/永存记忆50条.md") : MEMORY_FILE;
   const lines: MemoryLine[] = [];
   let raw = "";

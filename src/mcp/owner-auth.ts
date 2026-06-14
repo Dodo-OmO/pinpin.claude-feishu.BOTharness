@@ -1,9 +1,11 @@
 // OWNER 鉴权共享函数——restart_self / sleep_self / compact_chat / disband_group 等
-// 危险操作复用。逻辑：本 chat 最近 inbound sender 必须是Owner（fail-closed）。
+// 危险操作复用。
 //
-// 注意时间窗口：取 chat-activity 缓存的"自家 chat 近 5min 最后一条 inbound sender"。
-// 群聊场景下 5min 内若别人发过言会"误拒"Owner（最近 inbound sender 是别人），
-// 此时该引导Owner改在Owner单聊触发——只放正确 sender，不放错误 sender（fail-closed 安全）。
+// 鉴权逻辑：
+//   1. 单聊直通：当前频道 = PINPIN_OWNER_CHAT_ID（Owner单聊），直接放行。
+//      Owner单聊里只有Owner能发言，无需 inbound-sender 比对。
+//   2. 群聊维持最后-inbound 启发式：取 chat-activity 缓存"自家 chat 近 5min 最后一条 inbound sender"。
+//      已知局限：群友插话竞态可能误拒Owner——安全>便利，有意保留（fail-closed）。
 
 import { getLastInboundSenderOpenId } from "./chat-activity.js";
 
@@ -13,6 +15,12 @@ export function checkOwner(): { ok: boolean; reason?: string } {
   if (!ownChatId || !ownerOpenId) {
     return { ok: false, reason: "未配置 PINPIN_CHAT_ID 或 FEISHU_OWNER_OPEN_ID，OWNER 鉴权失败" };
   }
+
+  // 单聊直通：Owner单聊频道里只有Owner能发言，无需 sender 比对
+  if (ownChatId === process.env.PINPIN_OWNER_CHAT_ID) {
+    return { ok: true };
+  }
+
   const lastSender = getLastInboundSenderOpenId(ownChatId);
   if (!lastSender) {
     return { ok: false, reason: "本频道近 5 分钟无 inbound，无法识别调用者——OWNER 命令请在Owner单聊里直接触发" };

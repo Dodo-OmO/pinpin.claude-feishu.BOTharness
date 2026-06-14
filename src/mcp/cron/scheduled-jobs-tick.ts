@@ -16,7 +16,6 @@ import {
   revertJobToPending,
   markJobFailed,
   bumpRelayNudge,
-  rescheduleJob,
   getKnownUserName,
 } from "../db/database.js";
 import type { ScheduledJob, RelayPayload } from "../db/types.js";
@@ -72,7 +71,9 @@ async function fireJob(jobId: number): Promise<void> {
 
   // relay 类型：催 B 回复，或达到上限后回报 A
   if (job.type === "relay") {
-    return fireRelayJob(jobId, job);
+    return fireRelayJob(jobId, job).catch((e) => {
+      logBackground("scheduled-jobs", `relay job=${jobId} 未捕获异常: ${e instanceof Error ? e.message : e}`);
+    });
   }
 
   // v8.4 ④A 时序修复：先推 channel 成功才 markJobFired，失败回 pending + retry_count++
@@ -128,21 +129,35 @@ async function fireRelayJob(jobId: number, job: ScheduledJob): Promise<void> {
   const fromName = payload.fromName;
 
   if (remindCount >= RELAY_MAX_NUDGE) {
-    // 已催满 2 次仍未回——回报委托人 A
-    markJobFired(jobId);
-    logBackground("scheduled-jobs", `relay job=${jobId} max nudge reached, notifying A=${fromOpenId.slice(-6)}`);
-    if (!fromOpenId) return;
-    await pushChannelTrigger({
-      trigger: "relay-callback",
-      body:
-        `📭 传话回报（job_id=${jobId}）：你替 ${fromName} 传给 ${watcherName} 的话，催了 2 次对方仍未回复。请用品品风格私聊或在群里告知 ${fromName}（open_id=${fromOpenId}）遇到的情况。 然后结束此传话任务。`,
-      meta: {
-        job_id: String(jobId),
-        from_open_id: fromOpenId,
-        watcher_open_id: watcherOpenId,
-        relay_status: "timeout",
-      },
-    });
+    // 已催满 2 次仍未回——回报委托人 A（镜像 timer 模式：先推成功再 markFired，失败走 retry）
+    if (!fromOpenId) { markJobFired(jobId); return; }
+    try {
+      await pushChannelTrigger(
+        {
+          trigger: "relay-callback",
+          body:
+            `📭 传话回报（job_id=${jobId}）：你替 ${fromName} 传给 ${watcherName} 的话，催了 2 次对方仍未回复。请用品品风格私聊或在群里告知 ${fromName}（open_id=${fromOpenId}）遇到的情况。 然后结束此传话任务。`,
+          meta: {
+            job_id: String(jobId),
+            from_open_id: fromOpenId,
+            watcher_open_id: watcherOpenId,
+            relay_status: "timeout",
+          },
+        },
+        { throwOnError: true },
+      );
+      markJobFired(jobId);
+      logBackground("scheduled-jobs", `relay job=${jobId} max nudge reached, notified A=${fromOpenId.slice(-6)}`);
+    } catch (e) {
+      const retry = revertJobToPending(jobId);
+      logBackground("scheduled-jobs", `relay job=${jobId} 终报推送失败 retry=${retry}: ${e instanceof Error ? e.message : e}`);
+      if (retry >= MAX_RETRY) {
+        markJobFailed(jobId);
+        process.stderr.write(`[scheduled-jobs] relay job=${jobId} 终报重试 ${MAX_RETRY} 次仍失败，置 failed\n`);
+      } else {
+        setTimeout(() => scheduleJob(jobId), 5 * 60 * 1000);
+      }
+    }
     return;
   }
 
@@ -151,9 +166,9 @@ async function fireRelayJob(jobId: number, job: ScheduledJob): Promise<void> {
   const nextDelayMin = RELAY_NUDGE_DELAYS_MIN[remindCount] ?? 60;
   const nextFireAt = new Date(Date.now() + nextDelayMin * 60 * 1000).toISOString();
 
+  // 有意 bump 在 push 前：宁可丢一次催也不重复催（at-most-once）
   const newCount = bumpRelayNudge(jobId, nextFireAt);
-  rescheduleJob(jobId, nextFireAt);
-  // relay job 保持 pending 状态（bumpRelayNudge 只更新 payload+fire_at，不改 status）
+  // relay job 保持 pending 状态（bumpRelayNudge 已写 fire_at，无需 rescheduleJob 重复 UPDATE）
   // 重新 schedule 下一次 fire
   scheduleJob(jobId);
 

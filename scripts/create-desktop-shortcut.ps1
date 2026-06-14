@@ -80,6 +80,6 @@ $lnk.Save()
 Write-Host ""
 Write-Host "  ✓ 桌面快捷方式创建成功" -ForegroundColor Green
 Write-Host "    路径：$lnkPath"
-Write-Host "    指向：$cmdPath"
+Write-Host "    指向：$vbsPath"
 Write-Host ""
 Write-Host "  双击桌面 '品品 channel' 图标即可启动多 CLI 架构" -ForegroundColor Cyan

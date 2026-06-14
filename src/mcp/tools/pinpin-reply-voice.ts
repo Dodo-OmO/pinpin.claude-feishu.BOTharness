@@ -22,7 +22,7 @@ type VoiceEmotion = typeof VOICE_EMOTIONS[number];
 export const PINPIN_REPLY_VOICE_TOOL = {
   name: "pinpin_reply_voice",
   description:
-    "语音回复（ElevenLabs TTS）。≤120 字短句口语风格。emotion 选 7 种之一，作为情绪提示拼在文本前（裸前缀 [emotion] text，非 ElevenLabs v3 audio tag 映射）。超长 / TTS 失败 / upload 失败自动降级文字发送。",
+    "语音回复（ElevenLabs TTS）。≤120 字短句口语风格。emotion 选 7 种之一，作为情绪前缀拼在文本前。超长 / TTS 失败 / upload 失败自动降级文字发送。",
   inputSchema: {
     type: "object" as const,
     properties: {

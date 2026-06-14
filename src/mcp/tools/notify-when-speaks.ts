@@ -9,12 +9,12 @@ import { addSpeakWatchJob, resolveOpenId } from "../db/database.js";
 export const notifyWhenSpeaksTool: Tool = {
   name: "notify_when_speaks",
   description:
-    "等某人下次在指定群发言时触发提醒。target_name（known_users 反查 open_id）或 target_open_id 二选一。" +
+    "等某人在**本频道**下次发言时提醒你。target_name（known_users 反查 open_id）或 target_open_id 二选一。" +
     "message = fire 时要传达的内容（品品按风格说出）。",
   inputSchema: {
     type: "object",
     properties: {
-      chat_id: { type: "string", description: "等他/她在哪个群发言" },
+      chat_id: { type: "string", description: "目标群 chat_id（可不传；当前版本固定监听本频道）" },
       target_name: { type: "string", description: "目标姓名（known_users 反查；与 target_open_id 二选一）" },
       target_open_id: { type: "string", description: "目标 open_id" },
       message: { type: "string", description: "fire 时要带的提醒内容" },

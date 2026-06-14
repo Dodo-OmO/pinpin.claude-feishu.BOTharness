@@ -9,6 +9,14 @@ import {
   resolveMentions,
   type FeishuMention,
 } from '../../supervisor/sender-resolver.js';
+import type {
+  ChannelStatusInfo,
+  WorkSessionInfo,
+  SupervisorStateSnapshot,
+  LogEntry,
+  AppSettings,
+  QuotaSnapshot,
+} from '../shared-types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -132,52 +140,6 @@ function createTray(): void {
   });
 }
 
-interface SupervisorStateSnapshot {
-  ipc_port: number;
-  chats: Array<{ chat_id: string; name?: string }>;
-  channels: ChannelStatusInfo[];
-  work_sessions: WorkSessionInfo[];
-  today_messages: number;
-}
-
-interface ChannelStatusInfo {
-  chat_id: string;
-  chat_name?: string;
-  status: 'starting' | 'running' | 'stopped' | 'failed';
-  pid?: number;
-  uptime_ms: number;
-  /** CLI 进程启动时刻（Date.now()）；停止时为 null。用于卡片显示绝对启动时间 */
-  started_at?: number | null;
-  model: string;
-  effort: string;
-  /** 自动压缩阈值（上下文用量百分比）。 */
-  autoCompactPct?: number;
-  /** fast 模式（Opus 加速输出）。 */
-  fast?: boolean;
-  /** P1.3: per-CLI 上下文用量（statusLine sink 推过来） */
-  context_pct?: number | null;
-  context_tokens?: number | null;
-  context_window_size?: number | null;
-  cost_usd?: number | null;
-  usage_updated_at?: number;
-}
-
-interface WorkSessionInfo {
-  session_id: string;
-  origin_chat_id: string;
-  work_dir: string;
-  fast?: boolean;
-  status: 'starting' | 'running' | 'stopped' | 'failed';
-  pid?: number;
-  uptime_ms: number;
-  model: string;
-  effort: string;
-  /** Q4 续: work session 上下文用量（jsonl assistant.usage 实时解析） */
-  context_tokens?: number;
-  context_window_size?: number | null;
-  context_pct?: number | null;
-}
-
 function snapshotState(): SupervisorStateSnapshot {
   if (!supervisor) {
     return { ipc_port: 0, chats: [], channels: [], work_sessions: [], today_messages: 0 };
@@ -203,13 +165,6 @@ function snapshotState(): SupervisorStateSnapshot {
     work_sessions: sv.getWorkSessionStats(),
     today_messages: sv.getTodayMessageCount(),
   };
-}
-
-interface LogEntry {
-  ts: number;
-  level: 'info' | 'warn' | 'error';
-  source: string;
-  message: string;
 }
 
 function pushLog(entry: LogEntry): void {

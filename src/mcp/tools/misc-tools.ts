@@ -56,7 +56,7 @@ export const ARCHIVE_SEARCH_TOOL: Tool = {
   name: "archive_search",
   description:
     "翻 vault 对话记录档案找历史聊天内容。chat_name 限定到某 chat 目录（不传搜所有 chat）；" +
-    "days_back 限定时间范围（默认 7 天）；keyword 必填。返回命中的日期文件清单 + 部分匹配片段。",
+    "days_back 限定时间范围（默认 30 天）；keyword 必填。返回命中的日期文件清单 + 部分匹配片段。",
   inputSchema: {
     type: "object",
     properties: {

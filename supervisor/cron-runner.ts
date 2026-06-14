@@ -40,6 +40,7 @@ export class SupervisorCronRunner {
   private jobs = new Map<string, SupervisorCronJob>();
   private supervisor: Supervisor;
   private started = false;
+  private startupKeepaliveTimer?: NodeJS.Timeout;
 
   constructor(supervisor: Supervisor) {
     this.supervisor = supervisor;
@@ -53,11 +54,30 @@ export class SupervisorCronRunner {
     process.stderr.write(
       `[supervisor-cron] started (${this.jobs.size} jobs: ${[...this.jobs.keys()].join(', ')})\n`,
     );
+
+    // 启动后 60s 补跑一次 feishu-token-keepalive。
+    // 防电脑凌晨 4 点关机连续踏空、7 天 refresh 链断。
+    this.startupKeepaliveTimer = setTimeout(() => {
+      this.startupKeepaliveTimer = undefined;
+      const job = this.jobs.get('feishu-token-keepalive');
+      if (job) {
+        process.stderr.write('[supervisor-cron] 启动补跑 feishu-token-keepalive\n');
+        Promise.resolve(job.handler()).catch((e) => {
+          process.stderr.write(
+            `[supervisor-cron] startup-keepalive failed: ${e instanceof Error ? e.message : e}\n`,
+          );
+        });
+      }
+    }, 60_000);
   }
 
   stop(): void {
     if (!this.started) return;
     this.started = false;
+    if (this.startupKeepaliveTimer) {
+      clearTimeout(this.startupKeepaliveTimer);
+      this.startupKeepaliveTimer = undefined;
+    }
     for (const job of this.jobs.values()) {
       if (job.timer) clearTimeout(job.timer);
       job.timer = undefined;

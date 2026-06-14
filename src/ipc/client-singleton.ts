@@ -20,7 +20,3 @@ export function getSupervisorClient(): SupervisorClient {
   }
   return _client;
 }
-
-export function hasSupervisorClient(): boolean {
-  return _client !== null;
-}
