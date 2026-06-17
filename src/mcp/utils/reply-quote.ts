@@ -8,6 +8,7 @@
 
 import { getFeishuClient } from "../tools/feishu-send.js";
 import { getUserName, resolveBotName } from "./sender-names.js";
+import { setPendingSaveFile } from "./save-target.js";
 
 const QUOTE_TEXT_MAX_CHARS = 15;
 
@@ -21,11 +22,13 @@ interface FeishuParentMessage {
  * 反查被回复消息，返回简短引用串。
  * @param parentMessageId 被回复消息 ID
  * @param selfBotAppId 品品自己的 app_id（被回复消息是品品自己时显示"品品"而不是反查 contact）
+ * @param chatId 当前对话 ID——被回复的是"Owner自己的文件"时记进待存槽位（她说"存下来"用）
  * @returns 形如 `@Owner: "今天感觉不错的一天我都..."` 或 `@BotB 的语音`；失败返 "[回复一条已不可见的消息]"
  */
 export async function resolveReplyQuote(
   parentMessageId: string,
   selfBotAppId: string,
+  chatId: string,
 ): Promise<string> {
   try {
     const res = await getFeishuClient().im.v1.message.get({
@@ -73,6 +76,22 @@ export async function resolveReplyQuote(
     } else if (refType === "image") {
       contentDesc = " 的图片";
     } else if (refType === "file") {
+      // Owner回复自己发的文件 → 记进待存槽位（owner-skip 时没存），她说"存下来"时 pinpin_save_file 据此下载。
+      const ownerOpenId = process.env.FEISHU_OWNER_OPEN_ID;
+      if (ownerOpenId && refSender?.id === ownerOpenId) {
+        try {
+          const fc = JSON.parse(ref.body?.content ?? "{}") as { file_key?: string; file_name?: string };
+          if (fc.file_key) {
+            setPendingSaveFile(chatId, {
+              fileMessageId: parentMessageId,
+              fileKey: fc.file_key,
+              fileName: fc.file_name ?? "file",
+            });
+          }
+        } catch {
+          /* 解析失败不影响引用串 */
+        }
+      }
       contentDesc = " 的文件";
     } else if (refType === "post") {
       contentDesc = " 的富文本";

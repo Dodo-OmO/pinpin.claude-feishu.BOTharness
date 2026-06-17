@@ -39,6 +39,7 @@ import { PINPIN_REACT_TOOL, handlePinpinReact } from './tools/pinpin-react.js';
 import { PINPIN_MEMORIZE_TOOL, handlePinpinMemorize } from './tools/pinpin-memorize.js';
 import { PINPIN_NO_REPLY_TOOL, handlePinpinNoReply } from './tools/pinpin-no-reply.js';
 import { PINPIN_SEND_FILE_TOOL, handlePinpinSendFile } from './tools/pinpin-send-file.js';
+import { PINPIN_SAVE_FILE_TOOL, handlePinpinSaveFile } from './tools/pinpin-save-file.js';
 // 阶段 4：DB 初始化 + cron 注册（import 触发 registerCron 副作用）
 import { initDatabase, closeDatabase } from './db/database.js';
 import { startAllCrons, stopAllCrons } from './cron/registry.js';
@@ -179,6 +180,7 @@ async function main() {
       PINPIN_MEMORIZE_TOOL,
       PINPIN_NO_REPLY_TOOL,
       PINPIN_SEND_FILE_TOOL,
+      PINPIN_SAVE_FILE_TOOL,
       readChatLogTool,
       // 阶段 4 批次 2（13 个）
       sendPrivateMessageTool,
@@ -275,6 +277,8 @@ async function main() {
         return handlePinpinNoReply();
       case 'pinpin_send_file':
         return handlePinpinSendFile(args as unknown as Parameters<typeof handlePinpinSendFile>[0]);
+      case 'pinpin_save_file':
+        return handlePinpinSaveFile(args as unknown as Parameters<typeof handlePinpinSaveFile>[0]);
       case 'read_chat_log':
         return handleReadChatLog(args as unknown as Parameters<typeof handleReadChatLog>[0]);
       // 阶段 4 批次 2

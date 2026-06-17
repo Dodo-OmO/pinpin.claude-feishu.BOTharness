@@ -166,7 +166,7 @@ export async function handleInboundMessage(
       : "";
   const parentId = payload.parent_id;
   const replyToQuote = parentId
-    ? await resolveReplyQuote(parentId, botAppId)
+    ? await resolveReplyQuote(parentId, botAppId, chatId)
     : undefined;
 
   // F4：入站消息记一笔（证"某 CLI 某点在线"——走 logBackground 单一可查通道）

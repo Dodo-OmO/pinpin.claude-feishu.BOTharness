@@ -8,6 +8,7 @@ import * as path from "node:path";
 import type { FeishuInboundMessagePayload } from "../../ipc/protocol.js";
 import { resolveMentions } from "../../shared/sender-shared.js";
 import { saveInboundImage, saveInboundFile } from "../utils/media-attachments.js";
+import { setPendingSaveFile } from "../utils/save-target.js";
 import { downloadMessageResource } from "../tools/feishu-send.js";
 import { transcribeAudio } from "../utils/stt.js";
 import { logBackground } from "../utils/background-log.js";
@@ -135,11 +136,17 @@ export async function parseFile(ctx: ParseCtx): Promise<string | null> {
   try {
     const parsed = JSON.parse(rawContent || "{}") as { file_key?: string; file_name?: string };
     if (!parsed.file_key) return null;
-    // Owner（OWNER）自己发的文件不自动存档——她本机已有，存档=冗余（2026-06-08 拍板）。
+    // Owner（OWNER）自己发的文件默认不存——她常发自己本机已有的文件给别人，自动存档=冗余（2026-06-08 拍板）。
+    // 但她明确要求时品品能存：记下文件句柄进待存槽位，她回复说"存下来"→ 品品调 pinpin_save_file 据此下载。
     // env 未配则 fail-safe 回落照旧存（避免误把所有人文件都跳过）。图片/语音不受此约束。
     const ownerOpenId = process.env.FEISHU_OWNER_OPEN_ID;
     if (ownerOpenId && senderOpenId === ownerOpenId) {
-      return `[文件附件「${parsed.file_name ?? "未命名"}」] 你发的文件，按设置未自动存档。`;
+      setPendingSaveFile(chatId, {
+        fileMessageId: payload.message_id,
+        fileKey: parsed.file_key,
+        fileName: parsed.file_name ?? "file",
+      });
+      return `[文件附件「${parsed.file_name ?? "未命名"}」] 你发的文件默认没自动存（你本机通常已有）。要存进库就回复这条文件跟我说"存下来"，我用 pinpin_save_file 给你存。`;
     }
     const localPath = await saveInboundFile(payload.message_id, parsed.file_key, parsed.file_name ?? "file", chatId);
     return ctx.isBallPartner
