@@ -34,6 +34,8 @@ export interface WardenBridgeDeps {
   getUsage: (chatId: string) => unknown;
   // 批1 频道管理
   startChannel: (chatId: string) => void;
+  /** 关闭频道 + evict 出 Map（归属不变）→ 下条消息可唤醒。手机✕关闭用。 */
+  pauseChannel: (chatId: string) => void;
   setChannelConfig: (
     chatId: string,
     cfg: { model?: string; effort?: string; fast?: boolean; autoCompactPct?: number },
@@ -79,9 +81,8 @@ export async function createWardenBridge(deps: WardenBridgeDeps): Promise<IpcSer
 
   bridge.setRequestHandler(IPC_METHODS.WARDEN_STOP_CLI, async (params): Promise<WorkOkResult> => {
     const { chat_id } = (params ?? {}) as { chat_id?: string };
-    const cli = chat_id ? deps.getChannels().get(chat_id) : undefined;
-    if (!cli) return { ok: false, error: `no CLI for chat ${chat_id}` };
-    cli.stop();
+    if (!chat_id) return { ok: false, error: 'no chat_id' };
+    deps.pauseChannel(chat_id); // 关闭 + evict（归属不变）→ 下条消息可唤醒
     return { ok: true };
   });
 

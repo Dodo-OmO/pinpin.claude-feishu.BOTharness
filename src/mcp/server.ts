@@ -6,7 +6,7 @@ import {
   ListToolsRequestSchema,
   CallToolRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
-import { handleInboundMessage, setBotAppId } from './notifications/chat-message.js';
+import { handleInboundMessage, setBotAppId, type SentNotification } from './notifications/chat-message.js';
 import { seedKnownUsersFromEnv } from './utils/sender-names.js';
 import { initNameMapStore } from '../shared/name-map-store.js';
 import { SupervisorClient } from '../ipc/supervisor-client.js';
@@ -255,7 +255,13 @@ async function main() {
     ),
   }));
 
+  // ── 冷启动补发安全网：记录 claude 最近一次调工具的时刻 ──
+  // channel 真正注册完成 晚于 oninitialized；用"claude 调了工具"作为 channel 已就绪的可靠信号。
+  // 补发逻辑在下方 feishu-message handler 里；此变量模块级、不跨请求累积。
+  let lastToolCallAt = 0;
+
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    lastToolCallAt = Date.now();
     const { name, arguments: args } = request.params;
     // 总闸门：所有 tool 返回送进 Claude 前净化落单 surrogate（防半 emoji 致 API 400）
     const result = await (async () => {
@@ -444,6 +450,128 @@ async function main() {
   if (chatId && supervisorPort) {
     ipcClient = new SupervisorClient(chatId, supervisorPort);
     setSupervisorClient(ipcClient);
+
+    // ── MCP 就绪门（冷启动竞态修复）──
+    // server.connect() 只是 transport 就绪；MCP initialize 握手（claude→server）完成后
+    // channel 才真正注册。在 oninitialized 之前发 notification 会被 claude 静默丢弃。
+    // 解法：缓冲冷启动期的 feishu-message / chat-trigger / work-stopped，
+    // oninitialized 触发时按序 flush（不丢不重不乱序）。
+    let mcpInitialized = false;
+    type PendingFeishuMessage = Parameters<typeof handleInboundMessage>[1];
+    type PendingChatTrigger = { body: string; meta?: Record<string, string> };
+    type PendingWorkStopped = {
+      session_id: string; is_error: boolean; stop_reason?: string;
+      duration_ms?: number; total_cost_usd?: number;
+    };
+    type PendingItem =
+      | { kind: 'feishu-message'; payload: PendingFeishuMessage }
+      | { kind: 'chat-trigger'; payload: PendingChatTrigger }
+      | { kind: 'work-stopped'; payload: PendingWorkStopped };
+    const pendingQueue: PendingItem[] = [];
+
+    const dispatchChatTrigger = async (p: PendingChatTrigger) => {
+      try {
+        await server.notification({
+          method: 'notifications/claude/channel',
+          params: sanitizeChannelParams(p.body, { source: 'feishu-channel', chat_id: chatId, ...(p.meta ?? {}) }),
+        });
+      } catch (e) {
+        process.stderr.write(`[feishu-channel] chat-trigger notification 失败: ${e instanceof Error ? e.message : e}\n`);
+      }
+    };
+
+    const dispatchWorkStopped = async (p: PendingWorkStopped) => {
+      try {
+        const summary =
+          `【工作 CLI 停下等指示｜${p.session_id}】` +
+          (p.duration_ms ? `已跑 ${(p.duration_ms / 1000).toFixed(0)}s。` : '') +
+          `它停下工作了， pinpin_peek_work_session 查看本turn全程，然后用你自己的话把最新进展飞书汇报给Owner。不必深度思考。`;
+        await server.notification({
+          method: 'notifications/claude/channel',
+          params: sanitizeChannelParams(summary, {
+            source: 'feishu-channel',
+            chat_id: chatId,
+            trigger: 'work-stopped',
+            session_id: p.session_id,
+            is_error: String(p.is_error),
+          }),
+        });
+      } catch (e) {
+        process.stderr.write(`[feishu-channel] work-stopped notification 失败: ${e instanceof Error ? e.message : e}\n`);
+      }
+    };
+
+    // 冷启动补发安全网：是否已完成首条 feishu-message 的 handleInboundMessage 处理
+    // （flush 路径和直接处理路径都会把它设为 true）
+    let firstMessageHandled = false;
+
+    /**
+     * 补发安全网：对冷启动首条消息，在发出 channel notification 后轮询检测
+     * claude 是否在限定时间内调用过工具。若没有（channel 注册间隙导致丢弃），则重发 notification。
+     * 退避重试：6s / 14s / 25s（三次后放弃）。
+     * 取消条件：lastToolCallAt >= sentAt（claude 已就绪收到了）。
+     * 不重跑 handleInboundMessage 副作用（不重写 chat-log / 不重触发 restart-care）。
+     */
+    function scheduleResend(
+      sent: SentNotification,
+      sentAt: number,
+      attempt: number,
+    ): void {
+      const delays = [6000, 14000, 25000];
+      // chatId 在外层 if (chatId && supervisorPort) 块内已 guard，此处确保非空
+      const chatIdSuffix = (chatId as string).slice(-8);
+      if (attempt >= delays.length) {
+        logBackground('wake-resend', `chat=${chatIdSuffix} 已重试 ${delays.length} 次，放弃补发`);
+        return;
+      }
+      const delay = delays[attempt];
+      setTimeout(() => {
+        if (lastToolCallAt >= sentAt) {
+          // claude 已调工具，说明原消息被收到，取消补发
+          logBackground('wake-resend', `chat=${chatIdSuffix} claude acted, cancel resend (attempt=${attempt + 1})`);
+          return;
+        }
+        // 还没调工具 → 补发
+        logBackground('wake-resend', `chat=${chatIdSuffix} wake-msg RESEND #${attempt + 1} sentAt=${sentAt}`);
+        process.stderr.write(`[feishu-channel] 冷启动补发 #${attempt + 1}（chat=${chatId as string}）\n`);
+        server.notification({
+          method: 'notifications/claude/channel',
+          params: { content: sent.content, meta: sent.meta },
+        }).catch((e: unknown) => {
+          process.stderr.write(`[feishu-channel] 补发 #${attempt + 1} 失败: ${e instanceof Error ? e.message : e}\n`);
+        });
+        // 继续等下一轮
+        scheduleResend(sent, sentAt, attempt + 1);
+      }, delay);
+    }
+
+    server.oninitialized = () => {
+      mcpInitialized = true;
+      logBackground('mcp-gate', `chat=${chatId.slice(-8)} oninitialized triggered, pendingQueue=${pendingQueue.length}`);
+      if (pendingQueue.length > 0) {
+        process.stderr.write(`[feishu-channel] MCP initialized，flush ${pendingQueue.length} 条缓冲消息\n`);
+        const items = pendingQueue.splice(0);
+        void (async () => {
+          for (const item of items) {
+            if (item.kind === 'feishu-message') {
+              const isFirstMsg = !firstMessageHandled;
+              firstMessageHandled = true;
+              const sentAt = Date.now();
+              const sent = await handleInboundMessage(server, item.payload);
+              if (sent && isFirstMsg) {
+                logBackground('wake-resend', `chat=${chatId.slice(-8)} wake-msg sent (via flush) at=${sentAt}`);
+                scheduleResend(sent, sentAt, 0);
+              }
+            } else if (item.kind === 'chat-trigger') {
+              await dispatchChatTrigger(item.payload);
+            } else {
+              await dispatchWorkStopped(item.payload);
+            }
+          }
+        })();
+      }
+    };
+
     // 方案A：supervisor 把投票记票路由到本（有 DB 的）子进程执行，回票数给 supervisor 刷卡
     ipcClient.setRequestHandler(IPC_METHODS.POLL_VOTE, async (raw): Promise<PollVoteResult> => {
       const { poll_id, option_idx, voter_open_id } = raw as PollVoteParams;
@@ -463,7 +591,24 @@ async function main() {
       }
     });
     ipcClient.on('feishu-message', (p: { message: Parameters<typeof handleInboundMessage>[1] }) => {
-      void handleInboundMessage(server, p.message);
+      if (!mcpInitialized) {
+        logBackground('mcp-gate', `chat=${chatId.slice(-8)} mcpInitialized=false, buffering feishu-message (queue=${pendingQueue.length + 1})`);
+        pendingQueue.push({ kind: 'feishu-message', payload: p.message });
+        process.stderr.write(`[feishu-channel] MCP 未就绪，feishu-message 缓冲（queue=${pendingQueue.length}）\n`);
+        return;
+      }
+      // mcpInitialized=true 但 channel 可能仍未注册（initialized → 注册 之间的间隙）。
+      // 对冷启动首条消息启动补发安全网（lastToolCallAt 作为 channel 就绪信号）。
+      const isFirstMsg = !firstMessageHandled;
+      firstMessageHandled = true;
+      const sentAt = Date.now();
+      void (async () => {
+        const sent = await handleInboundMessage(server, p.message);
+        if (sent && isFirstMsg) {
+          logBackground('wake-resend', `chat=${chatId.slice(-8)} wake-msg sent (direct) at=${sentAt}`);
+          scheduleResend(sent, sentAt, 0);
+        }
+      })();
     });
     // 重连兜底耗尽（supervisor 彻底失联）才会触发——不退出进程，保住上下文，仅打日志便于排查
     ipcClient.on('disconnect', () => {
@@ -471,46 +616,32 @@ async function main() {
         `[feishu-channel] ⚠️ IPC 彻底失联 (chat=${chatId})，重连已耗尽；降级运行（tools 可用、无入站消息），等 supervisor 重启重建本 CLI\n`,
       );
     });
-    ipcClient.on('chat-trigger', async (p: { body: string; meta?: Record<string, string> }) => {
-      try {
-        await server.notification({
-          method: 'notifications/claude/channel',
-          params: sanitizeChannelParams(p.body, { source: 'feishu-channel', chat_id: chatId, ...(p.meta ?? {}) }),
-        });
-      } catch (e) {
-        process.stderr.write(`[feishu-channel] chat-trigger notification 失败: ${e instanceof Error ? e.message : e}\n`);
+    ipcClient.on('chat-trigger', (p: { body: string; meta?: Record<string, string> }) => {
+      if (!mcpInitialized) {
+        pendingQueue.push({ kind: 'chat-trigger', payload: p });
+        process.stderr.write(`[feishu-channel] MCP 未就绪，chat-trigger 缓冲（queue=${pendingQueue.length}）\n`);
+        return;
       }
+      void dispatchChatTrigger(p);
     });
     // work session stop signal：supervisor push WORK_STOPPED → channel notification 给本 CLI
-    ipcClient.on('work-stopped', async (p: {
+    ipcClient.on('work-stopped', (p: {
       session_id: string;
       is_error: boolean;
       stop_reason?: string;
       duration_ms?: number;
       total_cost_usd?: number;
     }) => {
-      try {
-        // 完工通知保持轻 + 封闭单步（防 high-effort thinking 螺旋：开放指令是螺旋燃料）。
-        // 一句封闭指令——调 peek 看本 turn 全程 → 用自己的话把最新进展汇报Owner → 不必深度思考。
-        // 不带摘要（让品品自己 peek 看全程；旧版 800 字大段 + 多分支强制指令曾致品品 high 螺旋、
-        // tool call malformed、卡死 10min）。
-        const summary =
-          `【工作 CLI 停下等指示｜${p.session_id}】` +
-          (p.duration_ms ? `已跑 ${(p.duration_ms / 1000).toFixed(0)}s。` : '') +
-          `它停下工作了， pinpin_peek_work_session 查看本turn全程，然后用你自己的话把最新进展飞书汇报给Owner。不必深度思考。`;
-        await server.notification({
-          method: 'notifications/claude/channel',
-          params: sanitizeChannelParams(summary, {
-            source: 'feishu-channel',
-            chat_id: chatId,
-            trigger: 'work-stopped',
-            session_id: p.session_id,
-            is_error: String(p.is_error),
-          }),
-        });
-      } catch (e) {
-        process.stderr.write(`[feishu-channel] work-stopped notification 失败: ${e instanceof Error ? e.message : e}\n`);
+      // 完工通知保持轻 + 封闭单步（防 high-effort thinking 螺旋：开放指令是螺旋燃料）。
+      // 一句封闭指令——调 peek 看本 turn 全程 → 用自己的话把最新进展汇报Owner → 不必深度思考。
+      // 不带摘要（让品品自己 peek 看全程；旧版 800 字大段 + 多分支强制指令曾致品品 high 螺旋、
+      // tool call malformed、卡死 10min）。
+      if (!mcpInitialized) {
+        pendingQueue.push({ kind: 'work-stopped', payload: p });
+        process.stderr.write(`[feishu-channel] MCP 未就绪，work-stopped 缓冲（queue=${pendingQueue.length}）\n`);
+        return;
       }
+      void dispatchWorkStopped(p);
     });
     await ipcClient.connect();
     process.stderr.write(`[feishu-channel] IPC connected to supervisor (chat=${chatId}, port=${supervisorPort})\n`);

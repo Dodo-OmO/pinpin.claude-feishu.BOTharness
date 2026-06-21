@@ -6,8 +6,8 @@
  *     = 清空当前 CLI 上下文 = fresh session。
  *   - compact_chat：不退进程——经 IPC 让 supervisor 往本频道 CLI 的 PTY 写 `/compact\n`，
  *     触发 CLI 原生就地压缩（留摘要、人格 / CLAUDE.md 从磁盘重注入、同 session 继续，不失忆）。
- *   - sleep_self：写 `.bot.sleep.<chatId>` 标记文件后 process.exit(0)。supervisor 'crashed'
- *     handler 检查到此文件存在则**不自动重启**（Owner得手动从启动器恢复）。
+ *   - sleep_self：经 IPC 让 supervisor 关闭本频道（pauseChannel：stop + evict 出 Map，归属 standby 不变）。
+ *     evict 后频道 OFF，有人说话经入站热路径自动唤醒（supervisor 不自动重启）。
  *
  * 鉴权（消化方案 A §17.2 OWNER_ONLY_TOOLS 设计）：
  *   - 不走 sender-context.ts AsyncLocalStorage（未落地）
@@ -16,8 +16,6 @@
  *   - 单 CLI 隔离下"最近 inbound sender"就是当前 tool 调用触发者
  */
 
-import fs from "node:fs";
-import path from "node:path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { sendText } from "./feishu-send.js";
 import { checkOwner } from "../owner-auth.js";
@@ -62,19 +60,10 @@ export async function handleRestartSelf(): Promise<ToolResult> {
 // sleep_self
 // ───────────────────────────────────────────────────────────
 
-/** sleep marker 文件路径：跟 supervisor appRoot 对齐（= data.db 所在目录）。
- *  supervisor/index.ts crashed 分支用 this.opts.appRoot 检查同名 marker，本函数用 dirname(PINPIN_DB_PATH)
- *  两者天然一致（supervisor dbPath = path.join(appRoot, 'data.db')） */
-function getSleepMarkerPath(chatId: string): string {
-  const dbPath = process.env.PINPIN_DB_PATH;
-  const appRoot = dbPath ? path.dirname(dbPath) : process.cwd();
-  return path.join(appRoot, `.bot.sleep.${chatId.slice(-8)}`);
-}
-
 export const SLEEP_SELF_TOOL: Tool = {
   name: "sleep_self",
   description:
-    "【仅Owner】让品品**本频道 CLI**下线休息（supervisor 不自动重启，需Owner手动从启动器恢复）。Owner说『下线品品』『/下线』『睡一觉』时调。",
+    "【仅Owner】让品品**本频道 CLI**下线休息（supervisor 不自动重启，有人说话会自动唤醒）。Owner说『下线品品』『/下线』『睡一觉』时调。",
   inputSchema: { type: "object", properties: {} },
 };
 
@@ -83,19 +72,23 @@ export async function handleSleepSelf(): Promise<ToolResult> {
   if (!auth.ok) return textErr(auth.reason ?? "OWNER 鉴权失败");
   const chatId = process.env.PINPIN_CHAT_ID;
   if (!chatId) return textErr("缺 PINPIN_CHAT_ID env");
-  try {
-    fs.writeFileSync(getSleepMarkerPath(chatId), "1");
-  } catch (e) {
-    process.stderr.write(`[sleep_self] 写 .bot.sleep 失败: ${e instanceof Error ? e.message : e}\n`);
-    return textErr(`没法写 sleep marker：${e instanceof Error ? e.message : e}`);
-  }
+  // 先把"下班"话发出去（supervisor 收到 SLEEP_SELF 后约 200ms 树杀本 child）。
   try {
     await sendText(chatId, "下班咯 😴 ～");
   } catch (e) {
     process.stderr.write(`[sleep_self] sendText 失败: ${e instanceof Error ? e.message : e}\n`);
   }
-  setTimeout(() => process.exit(0), 1000);
-  return textOk("已通知Owner，1 秒后退出，sleep marker 已写，supervisor 不会自动重启。");
+  // 经 IPC 让 supervisor 关闭本频道（pauseChannel：stop + evict 出 Map，归属不变）。
+  // evict 后有人说话经入站热路径自动唤醒，那条消息照常送达。IPC 失败（supervisor 失联）则报错不下线。
+  try {
+    const result = await getSupervisorClient().request<WorkOkResult>(IPC_METHODS.SLEEP_SELF, {
+      chat_id: chatId,
+    });
+    if (!result.ok) return textErr(`下线失败：${result.error ?? "unknown"}`);
+  } catch (e) {
+    return textErr(`下线失败（supervisor 未连上？）：${e instanceof Error ? e.message : String(e)}`);
+  }
+  return textOk("已通知Owner并下线本频道：supervisor 不自动重启，有人说话会自动唤醒（归属不变）。");
 }
 
 // ───────────────────────────────────────────────────────────

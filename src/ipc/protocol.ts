@@ -36,6 +36,8 @@ export const IPC_METHODS = {
   STATUSLINE_UPDATE: 'statusline.update',
   // 手动 /压缩：compact_chat tool → supervisor 往本频道 CLI 的 PTY 写 `/compact\n` 触发原生压缩
   COMPACT_VIA_PTY: 'compact.via-pty',  // request → returns { ok }
+  // 飞书 /下线：sleep_self tool → supervisor 关闭本频道（pauseChannel：stop + evict 出 Map，归属不变，下条消息唤醒）
+  SLEEP_SELF: 'sleep-self',            // request → returns WorkOkResult
   // 品品主动单聊 / 建群后即时挂频道监听（不等对方或群友先发消息）
   SPAWN_CHANNEL: 'spawn-channel',      // request → returns WorkOkResult
   // 停某频道 CLI + 删配置，不再重 spawn（解散群后调）

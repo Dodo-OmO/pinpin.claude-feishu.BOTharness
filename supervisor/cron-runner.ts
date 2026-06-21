@@ -128,10 +128,11 @@ export class SupervisorCronRunner {
         process.stderr.write(
           `[supervisor-cron] daily-restart-shutdown 03:55 触发，stop ${chats.length} 个 CLI\n`,
         );
+        // 刻意 stop 不 evict（区别于 pauseChannel）：留在 Map(status=stopped)，让 04:10 用 start() 就地复活常驻频道（比全 spawn 省）。
         for (const c of chats) {
           this.supervisor.getChannel(c.chat_id)?.stop();
         }
-        // 待机频道 stop 后从 Map 移除，使 04:10 不重启它们（维持"待机=睡着不在 Map"，靠消息唤醒）
+        // 睡眠频道 stop 后从 Map 移除，使 04:10 不重启它们（维持"睡眠=不在 Map"，靠消息唤醒）
         this.supervisor.evictStandbyChannels();
       },
     });
@@ -141,15 +142,16 @@ export class SupervisorCronRunner {
       name: 'daily-restart-startup',
       schedule: { kind: 'daily', h: STARTUP_HOUR, m: STARTUP_MIN },
       handler: () => {
-        process.stderr.write('[supervisor-cron] daily-restart-startup 04:10 触发，重启所有已识别频道\n');
-        // supervisor 自带 channel-config-store 持久化 + start 时遍历——这里手动遍历调 spawnChannelCli
-        // 注意：spawnChannelCli 会自动 skip 已 running 的频道（channels.has 检查），但 03:55 stop 后
-        // ChannelCli 实例仍在 channels Map 但 status=stopped，需要走 start() 路径而不是 spawn
+        process.stderr.write('[supervisor-cron] daily-restart-startup 04:10 触发，重启所有常驻频道\n');
+        // ① 03:55 stop 后仍在 Map（status=stopped）的常驻频道 → 走 start() 复活实例。
         for (const c of this.supervisor.getChannelCliStats()) {
           if (c.status === 'stopped') {
             this.supervisor.getChannel(c.chat_id)?.start();
           }
         }
+        // ② 被 /下线 / ✕关闭 evict 出 Map 的常驻频道（不在 ① 的遍历里）→ spawnAllKnownChannels 重拉。
+        //    它跳过睡眠归属（睡眠频道维持"重启不上线、靠消息唤醒"），且对已在 Map 的幂等跳过。
+        this.supervisor.spawnAllKnownChannels();
       },
     });
 

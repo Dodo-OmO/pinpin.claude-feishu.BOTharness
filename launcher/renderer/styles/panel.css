@@ -117,9 +117,9 @@ body {
 .card-title { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
 .card-tag { font-size: 9px; font-weight: 600; color: var(--ink-mute); padding: 2px 6px; background: rgba(44,44,46,0.05); border-radius: 5px; text-transform: uppercase; letter-spacing: 0.04em; }
 .btn-rename { background: transparent; border: none; cursor: pointer; color: var(--ink-mute); font-size: 12px; padding: 2px 4px; border-radius: 4px; flex-shrink: 0; opacity: 0.4; transition: opacity .15s; }
-.card:hover .btn-rename, .standby-row:hover .btn-rename { opacity: 1; }
+.card:hover .btn-rename { opacity: 1; }
 .btn-rename:hover { background: rgba(44,44,46,0.08); color: var(--ink); }
-.card-title.editing, .sb-name.editing { outline: 2px solid var(--purple); outline-offset: 2px; background: white; padding: 2px 4px; border-radius: 4px; cursor: text; }
+.card-title.editing { outline: 2px solid var(--purple); outline-offset: 2px; background: white; padding: 2px 4px; border-radius: 4px; cursor: text; }
 .card-actions { display: flex; gap: 5px; border-top: 1px dashed var(--line); padding-top: 8px; flex-wrap: wrap; }
 .btn { flex: 1; padding: 6px 8px; font-size: 11px; font-weight: 500; background: rgba(44,44,46,0.04); border: none; border-radius: 7px; cursor: pointer; transition: all .15s; color: var(--ink-soft); white-space: nowrap; }
 .btn:hover { background: rgba(44,44,46,0.08); color: var(--ink); }
@@ -211,6 +211,7 @@ body {
 .card-meta-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 11px; color: var(--ink-soft); margin: 4px 0 10px; font-variant-numeric: tabular-nums; }
 .card-meta-line .sep { color: var(--ink-mute); opacity: 0.5; }
 .card-meta-line .badge-fast { background: linear-gradient(135deg, var(--orange), var(--pink)); color: white; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 5px; letter-spacing: 0.03em; }
+.badge-sleep { background: rgba(88,86,214,0.12); color: var(--purple); font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 5px; letter-spacing: 0.03em; flex-shrink: 0; }
 .card-meta-line .mi-label { color: var(--ink-mute); }
 .card.dim .card-meta-line { color: var(--ink-mute); }
 
@@ -220,12 +221,7 @@ body {
 .standby-fold-head:hover { color: var(--ink); }
 .standby-fold-caret { font-size: 10px; transition: transform .15s; display: inline-block; }
 .standby-fold-caret.open { transform: rotate(90deg); }
-.standby-fold-body { padding: 4px 12px 10px; display: flex; flex-direction: column; gap: 2px; }
-.standby-row { display: flex; align-items: center; gap: 9px; padding: 6px 6px; border-radius: 7px; font-size: 12px; }
-.standby-row:hover { background: rgba(255,255,255,0.6); }
-.standby-row .sb-name { flex: 1; font-weight: 500; color: var(--ink); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.standby-row .sb-gear { background: transparent; border: none; cursor: pointer; color: var(--ink-mute); font-size: 13px; padding: 2px 5px; border-radius: 5px; }
-.standby-row .sb-gear:hover { background: rgba(44,44,46,0.08); color: var(--ink); }
+.standby-fold-body { padding: 4px 12px 10px; }
 
 /* ── 频道设置弹窗 ── */
 .modal-overlay { position: fixed; inset: 0; background: rgba(44,44,46,0.32); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 100; }

@@ -372,6 +372,15 @@ export class Supervisor extends EventEmitter {
       return result;
     });
 
+    // 飞书 /下线：sleep_self → 关闭本频道（stop + evict 出 Map），归属 standby 标记不变（常驻仍常驻）。
+    // evict 后频道 OFF，下条入站消息经热路径自动唤醒。先回 ok 再 pauseChannel——pauseChannel 的 cli.stop()
+    // 会树杀本 child，response 必须先发回去（否则发给死 socket，调用方误判失败）。
+    this.ipcServer.setRequestHandler(IPC_METHODS.SLEEP_SELF, async (_params, chatId) => {
+      if (!chatId) return { ok: false, error: 'no chatId on connection' } as WorkOkResult;
+      setTimeout(() => this.pauseChannel(chatId), 200);
+      return { ok: true } as WorkOkResult;
+    });
+
     // 品品主动单聊 / 建群后即时挂频道监听（spawnChannelCli 幂等，已存在直接返回）
     this.ipcServer.setRequestHandler(IPC_METHODS.SPAWN_CHANNEL, async (params) => {
       const p = params as SpawnChannelParams;
@@ -466,6 +475,7 @@ export class Supervisor extends EventEmitter {
           const c = this.spawnChannelCli(id);
           c.start();
         },
+        pauseChannel: (id) => this.pauseChannel(id),
         setChannelConfig: (id, cfg) => this.setChannelConfig(id, cfg),
         setDisplayName: (id, name) => this.setChannelDisplayName(id, name),
         // 批2 额度 + 删除恢复
@@ -651,8 +661,8 @@ export class Supervisor extends EventEmitter {
 
   /** 启动器「展示用」频道列表 = 已 spawn 的真实状态 + 已识别但未 spawn（如待机）的合成"停止卡"。 */
   getDisplayChannels(): Array<ReturnType<ChannelCli['getStats']>> {
-    // 盖 standby 戳：已 spawn 的（含被消息唤醒、当前 running 的待机频道）从 configStore 读，
-    // 让卡片即使 running 也显示"待机"徽章（提示下次 4 点重启会回待机）。
+    // 盖 standby 戳：已 spawn 的（含被消息唤醒、当前 running 的睡眠频道）从 configStore 读，
+    // 让卡片即使 running 也显示"睡眠"徽章（renderChannelCard 渲染，提示归属睡眠：4 点重启不上线、靠消息唤醒）。
     const spawned = this.getChannelCliStats().map((s) => ({
       ...s,
       standby: this.channelConfigStore.isStandby(s.chat_id),
@@ -688,8 +698,9 @@ export class Supervisor extends EventEmitter {
     return this.channels.get(chatId);
   }
 
-  /** spawn 所有已识别频道（飞书 chat.list + channel-config 持久化的，跳过待机）。start() 调，启动器一开即全部上线。 */
-  private spawnAllKnownChannels(): void {
+  /** spawn 所有已识别频道（飞书 chat.list + channel-config 持久化的，跳过睡眠归属）。start() 调（启动器一开全上线）、
+   *  04:10 daily-restart 调（把被 /下线 evict 出 Map 的常驻频道也重新拉起）。spawnChannelCli 幂等，已在 Map 的跳过。 */
+  spawnAllKnownChannels(): void {
     // 5a. 飞书 chat.list 拿到的群（含Owner已加入的群聊）
     for (const c of this.feishuPoll?.getChats() ?? []) {
       if (this.channelConfigStore.isStandby(c.chat_id)) continue; // 待机频道不自动拉起（有人说话才唤醒）
@@ -705,18 +716,26 @@ export class Supervisor extends EventEmitter {
     }
   }
 
-  /** 设频道待机（2026-06-19）。ON：标 standby + 若在运行则 evict（stop+出 Map）立即进待机；
-   *  OFF：清 standby + 立即 spawn 恢复常驻。
+  /** 关闭频道运行进程并 evict 出 Map（归属 standby 标记不变）。供 /下线、启动器✕关闭、切睡眠复用。
+   *  evict 后频道 OFF——下条入站消息经 onFeishuMessage 的"!channels.has → 动态 spawn"热路径自动唤醒。
+   *  cli.stop() 置 userStopped=true，PTY 退出不触发 crash 自愈重 spawn。 */
+  pauseChannel(chatId: string): void {
+    const cli = this.channels.get(chatId);
+    if (cli) {
+      cli.stop();
+      this.channels.delete(chatId);
+    }
+    this.emit('channel-state-changed', chatId);
+    process.stderr.write(`[supervisor] channel ${chatId.slice(-8)} → 关闭并 evict 出 Map（下条消息唤醒；归属不变）\n`);
+  }
+
+  /** 设频道归属（常驻/睡眠）。standby 只决定"全部重启后是否自动上线"；关/开进程走 pauseChannel/spawn。
+   *  ON：标 standby + pauseChannel（关闭+evict）；OFF：清 standby + spawn 恢复常驻在线。
    *  唤醒由 onFeishuMessage 的"!channels.has → 动态 spawn"热路径负责，本方法不碰那条路径。 */
   setChannelStandby(chatId: string, standby: boolean): boolean {
     this.channelConfigStore.setStandby(chatId, standby);
     if (standby) {
-      const cli = this.channels.get(chatId);
-      if (cli) {
-        cli.stop(); // userStopped=true → PTY 退出不触发 crash 自愈
-        this.channels.delete(chatId); // 出 Map → 回到"睡着不在 Map"不变量，下次消息经热路径唤醒
-      }
-      process.stderr.write(`[supervisor] channel ${chatId.slice(-8)} → 睡眠（已 evict）\n`);
+      this.pauseChannel(chatId);
     } else {
       const chat = this.feishuPoll?.getChats().find((c) => c.chat_id === chatId);
       this.spawnChannelCli(chatId, chat?.name ?? this.channelConfigStore.get(chatId)?.display_name);
@@ -834,11 +853,19 @@ export class Supervisor extends EventEmitter {
     cli.on('crashed', () => {
       this.channelUsage.delete(chatId);
       this.emit('channel-state-changed', chatId);
-      // sleep_self tool 写过 .bot.sleep.<chatId 末 8>：Owner主动下线本频道 → 不自动重启
-      const sleepMarker = path.join(this.opts.appRoot, `.bot.sleep.${chatId.slice(-8)}`);
-      if (fs.existsSync(sleepMarker)) {
+      // 本 cli 已不在 Map（被 /下线 / 启动器✕ / 切睡眠 pauseChannel evict，或被新 spawn 替换）→ 非活跃频道的退出，不计数不重启。
+      if (this.channels.get(chatId) !== cli) {
         process.stderr.write(
-          `[supervisor] channel ${chatId.slice(-8)} 已下线（.bot.sleep marker 存在），不自动重启 — Owner手动从启动器恢复\n`,
+          `[supervisor] channel ${chatId.slice(-8)} 退出（已 evict / 被替换，不自动重启）\n`,
+        );
+        return;
+      }
+      // 睡眠频道（standby=true）被消息临时唤醒后意外崩溃 → evict 出 Map、不自动重启（Owner：默默回睡，下条消息再唤醒）。
+      // 常驻频道崩溃则走下方熔断自愈（保持在线）。
+      if (this.channelConfigStore.isStandby(chatId)) {
+        this.channels.delete(chatId);
+        process.stderr.write(
+          `[supervisor] channel ${chatId.slice(-8)} 睡眠态崩溃 → evict，不自动重启（下条消息唤醒）\n`,
         );
         return;
       }

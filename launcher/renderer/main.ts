@@ -142,8 +142,8 @@ function wireChannelActions(root: HTMLElement): void {
       else if (action === 'settings') openChannelModal(cid);
       else if (action === 'rename') {
         // Electron renderer 默认禁用 window.prompt/confirm（silent null），用 contentEditable 让 .card-title 可编辑
-        const container = btn.closest('.card, .standby-row');
-        const titleEl = container?.querySelector('.card-title, .sb-name') as HTMLDivElement | null;
+        const container = btn.closest('.card');
+        const titleEl = container?.querySelector('.card-title') as HTMLDivElement | null;
         if (!titleEl) return;
         const originalText = titleEl.textContent ?? '';
         titleEl.contentEditable = 'true';
@@ -196,7 +196,7 @@ function renderChannels(): void {
   const standby = channels.filter((c) => c.standby);
 
   if (active.length === 0) {
-    row.innerHTML = `<div class="empty-hint">${channels.length === 0 ? '尚未拉到 chat 列表（supervisor 正在启动 / 飞书空）' : '全部频道睡眠中（见下方折叠区）'}</div>`;
+    row.innerHTML = `<div class="empty-hint">${channels.length === 0 ? '尚未拉到 chat 列表（supervisor 正在启动 / 飞书空）' : '全部频道睡眠中（见下方睡眠区）'}</div>`;
   } else {
     row.innerHTML = active.map((c) => renderChannelCard(c)).join('');
     wireChannelActions(row);
@@ -207,19 +207,24 @@ function renderChannels(): void {
 
   const count = document.getElementById('channels-count');
   if (count) {
+    // 在线=运行态(status)；睡眠归属=归属(standby)。两者正交，被唤醒的睡眠频道两边各记一次属正常（标签已区分"在线"vs"归属"）。
     const running = channels.filter((c) => c.status === 'running').length;
     const sleeping = standby.length;
-    const parts = [`${running} 监听`];
-    if (sleeping > 0) parts.push(`${sleeping} 睡眠`);
+    const parts = [`${running} 在线`];
+    if (sleeping > 0) parts.push(`${sleeping} 睡眠归属`);
     count.textContent = parts.join(' · ');
   }
 }
 
-/** 休眠频道折叠区：每个频道一行（健康点 + 名字 + 休眠灰字 + 休眠开关 + ⚙设置）。 */
+// 睡眠区默认展开（睡眠频道的后台要看得见——Owner诉求）；Owner手动折叠的选择跨状态刷新保留。
+let standbyFoldExpanded = true;
+
+/** 睡眠频道区：和常驻一样的全功能卡片（开/关/重启/终端/设置 + 睡眠徽章 + 常驻↔睡眠开关）。默认展开。 */
 function renderStandbyFold(standby: ChannelStatusInfo[]): void {
   const fold = document.getElementById('standby-fold');
   const body = document.getElementById('standby-fold-body');
   const countEl = document.getElementById('standby-count');
+  const caret = document.getElementById('standby-fold-caret');
   if (!fold || !body) return;
   if (standby.length === 0) {
     fold.style.display = 'none';
@@ -227,17 +232,10 @@ function renderStandbyFold(standby: ChannelStatusInfo[]): void {
   }
   fold.style.display = '';
   if (countEl) countEl.textContent = String(standby.length);
-  body.innerHTML = standby.map((c) => `
-    <div class="standby-row">
-      <div class="health-dot ${healthDot(c.status)}"></div>
-      <span class="sb-name" title="${escapeHtml(c.chat_id)}">${escapeHtml(c.chat_name ?? c.chat_id.slice(-12))}</span>
-      ${standbyToggle(c)}
-      <button class="btn-rename" data-action="rename" data-chat-id="${c.chat_id}" data-current-name="${escapeHtml(c.chat_name ?? '')}" title="改名">✎</button>
-      ${c.status === 'running' ? `<button class="sb-gear" data-action="stop" data-chat-id="${c.chat_id}" title="停掉（打回睡眠）">✕</button>` : ''}
-      <button class="sb-gear" data-action="settings" data-chat-id="${c.chat_id}" title="频道设置">⚙</button>
-    </div>
-  `).join('');
+  body.innerHTML = `<div class="cards-row">${standby.map((c) => renderChannelCard(c)).join('')}</div>`;
   wireChannelActions(body);
+  body.style.display = standbyFoldExpanded ? '' : 'none';
+  caret?.classList.toggle('open', standbyFoldExpanded);
 }
 
 function fmtCtxLine(c: ChannelStatusInfo): string {
@@ -287,11 +285,16 @@ function renderChannelCard(c: ChannelStatusInfo): string {
     : '';
   const gearBtn = `<button class="btn btn-more" data-action="settings" data-chat-id="${c.chat_id}" title="频道设置（模型/effort/压缩/fast）">⚙</button>`;
   const fastBadge = c.fast ? '<span class="badge-fast">fast</span>' : '';
+  // 睡眠归属徽章：standby=true 即标，与运行态(开/关)正交——即便此刻被唤醒 running 也显示，提示"4 点重启回睡、靠消息唤醒"。
+  const sleepBadge = c.standby
+    ? '<span class="badge-sleep" title="睡眠归属：全部重启后不自动上线，有人说话才临时唤醒">睡眠</span>'
+    : '';
   return `
     <div class="card ${dim}">
       <div class="card-head">
         <div class="health-dot ${healthDot(c.status)}"></div>
         <div class="card-title" title="${escapeHtml(c.chat_id)}">${escapeHtml(c.chat_name ?? c.chat_id.slice(-12))}</div>
+        ${sleepBadge}
         ${standbyToggle(c)}
         <button class="btn-rename" data-action="rename" data-chat-id="${c.chat_id}" data-current-name="${escapeHtml(c.chat_name ?? '')}" title="改卡片名">✎</button>
       </div>
@@ -733,12 +736,11 @@ async function init(): Promise<void> {
   wireChannelModal();
   // 休眠折叠区 头部 点击展开/收起
   document.getElementById('standby-fold-head')?.addEventListener('click', () => {
+    standbyFoldExpanded = !standbyFoldExpanded;
     const body = document.getElementById('standby-fold-body');
     const caret = document.getElementById('standby-fold-caret');
-    if (!body) return;
-    const open = body.style.display === 'none';
-    body.style.display = open ? '' : 'none';
-    caret?.classList.toggle('open', open);
+    if (body) body.style.display = standbyFoldExpanded ? '' : 'none';
+    caret?.classList.toggle('open', standbyFoldExpanded);
   });
 
   // P1.3: 获取 quota 按钮 + 60s ago tick

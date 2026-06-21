@@ -337,7 +337,7 @@ app.whenReady().then(async () => {
       });
       if (choice.response !== 1) return; // 0 = 取消 / 关窗
     }
-    supervisor?.getChannel(chatId)?.stop();
+    supervisor?.pauseChannel(chatId); // 关闭 + evict 出 Map（归属不变）→ 下条消息可唤醒
     pushState();
   });
   ipcMain.handle('channel.restart', (_, chatId: string) => {

@@ -79,14 +79,22 @@ export function setBotAppId(appId: string): void {
   botAppId = appId;
 }
 
+/** handleInboundMessage 的返回值：首发 channel notification 的内容+元信息，供冷启动补发复用。
+ *  null = 消息被过滤（自环/类型不支持/parse 返回 null），不需要补发。 */
+export interface SentNotification {
+  content: string;
+  meta: Record<string, string>;
+}
+
 /**
  * IPC 入口：supervisor push 来一条飞书消息 → 做完整后处理 + 推 channel notification 给 CLI。
  * 步骤 3 的 src/mcp/server.ts 接 SupervisorClient.on('feishu-message') 后调本函数。
+ * 返回首发 notification 的 {content, meta}（供冷启动补发安全网复用），被过滤则返回 null。
  */
 export async function handleInboundMessage(
   server: Server,
   payload: InboundPayload,
-): Promise<void> {
+): Promise<SentNotification | null> {
   const chatId = payload.chat_id;
   const senderOpenId = payload.sender_open_id;
   const isBot = payload.sender_type === "app";
@@ -96,7 +104,7 @@ export async function handleInboundMessage(
   if (payload.chat_name) setChatNameCache(chatId, payload.chat_name);
 
   // 防自环：bot 自己发的消息（app 类型 + sender.id 是本 bot 的 app_id）
-  if (isBot && senderOpenId === botAppId) return;
+  if (isBot && senderOpenId === botAppId) return null;
 
   // 按消息类型解析正文，六类走 PARSERS 路由表（parse-inbound.ts），其余丢弃。
   const rawContent = payload.content ?? "";
@@ -105,7 +113,7 @@ export async function handleInboundMessage(
     process.stderr.write(
       `[chat-message] 跳过暂不支持的消息类型 msg_id=${payload.message_id} type=${payload.msg_type}\n`,
     );
-    return;
+    return null;
   }
   const ctx: ParseCtx = {
     chatId,
@@ -115,7 +123,7 @@ export async function handleInboundMessage(
     senderOpenId,
   };
   const parsed = await parser(ctx);
-  if (parsed === null) return;
+  if (parsed === null) return null;
   const text = parsed;
 
   // ── sender 昵称解析 ──
@@ -209,25 +217,31 @@ export async function handleInboundMessage(
   const pendingWatches = listPendingSpeakWatchByOpenId(senderOpenId);
   const speakWatchHits = pendingWatches.filter((j) => j.chat_id === chatId);
 
+  const notifParams = sanitizeChannelParams(
+    text + voiceDirective + replyDiscipline + maintenanceReminder,
+    {
+      source: "feishu-channel",
+      chat_id: chatId,
+      message_id: payload.message_id,
+      user: senderName,
+      sender_type: isBot ? "bot" : "human",
+      user_open_id: senderOpenId,
+      ...(replyToQuote ? { reply_to_quote: replyToQuote } : {}),
+      ts: fmtLocalTime(Number(payload.create_time_ms)),
+    },
+  );
   try {
     await server.notification({
       method: "notifications/claude/channel",
-      params: sanitizeChannelParams(text + voiceDirective + replyDiscipline + maintenanceReminder, {
-        source: "feishu-channel",
-        chat_id: chatId,
-        message_id: payload.message_id,
-        user: senderName,
-        sender_type: isBot ? "bot" : "human",
-        user_open_id: senderOpenId,
-        ...(replyToQuote ? { reply_to_quote: replyToQuote } : {}),
-        ts: fmtLocalTime(Number(payload.create_time_ms)),  // 这条消息的发送时间（含日期，可读本地时间）
-      }),
+      params: notifParams,
     });
   } catch (e) {
     process.stderr.write(
       `[chat-message] notification 失败: ${e instanceof Error ? e.message : e}\n`,
     );
   }
+  // 返回首发 notification 内容供冷启动补发安全网（server.ts）复用（不含副作用）
+  const sentResult: SentNotification = { content: notifParams.content, meta: notifParams.meta };
 
   if (needRestartCare) {
     await pushChannelTrigger({
@@ -290,4 +304,5 @@ export async function handleInboundMessage(
       }
     }
   }
+  return sentResult;
 }
