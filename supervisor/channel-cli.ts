@@ -133,7 +133,8 @@ export class ChannelCli extends EventEmitter {
       '--permission-mode',
       'bypassPermissions',
       '--tools',
-      'Bash,Edit,Read,Write,Glob,Grep,Task,WebFetch,WebSearch,TodoWrite,Skill,AskUserQuestion,NotebookEdit,ToolSearch',
+      // 禁 AskUserQuestion：频道 CLI 跑后台 PTY、无人能应答 ask，模型一调即卡死前台，故白名单不含它
+      'Bash,Edit,Read,Write,Glob,Grep,Task,WebFetch,WebSearch,TodoWrite,Skill,NotebookEdit,ToolSearch',
     ];
     for (const a of args) {
       if (a === '-p' || a === '--print') {

@@ -1,6 +1,6 @@
 {
   "name": "pinpin-feishu-mcp",
-  "version": "1.19.0",
+  "version": "1.19.1",
   "description": "品品 飞书 MCP 版（Claude Code CLI + channels 路径，多 CLI 频道隔离）",
   "type": "module",
   "private": true,

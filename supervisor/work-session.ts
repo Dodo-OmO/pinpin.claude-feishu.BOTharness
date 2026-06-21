@@ -235,6 +235,9 @@ export class WorkSession extends EventEmitter {
       // 遥控护栏：work CLI 这端无人能点菜单/审批——禁 AskUserQuestion/计划审批/交互命令、每轮出【本轮总结】
       '--append-system-prompt',
       WORK_CLI_GUARD_PROMPT,
+      // 工具级硬禁 ask：软提示兜底之上再加一道，后台 work CLI 无人应答 AskUserQuestion 会卡死
+      '--disallowedTools',
+      'AskUserQuestion',
     ];
     for (const a of args) {
       if (a === '-p' || a === '--print') {
