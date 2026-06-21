@@ -22,7 +22,9 @@ export function setChatNameCache(chatId: string, name: string): void {
 }
 
 export function getChatName(chatId: string): string {
-  return chatNameCache.get(chatId) ?? chatId; // cache miss 用 chat_id 兜底
+  // cache miss 用 chat_id 兜底——但正常路径下 chat-message.ts 首次写盘前已 setChatNameCache
+  // 填好友好名（群名 / 单聊 "VS X（私聊）"），故此裸兜底实际不再被走到（残留 oc_xxx 目录是历史存量）。
+  return chatNameCache.get(chatId) ?? chatId;
 }
 
 // 按 chat 分目录：每 chat 独立 currentDate / currentLogPath 避免跨 chat 并发写串目录

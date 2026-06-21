@@ -15,6 +15,9 @@ export interface ChannelStatusInfo {
   autoCompactPct?: number;
   /** fast 模式（Opus 加速输出）。 */
   fast?: boolean;
+  /** 休眠模式：每日 4 点整体重启时不自动拉起，有人在该频道说话才唤醒（唤醒后读到触发消息）。
+   *  睡着时该卡为 stopped 态但带休眠标记；醒着时 running 仍带休眠标记（下次重启回休眠）。 */
+  standby?: boolean;
   /** P1.3: per-CLI 上下文用量（statusLine sink 推过来） */
   context_pct?: number | null;
   context_tokens?: number | null;
@@ -67,6 +70,20 @@ export interface AppSettings {
 export interface RateLimitWindow {
   used_percentage: number | null;
   resets_at: number | null;
+}
+
+/** 已映射人名/bot 名（与 src/ipc/protocol.ts NameMappings 同形，启动器面板用） */
+export interface NameMappings {
+  humans: Record<string, string>;
+  bots: Record<string, string>;
+}
+/** 待命名 sender 条目（解析后仍纯 ID 兜底=没友好名），供启动器面板列出待补名 */
+export interface PendingNameEntry {
+  id: string;
+  chat_id: string;
+  snippet: string;
+  type: 'human' | 'bot';
+  ts: number;
 }
 
 export interface QuotaSnapshot {

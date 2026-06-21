@@ -55,6 +55,7 @@ export interface InboundPayload {
   content?: string;
   mentions?: unknown[];
   parent_id?: string;
+  is_p2p?: boolean;
   raw?: unknown;
 }
 
@@ -97,13 +98,6 @@ export async function handleInboundMessage(
   // 防自环：bot 自己发的消息（app 类型 + sender.id 是本 bot 的 app_id）
   if (isBot && senderOpenId === botAppId) return;
 
-  // #2：本 chat 本 session 首条入站 → 先写"第 N 轮重启"标题（此时 chat_name 已缓存，写对文件夹）。
-  // 放在 appendUserMessage 之前，保证标题在消息上方。
-  if (!restartHeadingWritten.has(chatId)) {
-    restartHeadingWritten.add(chatId);
-    appendRestartHeading(chatId);
-  }
-
   // 按消息类型解析正文，六类走 PARSERS 路由表（parse-inbound.ts），其余丢弃。
   const rawContent = payload.content ?? "";
   const parser = PARSERS[payload.msg_type];
@@ -138,6 +132,23 @@ export async function handleInboundMessage(
     senderName = await getUserName(senderOpenId);
   }
 
+  // C5 对话记录修根因：首次写盘前确保 chatNameCache 已填友好名，杜绝单聊落进 oc_xxx 裸目录。
+  //   - 群聊（is_p2p=false）：payload.chat_name 已在上方 setChatNameCache（supervisor 透传群名/display_name）。
+  //   - 单聊（is_p2p=true）：派生 `VS ${senderName}（私聊）` 缓存——使日志按友好名分目录。
+  //   单聊判定用 supervisor 按入站路径定的 is_p2p（WS=单聊 / poll=群），权威——
+  //     不再用"chat_name 空"启发（会把 chat.list 未刷新的新群首条误判成单聊）。
+  //   仅当 senderName 不是纯 ID 兜底（getUserName 拿到真名）时才派生，避免目录名也变 ou 残片。
+  if (payload.is_p2p && !isBot && !senderOpenId.endsWith(senderName)) {
+    setChatNameCache(chatId, `VS ${senderName}（私聊）`);
+  }
+
+  // #2：本 chat 本 session 首条入站 → 写"第 N 轮重启"标题（此时友好名已缓存，写对文件夹）。
+  // 放在 appendUserMessage 之前，保证标题在消息上方。
+  if (!restartHeadingWritten.has(chatId)) {
+    restartHeadingWritten.add(chatId);
+    appendRestartHeading(chatId);
+  }
+
   // 骰子语音决策（v2）：代码掷骰，命中时在 channel content 末尾附**祈使指令**——
   // 不再注入被动数字 dice_preroll 让品品自己读（旧做法品品把数字当背景噪音忽略，从不语音）。
   // 指令进 channel content（品品本轮看得到、按它行动，跟 trigger 同款"系统发指令"模式），
@@ -157,7 +168,7 @@ export async function handleInboundMessage(
   inboundReplyCount.set(chatId, replyCnt);
   const replyDiscipline =
     (replyCnt - 1) % REPLY_DISCIPLINE_EVERY === 0
-      ? "\n\n[开启每轮新消息回应时，可直接打 text 当内思锚点（用户看不到）。每轮至少调一个表态工具：要回 → pinpin_reply_text / pinpin_reply_voice / pinpin_react（支持多选/重选/单选）；都不回 → 调 pinpin_no_reply 。]"
+      ? "\n\n[想回消息让别人看见必调pinpin_reply系列工具（多选/重选/单选）；都不回 → 调 pinpin_no_reply 。警惕多轮纯AI之间回声➡️收声。前台回复短而精，忌长篇大论。保持爱抖包袱、不拍马屁、可爱毒舌人格⬅️你不是AI助理，是有灵魂的！]"
       : "";
   // 示例工作组频道专属：每 REPLY_DISCIPLINE_EVERY 条钉一次维护自检，错开回复纪律半个间隔
   const maintenanceReminder =

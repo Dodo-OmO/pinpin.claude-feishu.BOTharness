@@ -62,6 +62,22 @@ export async function handlePinpinSpawnWorkSession(args: Args): Promise<{
       ],
     };
   }
+  // 防 undefined 进 IPC：work_dir/goal 缺失会被 JSON.stringify 丢字段，到 supervisor 侧成 undefined，
+  // 进而 jsonlPathForSession 对 undefined 调 .replace() 崩主进程。这里快失败、回明确错误让品品自纠。
+  if (
+    typeof args.work_dir !== 'string' || !args.work_dir.trim() ||
+    typeof args.goal !== 'string' || !args.goal.trim()
+  ) {
+    return {
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: `pinpin_spawn_work_session 失败：work_dir 和 goal 都必填且非空（收到 work_dir=${JSON.stringify(args.work_dir)}, goal=${JSON.stringify(args.goal)}）`,
+        },
+      ],
+    };
+  }
   try {
     const client = getSupervisorClient();
     const result = await client.request<WorkSpawnResult>(IPC_METHODS.WORK_SPAWN, {

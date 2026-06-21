@@ -27,6 +27,16 @@ const VAULT_CWD = process.env['PINPIN_VAULT_CWD'] ?? '/path/to/obsidian-vault';
 dotenv.config({ path: join(APP_ROOT, '.env') });
 process.env['PINPIN_DB_PATH'] = join(APP_ROOT, 'data.db');
 
+// 全局兜底网：任何未捕获异常 / Promise 拒绝（尤其 node-pty、setTimeout 回调里的抛错）只记全栈日志，
+// 不弹"A JavaScript error occurred in the main process"模态框、不退出，保活 supervisor。
+// 记完整错误保留可见性（不静默吞），但拦住模态框打断Owner + 进程被拖垮。
+process.on('uncaughtException', (err) => {
+  console.error('[main] uncaughtException（已兜底，不弹框、不退出）:', err);
+});
+process.on('unhandledRejection', (reason) => {
+  console.error('[main] unhandledRejection（已兜底）:', reason);
+});
+
 let mainWindow: BrowserWindow | null = null;
 let tray: Tray | null = null;
 let isQuiting = false;
@@ -293,10 +303,9 @@ app.whenReady().then(async () => {
     }
     pushState();
   });
-  // 批3「开启所有」：解除 paused + 开启所有已识别频道（启动器默认完全静默，点这个才上线）
-  ipcMain.handle('channel.start-all', () => {
-    supervisor?.startAllChannels();
-    pushLog({ ts: Date.now(), level: 'info', source: 'app', message: '已开启所有频道（解除暂停）' });
+  // 休眠模式开关：ON=该频道进休眠（4点重启不拉起、有人说话才唤醒）；OFF=恢复常驻
+  ipcMain.handle('channel.set-standby', (_, chatId: string, standby: boolean) => {
+    supervisor?.setChannelStandby(chatId, standby);
     pushState();
   });
   ipcMain.handle('channel.stop', async (_, chatId: string) => {
@@ -364,57 +373,27 @@ app.whenReady().then(async () => {
     supervisor?.setChannelDisplayName(chatId, name);
     pushState();
   });
-  // 2026-05-28 频道常驻 + forget：设置页"已删除频道"列表 + 恢复入口
-  ipcMain.handle('channel.list-forgotten', () => supervisor?.listForgottenChannels() ?? []);
-  ipcMain.handle('channel.restore-forgotten', (_, chatId: string): boolean => {
-    const ok = supervisor?.restoreForgottenChannel(chatId) ?? false;
-    pushLog({
-      ts: Date.now(),
-      level: ok ? 'info' : 'warn',
-      source: 'launcher',
-      message: ok ? `频道 ${chatId.slice(-8)} 已恢复` : `频道 ${chatId.slice(-8)} 恢复失败（不在 forgotten 列表）`,
-    });
-    pushState();
-    return ok;
-  });
-  // 2026-05-28 频道常驻 + forget：先 main process 弹原生确认 dialog（renderer window.confirm 默认禁用）
-  // → 用户确认 → 标记 forgotten + stop CLI + 后续不再重 spawn
-  ipcMain.handle('channel.forget', async (_, chatId: string): Promise<boolean> => {
-    if (!supervisor) return false;
-    const displayName = getChatDisplayName(chatId);
-    const choice = await dialog.showMessageBox(mainWindow ?? new BrowserWindow({ show: false }), {
-      type: 'warning',
-      buttons: ['取消', '删除'],
-      defaultId: 0,
-      cancelId: 0,
-      title: '删除频道',
-      message: `确定删除频道「${displayName}」？`,
-      detail: [
-        '· 停止该频道的品品 CLI',
-        '· 启动器不再显示此卡片',
-        '· 飞书在此频道再发消息也不会重连',
-        '',
-        '若想恢复：手动编辑 channel-config.json，把对应 chat_id 的 forgotten 字段删掉，重启品品即可',
-      ].join('\n'),
-      noLink: true,
-    });
-    if (choice.response !== 1) return false; // 0 = 取消 / 关窗
-    const ok = supervisor.forgetChannel(chatId);
-    pushLog({
-      ts: Date.now(),
-      level: ok ? 'info' : 'warn',
-      source: 'launcher',
-      message: ok ? `频道 ${displayName} 已 forget` : `频道 ${chatId} forget 失败`,
-    });
-    pushState();
-    return ok;
-  });
   // P1.3: 按需触发 ccusage 拉一次（footer "获取 quota" 按钮）
   ipcMain.handle('quota.fetch-now', async () => {
     if (!supervisor) return null;
     await supervisor.fetchQuotaNow();
     // snapshot 走 supervisor.on('quota') → mainWindow.send('quota', snap)，不必直接返回
     return { ok: true };
+  });
+  // 认识的人 / bot 映射管理（设置 page 面板）——桥接 supervisor 公开方法
+  ipcMain.handle('names.get-mappings', () =>
+    supervisor?.getNameMappings() ?? { humans: {}, bots: {} },
+  );
+  ipcMain.handle('names.get-pending', () => supervisor?.getPendingNames() ?? []);
+  ipcMain.handle('names.set', (_, type: 'human' | 'bot', id: string, name: string) => {
+    supervisor?.setNameMappingFromUI(type, id, name);
+    pushState();
+  });
+  // 每频道注入哪些人物画像（多选；纯写 vault json，重启该频道生效）——桥接 supervisor 公开方法
+  ipcMain.handle('personas.list', () => supervisor?.listPersonaProfiles() ?? []);
+  ipcMain.handle('personas.get', (_, chatId: string) => supervisor?.getChannelPersonas(chatId) ?? '__ALL__');
+  ipcMain.handle('personas.set', (_, chatId: string, sel: string[] | '__ALL__') => {
+    supervisor?.setChannelPersonas(chatId, sel);
   });
   ipcMain.handle('work.end', (_, sessionId: string) => {
     // 修内审 Required #1：UI 主动 end 接 supervisor.endWorkSession
@@ -711,8 +690,16 @@ app.on('window-all-closed', () => {
   // Don't quit — stay alive in tray
 });
 
-app.on('before-quit', async () => {
+let quitCleanupStarted = false;
+app.on('before-quit', async (event) => {
+  // ⚠️ Electron 不会 await 异步 before-quit handler——必须 preventDefault 拦住退出，
+  // 等 supervisor.stop()（同步 taskkill /F /T 树杀所有频道 CLI + 工人 CLI）跑完再 app.exit(0)，
+  // 否则进程抢先退出会留一堆孤儿 claude.exe / MCP server（Owner实测）。
+  if (quitCleanupStarted) return;
+  quitCleanupStarted = true;
+  event.preventDefault();
   isQuiting = true;
   if (stateTickTimer) clearInterval(stateTickTimer);
-  await supervisor?.stop();
+  try { await supervisor?.stop(); } catch (e) { console.error('[launcher] supervisor.stop 异常:', e); }
+  app.exit(0); // 清理完强制退出（不再走 before-quit）
 });

@@ -26,6 +26,9 @@ const SUBMIT_QUIET_MS = 350;
 const SUBMIT_POLL_MS = 100;
 /** 兜底上限：等再久也得发 \r（防 TUI 永不静默时永不提交）。 */
 const SUBMIT_MAX_WAIT_MS = 5000;
+// 超长文本分块写 PTY：一次性灌入会压垮 ConPTY/TUI（卡死 0 事件）。按码点切片 + 间隔节流喂入。
+const CHUNK_SIZE = 120;       // 每片码点数
+const CHUNK_DELAY_MS = 20;    // 片间间隔 ms
 
 export interface PtyExitInfo {
   exitCode: number;
@@ -215,6 +218,12 @@ export class PtyManager {
       process.stderr.write('[PtyManager] write to dead pty ignored\n');
       return;
     }
+    // 兜底最后防线：非字符串（undefined/null）会让 node-pty inSocket.write 抛 ERR_INVALID_ARG_TYPE
+    // （chunk undefined），在 timer 回调里抛=Electron 主进程 uncaught 弹框。这里挡掉、记日志、不崩。
+    if (typeof data !== 'string') {
+      process.stderr.write(`[PtyManager] write: 非字符串数据(${typeof data})被忽略，防 node-pty chunk undefined 崩主进程\n`);
+      return;
+    }
     this.lastWriteMs = Date.now();
     this.ptyProc.write(data);
   }
@@ -225,16 +234,42 @@ export class PtyManager {
    *  注：回合制串行使用，不存在窗口内连发两条；若将来程序自动批量连发需加队列防 \r 与下条文本交错。 */
   submitLine(text: string): void {
     if (!this.alive) return;
+    if (typeof text !== 'string') {
+      process.stderr.write(`[PtyManager] submitLine: 非字符串 text(${typeof text})被忽略\n`);
+      return;
+    }
     this.waitForQuiet('pre-text', () => {
       if (!this.alive) return;
-      this.write(text);
-      setTimeout(() => {
-        this.waitForQuiet('pre-cr', () => {
-          if (!this.alive) return;
-          this.write('\r');
-        });
-      }, SUBMIT_DELAY_MS);
+      // 超长 text 分块喂入（防一次性灌爆 ConPTY/TUI 卡死）；全部写完再走静默门发 \r
+      this.writeChunked(text, () => {
+        setTimeout(() => {
+          this.waitForQuiet('pre-cr', () => {
+            if (!this.alive) return;
+            this.write('\r');
+          });
+        }, SUBMIT_DELAY_MS);
+      });
     });
+  }
+
+  /** 把 text 按码点安全切片、每片间隔 CHUNK_DELAY_MS 写入 PTY，全部写完调 done。
+   *  短文本(<=CHUNK_SIZE)走单次写零额外延迟（频道终端键入不受影响）。 */
+  private writeChunked(text: string, done: () => void): void {
+    const cps = Array.from(text);
+    if (cps.length <= CHUNK_SIZE) {
+      this.write(text);
+      done();
+      return;
+    }
+    let i = 0;
+    const writeNext = (): void => {
+      if (!this.alive) return;
+      this.write(cps.slice(i, i + CHUNK_SIZE).join(''));
+      i += CHUNK_SIZE;
+      if (i >= cps.length) { done(); return; }
+      setTimeout(writeNext, CHUNK_DELAY_MS);
+    };
+    writeNext();
   }
 
   /** 轮询等 PTY 连续静默 SUBMIT_QUIET_MS（渲染/启动 settled = TUI 就绪）后执行 cb；

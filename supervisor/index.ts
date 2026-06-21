@@ -21,6 +21,8 @@ import type { CardActionEvent, ReactionEvent, BotAddedEvent, CommentEvent } from
 import { buildPollCard } from '../src/mcp/feishu/cards/diy-card.js';
 import { feishuEmojiTypeToUnicode } from '../src/mcp/utils/feishu-emoji-map.js';
 import { resolveSenderNameSync } from './sender-resolver.js';
+import { initNameMapStore, seedNameMapIfAbsent, getAllMappings, setNameMapping } from '../src/shared/name-map-store.js';
+import { parseEnvMap } from '../src/shared/sender-shared.js';
 import { IpcServer } from './ipc-server.js';
 import { ChannelCli } from './channel-cli.js';
 import { ChannelConfigStore, DEFAULT_AUTOCOMPACT_PCT } from './channel-config-store.js';
@@ -44,10 +46,13 @@ import {
   type WorkStopSignalParams,
   type CompactViaPtyParams,
   type SpawnChannelParams,
-  type ForgetChannelParams,
+  type StopChannelParams,
   type FeishuInboundMessagePayload,
   type PollVoteParams,
   type PollVoteResult,
+  type NameMappings,
+  type PendingNameEntry,
+  type SetNameMappingParams,
 } from '../src/ipc/protocol.js';
 
 /** P1.3: per-CLI 上下文用量（从 statusLine sink 收，事件驱动） */
@@ -106,14 +111,14 @@ export class Supervisor extends EventEmitter {
   private dailyMessageCount = new Map<string, number>();
   /** chat_id → ChannelCli */
   private channels = new Map<string, ChannelCli>();
-  /** D1: chat_id → 崩溃熔断计数（实例级，不随 spawnChannelCli 重建闭包清零；forgetChannel 才删）。
-   *  原为 spawnChannelCli 闭包局部 var，forget→respawn 会重建闭包跳过熔断；提到实例级使熔断跨 respawn 持续。 */
+  /** D1: chat_id → 崩溃熔断计数（实例级，不随 spawnChannelCli 重建闭包清零；stopChannel 才删）。
+   *  原为 spawnChannelCli 闭包局部 var，stop→respawn 会重建闭包跳过熔断；提到实例级使熔断跨 respawn 持续。 */
   private crashState = new Map<
     string,
     { count: number; windowStart: number; slowRecoveryActive?: boolean; recoveryCount?: number }
   >();
   /** D2: chat_id → CLI 未就绪时缓冲的入站消息（带入队时间戳）。CLI ready（client-hello）后 flush 投递。
-   *  每 chat 上限 50 条（超丢最旧）、flush 时丢弃入队 > 10min 的过期消息。forgetChannel 时清。 */
+   *  每 chat 上限 50 条（超丢最旧）、flush 时丢弃入队 > 10min 的过期消息。stopChannel 时清。 */
   private pendingInbound = new Map<string, Array<{ msg: FeishuInboundMessagePayload; enqueuedAt: number }>>();
   /** P1.3: chat_id → 最新 statusLine 推过来的上下文用量 */
   private channelUsage = new Map<string, ChannelUsageInfo>();
@@ -131,11 +136,15 @@ export class Supervisor extends EventEmitter {
   /** work session 默认 fast（启动时从 __work_defaults__ load；null = 不开） */
   private workDefaultFast: boolean | null = null;
   private started = false;
-  /** 批3: 频道暂停态——构造器默认 true（启动器打开后不自动开启任何频道，完全静默）。
-   *  startAllChannels()（「开启所有」按钮）置 false 后才自动 spawn；stop() 不重置它，
-   *  所以「开启所有」一次后即使重启品品也会恢复频道（符合「重启品品」语义）。 */
-  private channelsPaused = true;
   private dbPath: string;
+  /** name-mappings.json 绝对路径（supervisor 唯一写者；透传给子 CLI env 让两进程读同一文件）。 */
+  private nameMapPath: string;
+  /** 待命名追踪：解析后仍是纯 ID 兜底（没友好名）的 sender，记一笔供启动器"待命名"面板拉。
+   *  key = open_id/cli_id；已在映射里的不记。SET_NAME_MAPPING 成功后 delete 对应 key。 */
+  private pendingNames = new Map<
+    string,
+    { id: string; chat_id: string; snippet: string; type: 'human' | 'bot'; ts: number }
+  >();
   /** message_id → {chat_id, 发送者} 有界缓存（reaction 事件不带 chat_id 也不带"被点消息是谁发的"，
    *  靠它+API 反查：既路由到对应频道，又判断被点的是不是品品自己发的（决定文案口径）。
    *  onFeishuMessage 每条入站记一笔；>2000 删最老。品品自己发的消息不入站 → 反查走 API 兜底。 */
@@ -163,6 +172,8 @@ export class Supervisor extends EventEmitter {
     });
     this.channelConfigStore = new ChannelConfigStore(this.opts.dataDir);
     this.dbPath = path.join(this.opts.appRoot, 'data.db');
+    // name-mappings.json 跟 channel-config.json 同源（dataDir = userData），两进程读、supervisor 写
+    this.nameMapPath = path.join(this.opts.dataDir, 'name-mappings.json');
     this.cronRunner = new SupervisorCronRunner(this);
   }
 
@@ -183,6 +194,15 @@ export class Supervisor extends EventEmitter {
     this.workDefaultModel = persistedWorkDefaults?.model ?? null;
     this.workDefaultEffort = persistedWorkDefaults?.effort ?? null;
     this.workDefaultFast = persistedWorkDefaults?.fast ?? null;
+
+    // ── 0.5 name-map-store init + 首次种子 ──
+    // 单一 name-mappings.json，supervisor 写、两进程读（子端靠 mtime 热重载=实时）。
+    // 文件不存在时用 .env FEISHU_KNOWN_USERS / FEISHU_BOT_ROSTER 灌种子（已存在则不覆盖用户改的）。
+    initNameMapStore(this.nameMapPath);
+    seedNameMapIfAbsent(
+      parseEnvMap(process.env.FEISHU_KNOWN_USERS),
+      parseEnvMap(process.env.FEISHU_BOT_ROSTER),
+    );
 
     // ── 1. DB ──
     // 方案A：supervisor 自身**不再**碰 DB（彻底卸 better-sqlite3，根治 Electron v130 vs 子进程 v137
@@ -360,12 +380,26 @@ export class Supervisor extends EventEmitter {
       return { ok: true } as WorkOkResult;
     });
 
-    // 解散群后停该频道 CLI（forgetChannel：stop CLI + markForgotten + 从 channels 删除）
-    this.ipcServer.setRequestHandler(IPC_METHODS.FORGET_CHANNEL, async (params) => {
-      const p = params as ForgetChannelParams;
+    // 解散群后停该频道 CLI（stopChannel：stop CLI + 从 channels 删除 + 删配置，不再重 spawn）
+    this.ipcServer.setRequestHandler(IPC_METHODS.STOP_CHANNEL, async (params) => {
+      const p = params as StopChannelParams;
       if (!p.chat_id) return { ok: false, error: 'missing chat_id' } as WorkOkResult;
-      const ok = this.forgetChannel(p.chat_id);
+      const ok = this.stopChannel(p.chat_id);
       return { ok } as WorkOkResult;
+    });
+
+    // ── 人名/bot名映射管理 IPC（启动器面板用；UI 后续阶段做）──
+    this.ipcServer.setRequestHandler(IPC_METHODS.GET_NAME_MAPPINGS, async () => {
+      return this.getNameMappings();
+    });
+    this.ipcServer.setRequestHandler(IPC_METHODS.GET_PENDING_NAMES, async () => {
+      return this.getPendingNames();
+    });
+    this.ipcServer.setRequestHandler(IPC_METHODS.SET_NAME_MAPPING, async (params) => {
+      const p = params as SetNameMappingParams;
+      if (!p.id || !p.type) return { ok: false, error: 'missing type/id' } as WorkOkResult;
+      this.setNameMappingFromUI(p.type, p.id, p.name);
+      return { ok: true } as WorkOkResult;
     });
 
     this.ipcServer.setRequestHandler(IPC_METHODS.WORK_END, async (params) => {
@@ -411,10 +445,8 @@ export class Supervisor extends EventEmitter {
       );
     }
 
-    // ── 5. 已识别的所有 chat 自动 spawn 频道 CLI ──
-    // 批3: 默认 paused（完全静默）→ 不自动 spawn；Owner点「开启所有」走 startAllChannels()。
-    // 「开启所有」过一次后 paused=false，重启品品（stop 清 Map + start）会自动恢复频道。
-    if (!this.channelsPaused) this.spawnAllKnownChannels();
+    // ── 5. 已识别的所有 chat 自动 spawn 频道 CLI（启动器一打开即全部上线）──
+    this.spawnAllKnownChannels();
 
     // ── 5.5 supervisor 内嵌 cron（2026-05-28 多 CLI 决策）：
     //         mood-decay / feishu-token-keepalive / daily-restart 编排
@@ -434,7 +466,6 @@ export class Supervisor extends EventEmitter {
           const c = this.spawnChannelCli(id);
           c.start();
         },
-        startAllChannels: () => this.startAllChannels(),
         setChannelConfig: (id, cfg) => this.setChannelConfig(id, cfg),
         setDisplayName: (id, name) => this.setChannelDisplayName(id, name),
         // 批2 额度 + 删除恢复
@@ -446,9 +477,6 @@ export class Supervisor extends EventEmitter {
             rate_limits: this.lastRateLimits,
           };
         },
-        forgetChannel: (id) => this.forgetChannel(id),
-        listForgotten: () => this.listForgottenChannels(),
-        restoreChannel: (id) => this.restoreForgottenChannel(id),
         // 批3 work session
         getWorkSessions: () => this.workSessions,
         getWorkSession: (sid) => this.getWorkSession(sid),
@@ -491,12 +519,14 @@ export class Supervisor extends EventEmitter {
   async stop(): Promise<void> {
     if (!this.started) return;
     this.started = false;
-    this.cronRunner.stop();
-    await this.ccusagePoller.stop();
+    // 最优先同步树杀所有频道 CLI + 工人 CLI（放在任何 await 之前：即便后续异步收尾卡住、
+    // 或 Electron 抢着退出，taskkill /F /T 也已先发，绝不留孤儿 claude.exe / MCP server）。
     for (const cli of this.channels.values()) cli.stop();
     this.channels.clear();
     for (const ws of this.workSessions.values()) ws.end();
     this.workSessions.clear();
+    this.cronRunner.stop();
+    await this.ccusagePoller.stop();
     await this.feishuPoll?.stop();
     this.feishuPoll = null;
     await this.feishuEventSubscriber?.stop();
@@ -507,20 +537,15 @@ export class Supervisor extends EventEmitter {
     process.stderr.write('[supervisor] stopped\n');
   }
 
-  /** 启动器「重启品品」：stop + start，并恢复频道。
-   *  修 bug：stop() 不重置 channelsPaused、start() 拉频道受 `!channelsPaused` 门控，默认
-   *  paused=true（用户逐个手动启动频道也不改它）→ 旧 stop()+start() 只下线不拉起。
-   *  快照 stop 前是否有活跃频道（Map 非空 或 已解除暂停），重启后若仍 paused 但原本有频道则补 startAllChannels()。 */
+  /** 启动器「重启品品」：stop + start（start 已永远拉起所有已知频道）。 */
   async restart(): Promise<void> {
-    const hadChannels = this.channels.size > 0 || !this.channelsPaused;
     await this.stop();
     await this.start();
-    if (hadChannels && this.channelsPaused) this.startAllChannels();
   }
 
   /** 抗断线加固：熔断后的有界慢速自愈链。每 5min 一跳——
    *  已稳定运行 → 重置熔断状态；达上限(6次) → 通知Owner + 交手动 [↻]；否则重试一次再排下一跳。
-   *  crashState 被 manual-restart/forgetChannel 清掉时链自动终止（回调内重取 state 判空）。 */
+   *  crashState 被 manual-restart/stopChannel 清掉时链自动终止（回调内重取 state 判空）。 */
   private scheduleSlowRecovery(chatId: string): void {
     setTimeout(() => {
       const state = this.crashState.get(chatId);
@@ -624,11 +649,14 @@ export class Supervisor extends EventEmitter {
     return [...this.channels.values()].map((c) => c.getStats());
   }
 
-  /** 批3 Bug 修复：启动器「展示用」频道列表 = 已 spawn 的真实状态 + 已识别但未 spawn 的合成"停止卡"。
-   *  让 paused（完全静默/未点开启所有）时启动器仍显示所有已知频道（停止态、可预配 model/effort），
-   *  Owner配好再点开启所有——这才是「启动前先配模型」的用途。已 forget 的不显示。 */
+  /** 启动器「展示用」频道列表 = 已 spawn 的真实状态 + 已识别但未 spawn（如待机）的合成"停止卡"。 */
   getDisplayChannels(): Array<ReturnType<ChannelCli['getStats']>> {
-    const spawned = this.getChannelCliStats();
+    // 盖 standby 戳：已 spawn 的（含被消息唤醒、当前 running 的待机频道）从 configStore 读，
+    // 让卡片即使 running 也显示"待机"徽章（提示下次 4 点重启会回待机）。
+    const spawned = this.getChannelCliStats().map((s) => ({
+      ...s,
+      standby: this.channelConfigStore.isStandby(s.chat_id),
+    }));
     const seen = new Set(spawned.map((c) => c.chat_id));
     const out = [...spawned];
     const knownIds: string[] = [];
@@ -637,7 +665,6 @@ export class Supervisor extends EventEmitter {
     for (const chatId of knownIds) {
       if (seen.has(chatId)) continue;
       seen.add(chatId);
-      if (this.channelConfigStore.isForgotten(chatId)) continue;
       const persisted = this.channelConfigStore.get(chatId);
       out.push({
         chat_id: chatId,
@@ -651,6 +678,7 @@ export class Supervisor extends EventEmitter {
         autoCompactPct: persisted?.autoCompactPct ?? this.opts.defaultAutoCompactPct ?? DEFAULT_AUTOCOMPACT_PCT,
         fast: persisted?.fast ?? this.opts.defaultFast ?? false,
         session_id: undefined,
+        standby: this.channelConfigStore.isStandby(chatId),
       });
     }
     return out;
@@ -660,33 +688,104 @@ export class Supervisor extends EventEmitter {
     return this.channels.get(chatId);
   }
 
-  /** 批3: spawn 所有已识别频道（飞书 chat.list + channel-config 持久化的，跳过 forgotten）。
-   *  原 start() step 5a/5b 逻辑抽出，供 start()（非 paused 时）+ startAllChannels() 共用。 */
+  /** spawn 所有已识别频道（飞书 chat.list + channel-config 持久化的，跳过待机）。start() 调，启动器一开即全部上线。 */
   private spawnAllKnownChannels(): void {
     // 5a. 飞书 chat.list 拿到的群（含Owner已加入的群聊）
     for (const c of this.feishuPoll?.getChats() ?? []) {
-      if (this.channelConfigStore.isForgotten(c.chat_id)) continue;
+      if (this.channelConfigStore.isStandby(c.chat_id)) continue; // 待机频道不自动拉起（有人说话才唤醒）
       this.spawnChannelCli(c.chat_id, c.name);
     }
     // 5b. 频道常驻：channel-config.json 持久化但飞书 chat.list 没返的（P2P 单聊 / 历史已识别群）
     const persistedIds = this.channelConfigStore.listChatIds();
     for (const chatId of persistedIds) {
       if (this.channels.has(chatId)) continue; // 5a 已 spawn 跳过
+      if (this.channelConfigStore.isStandby(chatId)) continue; // 待机频道不自动拉起
       const persisted = this.channelConfigStore.get(chatId);
       this.spawnChannelCli(chatId, persisted?.display_name);
     }
   }
 
-  /** 批3「开启所有」按钮入口：解除 paused + 把所有已识别频道开起来。
-   *  不在 Map → spawn；在 Map 但已 stopped → start()（让之前单独关掉的频道也一并重开）。 */
-  startAllChannels(): void {
-    this.channelsPaused = false;
-    this.spawnAllKnownChannels();
-    // 已存在但 stopped 的频道（之前被单独关掉）也重开
-    for (const c of this.getChannelCliStats()) {
-      if (c.status === 'stopped') this.channels.get(c.chat_id)?.start();
+  /** 设频道待机（2026-06-19）。ON：标 standby + 若在运行则 evict（stop+出 Map）立即进待机；
+   *  OFF：清 standby + 立即 spawn 恢复常驻。
+   *  唤醒由 onFeishuMessage 的"!channels.has → 动态 spawn"热路径负责，本方法不碰那条路径。 */
+  setChannelStandby(chatId: string, standby: boolean): boolean {
+    this.channelConfigStore.setStandby(chatId, standby);
+    if (standby) {
+      const cli = this.channels.get(chatId);
+      if (cli) {
+        cli.stop(); // userStopped=true → PTY 退出不触发 crash 自愈
+        this.channels.delete(chatId); // 出 Map → 回到"睡着不在 Map"不变量，下次消息经热路径唤醒
+      }
+      process.stderr.write(`[supervisor] channel ${chatId.slice(-8)} → 睡眠（已 evict）\n`);
+    } else {
+      const chat = this.feishuPoll?.getChats().find((c) => c.chat_id === chatId);
+      this.spawnChannelCli(chatId, chat?.name ?? this.channelConfigStore.get(chatId)?.display_name);
+      process.stderr.write(`[supervisor] channel ${chatId.slice(-8)} → 取消睡眠（已恢复常驻）\n`);
     }
-    process.stderr.write('[supervisor] startAllChannels：已解除暂停 + 开启所有已识别频道\n');
+    this.emit('channel-state-changed');
+    return true;
+  }
+
+  /** 每日 4 点重启 03:55 stop 全部后调：把待机频道从 Map 移除（已 stopped），
+   *  使 04:10 遍历 Map 重启时自然跳过它们 → 维持"待机=睡着不在 Map"不变量。 */
+  evictStandbyChannels(): void {
+    for (const [chatId, cli] of [...this.channels.entries()]) {
+      if (this.channelConfigStore.isStandby(chatId)) {
+        cli.stop();
+        this.channels.delete(chatId);
+        process.stderr.write(`[supervisor] 每日重启：睡眠频道 ${chatId.slice(-8)} evict 出 Map（不参与 04:10 重启）\n`);
+      }
+    }
+  }
+
+  // ── 人物画像注入：每频道多选（launcher 弹窗用，纯 fs/json，重启该频道生效）──
+  // 注入逻辑本身在子 MCP src/mcp/instructions.ts:loadPersonaProfiles（CLI spawn 时读 vault），本组只读写 vault 文件。
+  private personaDir(): string {
+    return path.join(this.opts.vaultCwd, '记忆系统', '人物');
+  }
+  private personaMapPath(): string {
+    return path.join(this.personaDir(), '_注入映射.json');
+  }
+
+  /** 当前所有可用人物 = 人物目录下 *.md 去后缀、排除 `_` 开头、排序。目录不存在 → []。 */
+  listPersonaProfiles(): string[] {
+    try {
+      return fs
+        .readdirSync(this.personaDir())
+        .filter((f) => f.endsWith('.md') && !f.startsWith('_'))
+        .map((f) => f.slice(0, -3))
+        .sort();
+    } catch {
+      return [];
+    }
+  }
+
+  /** 本频道注入哪些人：chat 不在表 / 值含 __ALL__ / 读失败 → '__ALL__'（全选）；否则返该数组。 */
+  getChannelPersonas(chatId: string): string[] | '__ALL__' {
+    try {
+      const map = JSON.parse(fs.readFileSync(this.personaMapPath(), 'utf-8')) as Record<string, unknown>;
+      const picked = map[chatId];
+      if (Array.isArray(picked) && !picked.includes('__ALL__')) return picked as string[];
+      return '__ALL__';
+    } catch {
+      return '__ALL__';
+    }
+  }
+
+  /** 写回本频道选择：空数组 / '__ALL__' → ["__ALL__"]（全注入兜底，避免一人不注入）。
+   *  原子写（tmp+rename），保留 _comment 与其它 chat 条目。 */
+  setChannelPersonas(chatId: string, sel: string[] | '__ALL__'): void {
+    const file = this.personaMapPath();
+    let map: Record<string, unknown> = {};
+    try {
+      map = JSON.parse(fs.readFileSync(file, 'utf-8')) as Record<string, unknown>;
+    } catch {
+      // 缺文件/坏 → 从空对象起（仍会原样写回 _comment 缺失，可接受）
+    }
+    map[chatId] = sel === '__ALL__' || sel.length === 0 ? ['__ALL__'] : sel;
+    const tmp = file + '.tmp';
+    fs.writeFileSync(tmp, JSON.stringify(map, null, 2), 'utf-8');
+    fs.renameSync(tmp, file);
   }
 
   spawnChannelCli(chatId: string, chatName?: string): ChannelCli {
@@ -709,6 +808,7 @@ export class Supervisor extends EventEmitter {
       fast: persisted?.fast ?? this.opts.defaultFast ?? false,
       supervisorPort: this.ipcServer.getPort(),
       dbPath: this.dbPath,
+      nameMapPath: this.nameMapPath,
       // P1.3: statusLine sink 绝对路径
       statusLineSinkPath: path.join(this.opts.appRoot, 'scripts', 'statusline-sink.cjs'),
     });
@@ -852,6 +952,23 @@ export class Supervisor extends EventEmitter {
     process.stderr.write(`[supervisor] channel display_name set: ${chatId} → "${trimmed}"\n`);
   }
 
+  // ── 人名/bot 映射（启动器面板 + ipcServer handler 共享，DRY）──
+  /** 已映射人名/bot 名（humans/bots 两桶）。 */
+  getNameMappings(): NameMappings {
+    return getAllMappings() as NameMappings;
+  }
+  /** 待命名 sender（解析后仍纯 ID 兜底=没友好名），供启动器面板列出待补名。 */
+  getPendingNames(): PendingNameEntry[] {
+    return [...this.pendingNames.values()] as PendingNameEntry[];
+  }
+  /** 启动器面板写映射：写 json（同进程 resolveSenderNameSync 立即生效、子进程下条消息靠 mtime 热重载）
+   *  + 清待命名 + 推 state 让 UI 红点/列表刷新。 */
+  setNameMappingFromUI(type: 'human' | 'bot', id: string, name: string): void {
+    setNameMapping(type, id, name);
+    this.pendingNames.delete(id);
+    this.emit('channel-state-changed');
+  }
+
   /** P1.2: restart 前 reload persisted 进 channel-cli.opts，避免切完配置后 restart 仍用旧 opts */
   reloadChannelConfigInto(chatId: string): void {
     const persisted = this.channelConfigStore.get(chatId);
@@ -941,25 +1058,6 @@ export class Supervisor extends EventEmitter {
       if (firstKey !== undefined) this.msgIdToInfo.delete(firstKey);
     }
 
-    // 频道常驻 + forget 守卫：若Owner主动 forgotten 过此频道，直接丢消息不重新 spawn
-    if (this.channelConfigStore.isForgotten(msg.chat_id)) {
-      process.stderr.write(
-        `[supervisor] msg drop (chat ${msg.chat_id.slice(-8)} 已被Owner forget): ${(msg.text ?? '').slice(0, 40)}\n`,
-      );
-      return;
-    }
-
-    // 批3 完全静默：paused 时**只拦"自动新开频道"**，不拦已在运行的频道。
-    // ⚠️ 关键修正：paused 仅阻止"未启动的频道被消息自动唤醒/spawn"；若该频道已被
-    // 单独「启动」或「开启所有」拉起（在 channels Map 里），消息必须照常 push 给它——
-    // 否则会出现"手动启动了频道却收不到消息"（Owner实测：单启 opus-4-6 频道仍被 paused 丢消息）。
-    if (this.channelsPaused && !this.channels.has(msg.chat_id)) {
-      process.stderr.write(
-        `[supervisor] paused 且该频道未启动→丢弃消息（不自动 spawn）chat=${msg.chat_id.slice(-8)}: ${(msg.text ?? '').slice(0, 30)}\n`,
-      );
-      return;
-    }
-
     // P4.Q3: 未知 chat_id（WSClient 推 P2P 新单聊 / 拉群事件先于 chat.list refresh）→ 动态 spawn channel CLI
     if (!this.channels.has(msg.chat_id)) {
       // chat_name 从 raw event 试取（飞书 event body 含 chat.name 或 chat.dm_name 等字段）
@@ -982,6 +1080,25 @@ export class Supervisor extends EventEmitter {
     for (const k of this.dailyMessageCount.keys()) {
       const [y, m, dd] = k.split('-').map(Number);
       if (new Date(y, m - 1, dd).getTime() < cutoff) this.dailyMessageCount.delete(k);
+    }
+
+    // 待命名追踪：解析该 sender 名，若仍是纯 ID 兜底（slice -8）= 没友好名 → 记进 pendingNames
+    // 供启动器"待命名"面板拉。已在 name-map/env 命中的不记（解析值 ≠ slice -8）。
+    {
+      const isBot = msg.sender_type === 'app';
+      const resolved = resolveSenderNameSync(msg.sender_open_id, msg.sender_type);
+      if (resolved === msg.sender_open_id.slice(-8)) {
+        this.pendingNames.set(msg.sender_open_id, {
+          id: msg.sender_open_id,
+          chat_id: msg.chat_id,
+          snippet: (msg.text ?? '').slice(0, 30),
+          type: isBot ? 'bot' : 'human',
+          ts: Date.now(),
+        });
+      } else {
+        // 已有名字（可能刚被Owner映射）→ 清掉旧的待命名条目
+        this.pendingNames.delete(msg.sender_open_id);
+      }
     }
 
     // 反查 chat_name 给子端 setChatNameCache 写盘日志用（消化 step 3 review Required #1）
@@ -1024,6 +1141,7 @@ export class Supervisor extends EventEmitter {
       sender_type: msg.sender_type,
       text: msg.text,
       create_time_ms: msg.create_time_ms,
+      is_p2p: msg.is_p2p,
       content,
       mentions,
       parent_id,
@@ -1182,9 +1300,6 @@ export class Supervisor extends EventEmitter {
       return;
     }
     const chatId = info.chatId;
-    // 守卫与 onFeishuMessage 同语义：forgotten 频道丢；完全静默期不为表情唤醒未启动频道
-    if (this.channelConfigStore.isForgotten(chatId)) return;
-    if (this.channelsPaused && !this.channels.has(chatId)) return;
     if (!(await this.ensureChannelReadyForEvent(chatId))) {
       process.stderr.write(`[supervisor] onReaction: chat ${chatId.slice(-8)} CLI 未就绪，放弃\n`);
       return;
@@ -1211,17 +1326,9 @@ export class Supervisor extends EventEmitter {
     });
   }
 
-  /** 品品被拉进新群 → spawn 该群 CLI + 提示品品可打招呼。forgotten / 完全静默期不打招呼。 */
+  /** 品品被拉进新群 → spawn 该群 CLI + 提示品品可打招呼。 */
   private async onBotAdded(evt: BotAddedEvent): Promise<void> {
     const chatId = evt.chatId;
-    if (this.channelConfigStore.isForgotten(chatId)) {
-      process.stderr.write(`[supervisor] onBotAdded: chat ${chatId.slice(-8)} 已被 forget，不打招呼\n`);
-      return;
-    }
-    if (this.channelsPaused) {
-      process.stderr.write(`[supervisor] onBotAdded: paused（完全静默），不自动打招呼 chat=${chatId.slice(-8)}\n`);
-      return;
-    }
     if (!(await this.ensureChannelReadyForEvent(chatId))) {
       process.stderr.write(`[supervisor] onBotAdded: chat ${chatId.slice(-8)} CLI 未就绪，放弃\n`);
       return;
@@ -1247,8 +1354,6 @@ export class Supervisor extends EventEmitter {
       process.stderr.write(`[supervisor] onComment: 未配 PINPIN_COMMENT_CHAT_ID / PINPIN_OWNER_CHAT_ID，丢弃评论事件\n`);
       return;
     }
-    if (this.channelsPaused && !this.channels.has(targetChatId)) return;
-    if (this.channelConfigStore.isForgotten(targetChatId)) return;
     if (!(await this.ensureChannelReadyForEvent(targetChatId))) {
       process.stderr.write(`[supervisor] onComment: 兜底频道 ${targetChatId.slice(-8)} CLI 未就绪，放弃\n`);
       return;
@@ -1265,23 +1370,12 @@ export class Supervisor extends EventEmitter {
 
   private onChatListDiff(diff: ChatListDiff): void {
     for (const added of diff.added) {
-      if (this.channelConfigStore.isForgotten(added.chat_id)) {
-        process.stderr.write(
-          `[supervisor] chat.list 新增但已被Owner forget，跳过 spawn: ${added.name ?? added.chat_id}\n`,
-        );
-        continue;
-      }
-      // 批3 完全静默：paused 时新群也不自动 spawn（点开启所有时 startAllChannels 走飞书 chat.list 会带上它）
-      if (this.channelsPaused) {
-        process.stderr.write(`[supervisor] paused，新群暂不 spawn（待开启所有）: ${added.name ?? added.chat_id}\n`);
-        continue;
-      }
       process.stderr.write(`[supervisor] 新群发现，自动 spawn: ${added.name ?? added.chat_id}\n`);
       this.spawnChannelCli(added.chat_id, added.name);
     }
     // 频道常驻语义（2026-05-28）：飞书 chat.list 返回 removed 不再主动 stop CLI——
     // 被踢/解散事件靠飞书 SDK 可能短时抖动（chat.list 拉空），误判 stop 会导致 CLI 反复重启。
-    // 真要"删频道"走Owner主动 forget 路径（启动器 X 按钮 → forgetChannel()）。
+    // 真要"停频道"走 disband_group → STOP_CHANNEL → stopChannel()。
     for (const removed of diff.removed) {
       process.stderr.write(
         `[supervisor] chat.list 不再返回此 chat（可能短时抖动 / 群解散），保持常驻 CLI: ${removed.name ?? removed.chat_id}\n`,
@@ -1291,44 +1385,23 @@ export class Supervisor extends EventEmitter {
   }
 
   /**
-   * Owner主动 forget 频道（启动器 X 按钮）。
-   *   1. channel-config.json 落 forgotten=true 标记
-   *   2. stop 该频道 CLI + 从 channels Map 移除
-   *   3. 后续 onFeishuMessage 会因 isForgotten 直接丢消息不重 spawn
-   *   4. 同频道有 pending scheduled_jobs 时本次不主动清——Owner未来再加该频道时这些 timer 自然 fire（按 chat_id 路由）
+   * 解散群后停该频道 CLI（disband_group → STOP_CHANNEL）。
+   *   1. stop 该频道 CLI + 从 channels Map 移除
+   *   2. 从 channel-config.json 删该 entry（防 spawnAllKnownChannels 重拉已解散群）
+   *   3. 清 usage / crashState / pendingInbound
    */
-  /** 设置页"已删除频道列表"用——含 chat_id + display_name */
-  listForgottenChannels(): Array<{ chat_id: string; display_name?: string }> {
-    return this.channelConfigStore.listForgottenChatIds();
-  }
-
-  /**
-   * 设置页"恢复"按钮：清 forgotten 标记 + 立刻 spawn 该频道 CLI
-   * 返回 true = 恢复成功；false = 该 chat_id 不在 forgotten 列表
-   */
-  restoreForgottenChannel(chatId: string): boolean {
-    const ok = this.channelConfigStore.unmarkForgotten(chatId);
-    if (!ok) return false;
-    // 找一下飞书 chat.list 里的 chat_name（如有）反查 + 立刻 spawn
-    const chatName = this.feishuPoll?.getChats().find((c) => c.chat_id === chatId)?.name;
-    this.spawnChannelCli(chatId, chatName);
-    process.stderr.write(`[supervisor] restored forgotten channel: ${chatId}\n`);
-    this.emit('channel-state-changed', chatId);
-    return true;
-  }
-
-  forgetChannel(chatId: string): boolean {
+  stopChannel(chatId: string): boolean {
     if (!this.channels.has(chatId) && !this.channelConfigStore.get(chatId)) return false;
-    this.channelConfigStore.markForgotten(chatId);
     const cli = this.channels.get(chatId);
     if (cli) {
       cli.stop();
       this.channels.delete(chatId);
     }
+    this.channelConfigStore.remove(chatId);
     this.channelUsage.delete(chatId);
-    this.crashState.delete(chatId); // D1: 频道彻底忘记才清熔断计数（正常 respawn 不清=熔断跨 respawn 持续）
+    this.crashState.delete(chatId); // D1: 频道彻底停掉才清熔断计数（正常 respawn 不清=熔断跨 respawn 持续）
     this.pendingInbound.delete(chatId); // D2: 清未就绪缓冲队列，避免泄漏
-    process.stderr.write(`[supervisor] forget channel: ${chatId}\n`);
+    process.stderr.write(`[supervisor] stop channel: ${chatId}\n`);
     this.emit('channel-state-changed', chatId);
     return true;
   }

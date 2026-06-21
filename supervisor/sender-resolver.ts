@@ -12,6 +12,7 @@
 
 import { getFeishuClient } from './feishu-client.js';
 import { parseEnvMap, resolveMentions } from '../src/shared/sender-shared.js';
+import { getHumanNameMapping, getBotNameMapping } from '../src/shared/name-map-store.js';
 export type { FeishuMentionShared as FeishuMention } from '../src/shared/sender-shared.js';
 
 const BOT_NAME_MAP = parseEnvMap(process.env['FEISHU_BOT_ROSTER']);
@@ -21,13 +22,17 @@ const ENV_KNOWN_USERS = parseEnvMap(process.env['FEISHU_KNOWN_USERS']);
 const userNameCache = new Map<string, string>();
 const inflightLookups = new Set<string>();
 
-/** 同步反查：bot env → user env → cache → fallback（slice -8） */
+/** 同步反查：name-map-store（Owner启动器改的实时映射，最高优先）→ bot/user env → cache → fallback（slice -8） */
 export function resolveSenderNameSync(senderOpenId: string, senderType: 'user' | 'app'): string {
   if (!senderOpenId) return '?';
   if (senderType === 'app') {
+    const mapped = getBotNameMapping(senderOpenId);
+    if (mapped) return mapped;
     return BOT_NAME_MAP[senderOpenId] ?? senderOpenId.slice(-8);
   }
   // user
+  const mapped = getHumanNameMapping(senderOpenId);
+  if (mapped) return mapped;
   const envName = ENV_KNOWN_USERS[senderOpenId];
   if (envName) return envName;
   const cached = userNameCache.get(senderOpenId);

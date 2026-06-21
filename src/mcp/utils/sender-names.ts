@@ -12,6 +12,7 @@
 import { getFeishuClient } from "../tools/feishu-send.js";
 import { getKnownUserName, seedKnownUsers } from "../db/database.js";
 import { parseEnvMap } from "../../shared/sender-shared.js";
+import { getHumanNameMapping } from "../../shared/name-map-store.js";
 
 export { resolveBotName, loadBotRoster, logUnknownBotOnce } from "./bot-roster.js";
 
@@ -47,6 +48,9 @@ const userNameCache = new Map<string, string>();
  */
 export async function getUserName(openId: string): Promise<string> {
   if (!openId) return "未知用户";
+  // Owner启动器改的实时映射最高优先——放 cache 检查之前，改名立即生效不被旧 cache 挡
+  const mapped = getHumanNameMapping(openId);
+  if (mapped) return mapped;
   const cached = userNameCache.get(openId);
   if (cached) return cached;
   const fallback = openId.length > 8 ? openId.slice(-8) : openId;

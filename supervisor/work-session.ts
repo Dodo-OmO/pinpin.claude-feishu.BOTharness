@@ -24,7 +24,7 @@ import os from 'node:os';
 import path from 'node:path';
 import { PtyManager } from './pty-manager.js';
 import { JsonlWatcher, type JsonlEvent } from './jsonl-watcher.js';
-import { resolveClaudePath, stripAnsi } from './utils.js';
+import { resolveClaudePath, stripAnsi, claudeApiNetEnv } from './utils.js';
 
 /** model name → context window size（用于上下文 % 计算）。未识别 model 返 null（UI 显示 tokens 不显 %） */
 function contextWindowSize(model: string): number | null {
@@ -69,14 +69,6 @@ export interface WorkUsage {
   updated_at: number;
 }
 
-/** 码点安全截断——按 Unicode 码点切，绝不切在 surrogate pair 中间
- *  （切坏 emoji 会留落单 surrogate → 进 peek 历史 / Claude API 请求体 → 400 no low surrogate）*/
-function truncateCp(s: string, n: number, ellipsis = false): string {
-  const cps = Array.from(s);
-  if (cps.length <= n) return s;
-  return cps.slice(0, n).join('') + (ellipsis ? '…' : '');
-}
-
 /** Q5: jsonl 事件 → 人类可读行（终端窗口 + peek tool 共用）。无可读内容返 null 跳过 */
 function translateJsonlEvent(ev: JsonlEvent): string | null {
   const ts = new Date().toTimeString().slice(0, 8);
@@ -87,7 +79,7 @@ function translateJsonlEvent(ev: JsonlEvent): string | null {
     const msg = (ev as { message?: { content?: unknown } }).message;
     const content = msg?.content;
     if (typeof content === 'string') {
-      return `[${ts}] 👤 ${truncateCp(content, 300)}`;
+      return `[${ts}] 👤 ${content}`;
     }
     if (Array.isArray(content)) {
       const lines: string[] = [];
@@ -97,7 +89,7 @@ function translateJsonlEvent(ev: JsonlEvent): string | null {
             ? part.content
             : JSON.stringify(part.content);
           const icon = part.is_error ? '❌' : '✅';
-          lines.push(`[${ts}] ${icon} 结果: ${truncateCp(txt, 200, true)}`);
+          lines.push(`[${ts}] ${icon} 结果: ${txt}`);
         }
       }
       return lines.length > 0 ? lines.join('\n') : null;
@@ -111,11 +103,11 @@ function translateJsonlEvent(ev: JsonlEvent): string | null {
     const lines: string[] = [];
     for (const part of content) {
       if (part.type === 'text' && typeof part.text === 'string' && part.text.trim()) {
-        lines.push(`[${ts}] 💬 ${truncateCp(part.text, 300)}`);
+        lines.push(`[${ts}] 💬 ${part.text}`);
       } else if (part.type === 'tool_use') {
         const name = part.name ?? '?';
         const input = JSON.stringify(part.input ?? {});
-        lines.push(`[${ts}] 🔧 ${name}: ${truncateCp(input, 200, true)}`);
+        lines.push(`[${ts}] 🔧 ${name}: ${input}`);
       }
     }
     return lines.length > 0 ? lines.join('\n') : null;
@@ -259,6 +251,8 @@ export class WorkSession extends EventEmitter {
         // 批2: 显式注入 supervisor 端口，让 work CLI 的 Stop hook(work-stop-sink) 能 TCP 回连
         env: {
           ...(process.env as Record<string, string>),
+          // 修 745f1a9 回归：work CLI 同 channel-cli 必须走对华网络，否则一发 API 即 403「Request not allowed」→ 提示 /login
+          ...claudeApiNetEnv(),
           PINPIN_SUPERVISOR_PORT: String(this.opts.supervisorPort),
         },
         cols: 120,
@@ -442,6 +436,12 @@ export class WorkSession extends EventEmitter {
    *  创建，故仍轮询等其出现再 attach watcher（避免 fs.watch ENOENT 噪声）；watcher 逻辑本身不变。 */
   private tryAttachJsonl(attempt: number): void {
     if (this._status !== 'running' || this.jsonlWatcher) return;
+    // 兜底：workDir 非法时 jsonlPathForSession 会对 undefined 调 .replace() 崩（timer 回调里=主进程弹框）。
+    // 正常路径已由 spawn tool（MCP 层）校验挡住 undefined work_dir，这里是精确栈的最后防线。
+    if (typeof this.opts.workDir !== 'string' || !this.opts.workDir) {
+      process.stderr.write(`[work-session ${this.id}] tryAttachJsonl: workDir 非法(${JSON.stringify(this.opts.workDir)})，跳过 jsonl 监听\n`);
+      return;
+    }
     const filePath = jsonlPathForSession(this.opts.workDir, this.sessionId);
     if (fs.existsSync(filePath)) {
       process.stderr.write(`[work-session ${this.id}] jsonl attach: ${filePath} (attempt ${attempt})\n`);

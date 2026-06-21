@@ -6,6 +6,8 @@
 // 懒求值：BOT_NAME_MAP 不在模块顶层求值——Electron 主进程 import Supervisor 链早于
 // main.ts 的 dotenv.config()，顶层求值会拿到空 env。首次调用时才 parse，确保晚于 dotenv。
 
+import { getBotNameMapping } from "../../shared/name-map-store.js";
+
 let _botMapCache: Record<string, string> | null = null;
 
 // 格式同 FEISHU_KNOWN_USERS：`cli_号:友好名,cli_号:友好名` 或 JSON 对象。缺省 → 空 map。
@@ -46,6 +48,9 @@ function getBotMap(): Record<string, string> {
 
 /** 反查 bot 名字。未登记返 undefined（chat-message.ts 据此触发未登记日志）。 */
 export function resolveBotName(appId: string): string | undefined {
+  // Owner启动器改的实时映射最高优先（mtime 热重载），再走原 env 花名册
+  const mapped = getBotNameMapping(appId);
+  if (mapped) return mapped;
   return getBotMap()[appId];
 }
 

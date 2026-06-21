@@ -22,6 +22,8 @@ export interface FeishuInboundMessage {
   sender_type: 'user' | 'app';
   text?: string;
   create_time_ms: number;
+  /** P2P 单聊 = true（WSClient 路径），群聊 = false（poll 路径）。供子端对话记录命名区分单聊/群。 */
+  is_p2p: boolean;
   raw: unknown;
 }
 
@@ -233,6 +235,7 @@ export class FeishuPoll {
       sender_type: m.sender.sender_type === 'app' ? 'app' : 'user',
       text,
       create_time_ms: Number.isFinite(ct) ? ct : Date.now(),
+      is_p2p: false, // poll 只拉群消息
       raw: m,
     };
 

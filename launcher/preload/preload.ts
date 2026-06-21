@@ -7,6 +7,8 @@ import type {
   AppSettings,
   QuotaSnapshot,
   RateLimitWindow,
+  NameMappings,
+  PendingNameEntry,
 } from '../shared-types.js';
 
 const api = {
@@ -34,8 +36,6 @@ const api = {
   /** 频道动作 */
   channel: {
     start: (chatId: string): Promise<void> => ipcRenderer.invoke('channel.start', chatId),
-    /** 批3「开启所有」：解除 paused + 开启所有已识别频道 */
-    startAll: (): Promise<void> => ipcRenderer.invoke('channel.start-all'),
     stop: (chatId: string): Promise<void> => ipcRenderer.invoke('channel.stop', chatId),
     restart: (chatId: string): Promise<void> => ipcRenderer.invoke('channel.restart', chatId),
     compact: (chatId: string): Promise<void> => ipcRenderer.invoke('channel.compact', chatId),
@@ -48,14 +48,10 @@ const api = {
       ipcRenderer.invoke('channel.set-compact-threshold', chatId, pct),
     setFast: (chatId: string, fast: boolean): Promise<void> =>
       ipcRenderer.invoke('channel.set-fast', chatId, fast),
+    setStandby: (chatId: string, standby: boolean): Promise<void> =>
+      ipcRenderer.invoke('channel.set-standby', chatId, standby),
     setDisplayName: (chatId: string, name: string): Promise<void> =>
       ipcRenderer.invoke('channel.set-display-name', chatId, name),
-    forget: (chatId: string): Promise<boolean> =>
-      ipcRenderer.invoke('channel.forget', chatId),
-    listForgotten: (): Promise<Array<{ chat_id: string; display_name?: string }>> =>
-      ipcRenderer.invoke('channel.list-forgotten'),
-    restoreForgotten: (chatId: string): Promise<boolean> =>
-      ipcRenderer.invoke('channel.restore-forgotten', chatId),
   },
   /** work session 动作 */
   work: {
@@ -77,6 +73,20 @@ const api = {
   quota: {
     fetchNow: (): Promise<{ ok: true } | null> => ipcRenderer.invoke('quota.fetch-now'),
   },
+  /** 认识的人 / bot 映射管理（设置 page 面板用） */
+  names: {
+    getMappings: (): Promise<NameMappings> => ipcRenderer.invoke('names.get-mappings'),
+    getPending: (): Promise<PendingNameEntry[]> => ipcRenderer.invoke('names.get-pending'),
+    set: (type: 'human' | 'bot', id: string, name: string): Promise<void> =>
+      ipcRenderer.invoke('names.set', type, id, name),
+  },
+  /** 每频道注入哪些人物画像（多选；纯写 vault json，重启该频道生效） */
+  personas: {
+    list: (): Promise<string[]> => ipcRenderer.invoke('personas.list'),
+    get: (chatId: string): Promise<string[] | '__ALL__'> => ipcRenderer.invoke('personas.get', chatId),
+    set: (chatId: string, sel: string[] | '__ALL__'): Promise<void> =>
+      ipcRenderer.invoke('personas.set', chatId, sel),
+  },
 };
 
 export type {
@@ -87,6 +97,8 @@ export type {
   AppSettings,
   QuotaSnapshot,
   RateLimitWindow,
+  NameMappings,
+  PendingNameEntry,
 } from '../shared-types.js';
 
 contextBridge.exposeInMainWorld('pinpin', api);

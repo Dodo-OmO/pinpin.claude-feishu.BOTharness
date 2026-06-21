@@ -35,6 +35,22 @@ export async function handlePinpinSendToWorkSession(args: Args): Promise<{
   content: Array<{ type: 'text'; text: string }>;
   isError?: boolean;
 }> {
+  // 防 undefined 进 IPC：message 缺失会被 JSON.stringify 丢字段，到 supervisor 侧成 undefined，
+  // 喂给 PTY write 触发 node-pty "chunk undefined" 崩。回明确错误（不静默吞成空消息丢Owner真需求）。
+  if (
+    typeof args.session_id !== 'string' || !args.session_id.trim() ||
+    typeof args.message !== 'string' || !args.message.trim()
+  ) {
+    return {
+      isError: true,
+      content: [
+        {
+          type: 'text',
+          text: `pinpin_send_to_work_session 失败：session_id 和 message 都必填且非空（收到 session_id=${JSON.stringify(args.session_id)}, message=${JSON.stringify(args.message)}）`,
+        },
+      ],
+    };
+  }
   try {
     const client = getSupervisorClient();
     const result = await client.request<WorkOkResult>(IPC_METHODS.WORK_SEND, {

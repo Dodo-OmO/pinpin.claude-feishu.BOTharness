@@ -5,7 +5,7 @@
 //   - "tea"     → 茶水间 CLI（PINPIN_TEA_CHAT_ID）
 //                 daily-news / weekly-recap / daily-diary / free-activity
 //   - "owner"  → Owner单聊 CLI（PINPIN_OWNER_CHAT_ID）
-//                 daily-briefing / memory-audit
+//                 memory-audit
 //   - "supervisor" → 不在 MCP 子进程跑（搬到 supervisor 主进程）
 //                    daily-restart / feishu-token-keepalive / mood-decay
 //

@@ -34,17 +34,13 @@ export interface WardenBridgeDeps {
   getUsage: (chatId: string) => unknown;
   // 批1 频道管理
   startChannel: (chatId: string) => void;
-  startAllChannels: () => void;
   setChannelConfig: (
     chatId: string,
     cfg: { model?: string; effort?: string; fast?: boolean; autoCompactPct?: number },
   ) => void;
   setDisplayName: (chatId: string, name: string) => void;
-  // 批2 额度 + 频道删除/恢复
+  // 批2 额度
   fetchQuota: () => Promise<{ quota: unknown; today_messages: number; rate_limits: unknown }>;
-  forgetChannel: (chatId: string) => boolean;
-  listForgotten: () => Array<{ chat_id: string; display_name?: string }>;
-  restoreChannel: (chatId: string) => boolean;
   // 批3 work session
   getWorkSessions: () => Map<string, WorkSession>;
   getWorkSession: (sessionId: string) => WorkSession | undefined;
@@ -94,11 +90,6 @@ export async function createWardenBridge(deps: WardenBridgeDeps): Promise<IpcSer
     const { chat_id } = (params ?? {}) as { chat_id?: string };
     if (!chat_id) return { ok: false, error: 'no chat_id' };
     deps.startChannel(chat_id);
-    return { ok: true };
-  });
-
-  bridge.setRequestHandler(IPC_METHODS.WARDEN_START_ALL, async (): Promise<WorkOkResult> => {
-    deps.startAllChannels();
     return { ok: true };
   });
 
@@ -158,27 +149,9 @@ export async function createWardenBridge(deps: WardenBridgeDeps): Promise<IpcSer
     return { ok: true };
   });
 
-  // ── 批2 额度 + 频道删除/恢复 ──
+  // ── 批2 额度 ──
   bridge.setRequestHandler(IPC_METHODS.WARDEN_FETCH_QUOTA, async () => {
     return deps.fetchQuota();
-  });
-
-  bridge.setRequestHandler(IPC_METHODS.WARDEN_FORGET_CHANNEL, async (params): Promise<WorkOkResult> => {
-    const { chat_id } = (params ?? {}) as { chat_id?: string };
-    if (!chat_id) return { ok: false, error: 'no chat_id' };
-    const ok = deps.forgetChannel(chat_id);
-    return ok ? { ok: true } : { ok: false, error: `channel not found: ${chat_id}` };
-  });
-
-  bridge.setRequestHandler(IPC_METHODS.WARDEN_LIST_FORGOTTEN, async () => {
-    return { channels: deps.listForgotten() };
-  });
-
-  bridge.setRequestHandler(IPC_METHODS.WARDEN_RESTORE_CHANNEL, async (params): Promise<WorkOkResult> => {
-    const { chat_id } = (params ?? {}) as { chat_id?: string };
-    if (!chat_id) return { ok: false, error: 'no chat_id' };
-    const ok = deps.restoreChannel(chat_id);
-    return ok ? { ok: true } : { ok: false, error: `not in forgotten list: ${chat_id}` };
   });
 
   // ── 批3 work session（列表 + 终端看/写/结束）──

@@ -7,8 +7,9 @@
  *   renderer 收 log → 推 logs[] 数组，按 nav 当前页面/filter 渲染
  *
  * 用户交互：
- *   channel 卡 -> 打开终端 (step 6 占位) / ⋯ dropdown (启停 / compact / 重启)
- *   nav 切换 5 页
+ *   channel 卡 -> 终端/启停/压缩/重启 + ⚙设置弹窗(模型/effort/压缩/fast) + 休眠开关 + 改名
+ *   睡眠频道折叠进"睡眠模式·N"区；设置 page 含全局默认 + "认识的人/bot"映射面板
+ *   nav 切换：频道 / 日志流 / 错误队列 / 设置 / 关于
  *   footer 按钮：重启品品 / 完全关闭
  */
 
@@ -19,6 +20,8 @@ import type {
   LogEntry,
   AppSettings,
   QuotaSnapshot,
+  NameMappings,
+  PendingNameEntry,
 } from '../shared-types.js';
 
 declare global {
@@ -31,7 +34,6 @@ declare global {
       onQuota: (cb: (s: QuotaSnapshot) => void) => () => void;
       channel: {
         start: (id: string) => Promise<void>;
-        startAll: () => Promise<void>;
         stop: (id: string) => Promise<void>;
         restart: (id: string) => Promise<void>;
         compact: (id: string) => Promise<void>;
@@ -40,15 +42,23 @@ declare global {
         setEffort: (id: string, effort: string) => Promise<void>;
         setCompactThreshold: (id: string, pct: number) => Promise<void>;
         setFast: (id: string, fast: boolean) => Promise<void>;
+        setStandby: (id: string, standby: boolean) => Promise<void>;
         setDisplayName: (id: string, name: string) => Promise<void>;
-        forget: (id: string) => Promise<boolean>;
-        listForgotten: () => Promise<Array<{ chat_id: string; display_name?: string }>>;
-        restoreForgotten: (id: string) => Promise<boolean>;
       };
       work: { end: (id: string) => Promise<void>; openTerminal: (id: string) => Promise<void> };
       app: { restartBot: () => Promise<void>; quit: () => Promise<void> };
       settings: { get: () => Promise<AppSettings>; set: (s: Partial<AppSettings>) => Promise<void> };
       quota: { fetchNow: () => Promise<{ ok: true } | null> };
+      names: {
+        getMappings: () => Promise<NameMappings>;
+        getPending: () => Promise<PendingNameEntry[]>;
+        set: (type: 'human' | 'bot', id: string, name: string) => Promise<void>;
+      };
+      personas: {
+        list: () => Promise<string[]>;
+        get: (chatId: string) => Promise<string[] | '__ALL__'>;
+        set: (chatId: string, sel: string[] | '__ALL__') => Promise<void>;
+      };
     };
   }
 }
@@ -116,116 +126,118 @@ function buildModelOptions(current: string): string {
     .join('');
 }
 
+/** 频道卡上的可见动作（终端/启动/关闭/重启/压缩/⚙设置/改名）+ 休眠开关的事件委托接线。
+ *  active 大卡与休眠折叠行都调它（同款 data-action / data-channel-config 属性）。 */
+function wireChannelActions(root: HTMLElement): void {
+  root.querySelectorAll<HTMLButtonElement>('button[data-action]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const action = btn.getAttribute('data-action');
+      const cid = btn.getAttribute('data-chat-id');
+      if (!action || !cid) return;
+      if (action === 'open-terminal') void window.pinpin.channel.openTerminal(cid);
+      else if (action === 'start') void window.pinpin.channel.start(cid);
+      else if (action === 'stop') void window.pinpin.channel.stop(cid);
+      else if (action === 'restart') void window.pinpin.channel.restart(cid);
+      else if (action === 'compact') void window.pinpin.channel.compact(cid);
+      else if (action === 'settings') openChannelModal(cid);
+      else if (action === 'rename') {
+        // Electron renderer 默认禁用 window.prompt/confirm（silent null），用 contentEditable 让 .card-title 可编辑
+        const container = btn.closest('.card, .standby-row');
+        const titleEl = container?.querySelector('.card-title, .sb-name') as HTMLDivElement | null;
+        if (!titleEl) return;
+        const originalText = titleEl.textContent ?? '';
+        titleEl.contentEditable = 'true';
+        titleEl.classList.add('editing');
+        titleEl.focus();
+        const range = document.createRange();
+        range.selectNodeContents(titleEl);
+        const sel = window.getSelection();
+        sel?.removeAllRanges();
+        sel?.addRange(range);
+        let committed = false;
+        const commit = (): void => {
+          if (committed) return;
+          committed = true;
+          titleEl.contentEditable = 'false';
+          titleEl.classList.remove('editing');
+          const next = (titleEl.textContent ?? '').trim();
+          if (next !== originalText.trim()) void window.pinpin.channel.setDisplayName(cid, next);
+        };
+        const cancel = (): void => {
+          if (committed) return;
+          committed = true;
+          titleEl.contentEditable = 'false';
+          titleEl.classList.remove('editing');
+          titleEl.textContent = originalText;
+        };
+        titleEl.addEventListener('blur', commit, { once: true });
+        titleEl.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') { e.preventDefault(); titleEl.blur(); }
+          else if (e.key === 'Escape') { e.preventDefault(); cancel(); }
+        });
+      }
+    });
+  });
+  // 休眠开关（运行中也可切——开启会立即 evict 该频道）
+  root.querySelectorAll<HTMLInputElement>('input[data-channel-config="standby"]').forEach((inp) => {
+    inp.addEventListener('change', () => {
+      const cid = inp.getAttribute('data-chat-id');
+      if (!cid) return;
+      void window.pinpin.channel.setStandby(cid, inp.checked);
+    });
+  });
+}
+
 function renderChannels(): void {
   const row = document.getElementById('channels-row');
   if (!row) return;
   const channels = lastState.channels;
-  if (channels.length === 0) {
-    row.innerHTML = `<div class="empty-hint">尚未拉到 chat 列表（supervisor 正在启动 / 飞书空）</div>`;
-  } else {
-    row.innerHTML = channels.map((c) => renderChannelCard(c)).join('');
-    // wire button actions
-    row.querySelectorAll<HTMLButtonElement>('button[data-action]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const action = btn.getAttribute('data-action');
-        const cid = btn.getAttribute('data-chat-id');
-        if (!action || !cid) return;
-        if (action === 'open-terminal') {
-          void window.pinpin.channel.openTerminal(cid);
-        } else if (action === 'start') void window.pinpin.channel.start(cid);
-        else if (action === 'stop') void window.pinpin.channel.stop(cid);
-        else if (action === 'restart') void window.pinpin.channel.restart(cid);
-        else if (action === 'compact') void window.pinpin.channel.compact(cid);
-        else if (action === 'forget') {
-          // 2026-05-28 频道常驻 + forget：renderer 不能用 window.confirm（默认禁用），
-          // 改由 main process 弹原生 dialog.showMessageBox（IPC handler 里做），renderer 只触发
-          void window.pinpin.channel.forget(cid);
-        }
-        else if (action === 'rename') {
-          // Electron renderer 默认禁用 window.prompt/confirm/alert（silent return null），
-          // 改用 contentEditable 让 .card-title 自身可编辑
-          const card = btn.closest('.card');
-          const titleEl = card?.querySelector('.card-title') as HTMLDivElement | null;
-          if (!titleEl) return;
-          const originalText = titleEl.textContent ?? '';
-          titleEl.contentEditable = 'true';
-          titleEl.classList.add('editing');
-          titleEl.focus();
-          // select all
-          const range = document.createRange();
-          range.selectNodeContents(titleEl);
-          const sel = window.getSelection();
-          sel?.removeAllRanges();
-          sel?.addRange(range);
+  const active = channels.filter((c) => !c.standby);
+  const standby = channels.filter((c) => c.standby);
 
-          let committed = false;
-          const commit = (): void => {
-            if (committed) return;
-            committed = true;
-            titleEl.contentEditable = 'false';
-            titleEl.classList.remove('editing');
-            const next = (titleEl.textContent ?? '').trim();
-            if (next !== originalText.trim()) {
-              void window.pinpin.channel.setDisplayName(cid, next);
-            }
-          };
-          const cancel = (): void => {
-            if (committed) return;
-            committed = true;
-            titleEl.contentEditable = 'false';
-            titleEl.classList.remove('editing');
-            titleEl.textContent = originalText;
-          };
-          titleEl.addEventListener('blur', commit, { once: true });
-          titleEl.addEventListener('keydown', (e) => {
-            if (e.key === 'Enter') {
-              e.preventDefault();
-              titleEl.blur();
-            } else if (e.key === 'Escape') {
-              e.preventDefault();
-              cancel();
-            }
-          });
-        }
-      });
-    });
-    // wire dropdown change（运行中 disabled，所以只 stopped 时触发）
-    row.querySelectorAll<HTMLSelectElement>('select[data-channel-config]').forEach((sel) => {
-      sel.addEventListener('change', () => {
-        const cid = sel.getAttribute('data-chat-id');
-        const kind = sel.getAttribute('data-channel-config'); // 'model' | 'effort'
-        if (!cid || !kind) return;
-        if (kind === 'model') void window.pinpin.channel.setModel(cid, sel.value);
-        else if (kind === 'effort') void window.pinpin.channel.setEffort(cid, sel.value);
-      });
-    });
-    // 压缩阈值数字输入框（input，非 select）——change 时 clamp 到 20-50 再存
-    row.querySelectorAll<HTMLInputElement>('input[data-channel-config="compact"]').forEach((inp) => {
-      inp.addEventListener('change', () => {
-        const cid = inp.getAttribute('data-chat-id');
-        if (!cid) return;
-        let v = Math.round(Number(inp.value));
-        if (!Number.isFinite(v)) v = 25;
-        v = Math.max(20, Math.min(50, v));
-        inp.value = String(v);
-        void window.pinpin.channel.setCompactThreshold(cid, v);
-      });
-    });
-    // fast 勾选框（checkbox）——运行中 disabled，change 时存
-    row.querySelectorAll<HTMLInputElement>('input[data-channel-config="fast"]').forEach((inp) => {
-      inp.addEventListener('change', () => {
-        const cid = inp.getAttribute('data-chat-id');
-        if (!cid) return;
-        void window.pinpin.channel.setFast(cid, inp.checked);
-      });
-    });
+  if (active.length === 0) {
+    row.innerHTML = `<div class="empty-hint">${channels.length === 0 ? '尚未拉到 chat 列表（supervisor 正在启动 / 飞书空）' : '全部频道睡眠中（见下方折叠区）'}</div>`;
+  } else {
+    row.innerHTML = active.map((c) => renderChannelCard(c)).join('');
+    wireChannelActions(row);
   }
+
+  // 休眠折叠区
+  renderStandbyFold(standby);
+
   const count = document.getElementById('channels-count');
   if (count) {
     const running = channels.filter((c) => c.status === 'running').length;
-    const stopped = channels.length - running;
-    count.textContent = stopped > 0 ? `${running} 监听 · ${stopped} 已关闭` : `${running} 监听`;
+    const sleeping = standby.length;
+    const parts = [`${running} 监听`];
+    if (sleeping > 0) parts.push(`${sleeping} 睡眠`);
+    count.textContent = parts.join(' · ');
   }
+}
+
+/** 休眠频道折叠区：每个频道一行（健康点 + 名字 + 休眠灰字 + 休眠开关 + ⚙设置）。 */
+function renderStandbyFold(standby: ChannelStatusInfo[]): void {
+  const fold = document.getElementById('standby-fold');
+  const body = document.getElementById('standby-fold-body');
+  const countEl = document.getElementById('standby-count');
+  if (!fold || !body) return;
+  if (standby.length === 0) {
+    fold.style.display = 'none';
+    return;
+  }
+  fold.style.display = '';
+  if (countEl) countEl.textContent = String(standby.length);
+  body.innerHTML = standby.map((c) => `
+    <div class="standby-row">
+      <div class="health-dot ${healthDot(c.status)}"></div>
+      <span class="sb-name" title="${escapeHtml(c.chat_id)}">${escapeHtml(c.chat_name ?? c.chat_id.slice(-12))}</span>
+      ${standbyToggle(c)}
+      <button class="btn-rename" data-action="rename" data-chat-id="${c.chat_id}" data-current-name="${escapeHtml(c.chat_name ?? '')}" title="改名">✎</button>
+      ${c.status === 'running' ? `<button class="sb-gear" data-action="stop" data-chat-id="${c.chat_id}" title="停掉（打回睡眠）">✕</button>` : ''}
+      <button class="sb-gear" data-action="settings" data-chat-id="${c.chat_id}" title="频道设置">⚙</button>
+    </div>
+  `).join('');
+  wireChannelActions(body);
 }
 
 function fmtCtxLine(c: ChannelStatusInfo): string {
@@ -248,49 +260,257 @@ function ctxPctClass(pct?: number | null): string {
   return 'ctx-high';
 }
 
+/** 短模型名（卡面精简显示）：去掉 [1m] 后缀 + claude- 前缀。 */
+function shortModel(model: string): string {
+  return (model || '').replace(/\s*\[1m\]\s*/g, '').replace(/^claude-/, '').trim() || '—';
+}
+
+/** 休眠开关（拨动 toggle）。标准卡 + 休眠行复用。 */
+function standbyToggle(c: ChannelStatusInfo): string {
+  return `<label class="mode-toggle" title="左「常驻」=频道常开；右「睡眠」=睡下省额度、有人说话自动唤醒（品品能读到那条消息），每天4点重启回睡眠。随时可切。">
+    <input type="checkbox" data-channel-config="standby" data-chat-id="${c.chat_id}" ${c.standby ? 'checked' : ''}>
+    <span class="mode-track"><span class="mode-label lbl-on">常驻</span><span class="mode-label lbl-off">睡眠</span></span>
+  </label>`;
+}
+
 function renderChannelCard(c: ChannelStatusInfo): string {
   const dim = c.status === 'stopped' ? 'dim' : '';
-  const isRunning = c.status === 'running' || c.status === 'starting';
-  const lockTitle = isRunning ? '运行中不可换，先关闭频道再切' : '';
   const startedBtn = c.status === 'stopped'
     ? `<button class="btn primary" data-action="start" data-chat-id="${c.chat_id}">启动</button>`
-    : `<button class="btn primary" data-action="open-terminal" data-chat-id="${c.chat_id}">打开终端</button>`;
-  const compactBtn = isRunning
+    : `<button class="btn primary" data-action="open-terminal" data-chat-id="${c.chat_id}" title="打开终端">终端</button>`;
+  const compactBtn = c.status === 'running'
     ? `<button class="btn btn-more" data-action="compact" data-chat-id="${c.chat_id}" title="压缩上下文 /compact">压缩</button>`
     : '';
   const restartBtn = `<button class="btn btn-more" data-action="restart" data-chat-id="${c.chat_id}" title="重启">↻</button>`;
   const stopBtn = c.status === 'running'
     ? `<button class="btn btn-more" data-action="stop" data-chat-id="${c.chat_id}" title="关闭">✕</button>`
     : '';
-  // 2026-05-28 频道常驻 + forget：删除卡片入口（不再常驻 + 后续不再重 spawn）
-  const forgetBtn = `<button class="btn btn-more btn-danger" data-action="forget" data-chat-id="${c.chat_id}" data-chat-name="${escapeHtml(c.chat_name ?? c.chat_id.slice(-12))}" title="删除频道（停止 CLI + 不再重连）">🗑</button>`;
-  // dropdown: 运行中灰，选当前 c.model / c.effort
-  const modelOptions = buildModelOptions(c.model);
-  const effortOptions = EFFORT_OPTIONS.map((e) =>
-    `<option value="${e}" ${e === c.effort ? 'selected' : ''}>${e}</option>`,
-  ).join('');
+  const gearBtn = `<button class="btn btn-more" data-action="settings" data-chat-id="${c.chat_id}" title="频道设置（模型/effort/压缩/fast）">⚙</button>`;
+  const fastBadge = c.fast ? '<span class="badge-fast">fast</span>' : '';
   return `
     <div class="card ${dim}">
       <div class="card-head">
         <div class="health-dot ${healthDot(c.status)}"></div>
         <div class="card-title" title="${escapeHtml(c.chat_id)}">${escapeHtml(c.chat_name ?? c.chat_id.slice(-12))}</div>
+        ${standbyToggle(c)}
         <button class="btn-rename" data-action="rename" data-chat-id="${c.chat_id}" data-current-name="${escapeHtml(c.chat_name ?? '')}" title="改卡片名">✎</button>
       </div>
-      <div class="card-meta">
-        <div class="k">模型</div>
-        <div class="v"><select class="card-select" data-channel-config="model" data-chat-id="${c.chat_id}" ${isRunning ? 'disabled' : ''} title="${lockTitle}">${modelOptions}</select></div>
-        <div class="k">effort</div>
-        <div class="v"><select class="card-select effort-select ${effortClass(c.effort)}" data-channel-config="effort" data-chat-id="${c.chat_id}" ${isRunning ? 'disabled' : ''} title="${lockTitle}">${effortOptions}</select></div>
-        <div class="k">压缩%</div>
-        <div class="v"><input class="card-num" type="number" min="20" max="50" step="1" data-channel-config="compact" data-chat-id="${c.chat_id}" value="${c.autoCompactPct ?? 25}" ${isRunning ? 'disabled' : ''} title="${isRunning ? lockTitle : '用到上下文百分之几就自动压缩(20-50)，改完重启该频道生效'}"></div>
-        <div class="k">fast</div>
-        <div class="v"><input type="checkbox" data-channel-config="fast" data-chat-id="${c.chat_id}" ${c.fast ? 'checked' : ''} ${isRunning ? 'disabled' : ''} title="${isRunning ? lockTitle : 'Opus 加速输出，改完重启该频道生效（只 Opus、额外扣 usage 额度）'}"></div>
-        <div class="k">上下文</div><div class="v ${ctxPctClass(c.context_pct)}">${fmtCtxLine(c)}</div>
-        <div class="k">启动</div><div class="v">${fmtStartedAt(c)}</div>
+      <div class="card-meta-line">
+        <span title="模型">${escapeHtml(shortModel(c.model))}</span><span class="sep">·</span>
+        <span class="${effortClass(c.effort)}" title="effort">${escapeHtml(c.effort)}</span><span class="sep">·</span>
+        <span title="自动压缩阈值">压缩 ${c.autoCompactPct ?? 25}%</span>
+        ${fastBadge ? `<span class="sep">·</span>${fastBadge}` : ''}<span class="sep">·</span>
+        <span class="${ctxPctClass(c.context_pct)}" title="上下文用量">${fmtCtxLine(c)}</span><span class="sep">·</span>
+        <span class="mi-label" title="启动时间">${fmtStartedAt(c)}</span>
       </div>
-      <div class="card-actions">${startedBtn}${compactBtn}${restartBtn}${stopBtn}${forgetBtn}</div>
+      <div class="card-actions">${startedBtn}${compactBtn}${gearBtn}${restartBtn}${stopBtn}</div>
     </div>
   `;
+}
+
+// ── 频道设置弹窗 ──
+let modalChatId: string | null = null;
+
+/** 打开某频道的设置弹窗：填模型/effort/压缩/fast/上下文；运行中 model/effort/压缩/fast disabled。 */
+function openChannelModal(chatId: string): void {
+  const c = lastState.channels.find((x) => x.chat_id === chatId);
+  if (!c) return;
+  modalChatId = chatId;
+  const isRunning = c.status === 'running' || c.status === 'starting';
+  const overlay = document.getElementById('chan-modal');
+  const title = document.getElementById('chan-modal-title');
+  const modelSel = document.getElementById('modal-model') as HTMLSelectElement;
+  const effortSel = document.getElementById('modal-effort') as HTMLSelectElement;
+  const compactInp = document.getElementById('modal-compact') as HTMLInputElement;
+  const fastInp = document.getElementById('modal-fast') as HTMLInputElement;
+  const ctxEl = document.getElementById('modal-ctx');
+  const lockHint = document.getElementById('modal-lock-hint');
+  if (!overlay || !modelSel || !effortSel || !compactInp || !fastInp) return;
+
+  if (title) title.textContent = `频道设置 · ${c.chat_name ?? c.chat_id.slice(-12)}`;
+  modelSel.innerHTML = buildModelOptions(c.model);
+  modelSel.value = c.model;
+  // effort 选项单源 EFFORT_OPTIONS；当前值不在列表则补一项（兼容旧 xhigh 等持久化值）
+  const effortList = EFFORT_OPTIONS.includes(c.effort) || !c.effort ? EFFORT_OPTIONS : [c.effort, ...EFFORT_OPTIONS];
+  effortSel.innerHTML = effortList.map((e) => `<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join('');
+  effortSel.value = c.effort;
+  compactInp.value = String(c.autoCompactPct ?? 25);
+  fastInp.checked = !!c.fast;
+  if (ctxEl) { ctxEl.textContent = fmtCtxLine(c); ctxEl.className = `modal-ctx ${ctxPctClass(c.context_pct)}`; }
+
+  // 运行中：model/effort/压缩/fast 锁住（沿用"运行中不可改"语义），上下文只读永远可看
+  for (const el of [modelSel, effortSel, compactInp, fastInp]) el.disabled = isRunning;
+  if (lockHint) lockHint.style.display = isRunning ? '' : 'none';
+
+  // 人物画像多选：每次打开实时扫目录（自动刷新最新人物）；运行中也可改（只写 json，重启生效）
+  void renderPersonaGrid(chatId);
+
+  overlay.style.display = '';
+}
+
+/** 拉可用人物 + 本频道当前选择，渲染勾选框。change → 收集勾选项写盘（全勾→'__ALL__'）。 */
+async function renderPersonaGrid(chatId: string): Promise<void> {
+  const grid = document.getElementById('modal-personas');
+  if (!grid) return;
+  grid.innerHTML = '<span class="settings-hint">加载中…</span>';
+  let all: string[];
+  let cur: string[] | '__ALL__';
+  try {
+    [all, cur] = await Promise.all([window.pinpin.personas.list(), window.pinpin.personas.get(chatId)]);
+  } catch (e) {
+    grid.innerHTML = '<span class="settings-hint">加载失败</span>';
+    console.warn('[personas] 加载失败', e);
+    return;
+  }
+  if (modalChatId !== chatId) return; // 弹窗已切换/关闭，丢弃过期结果
+  if (all.length === 0) { grid.innerHTML = '<span class="settings-hint">无可用人物画像</span>'; return; }
+  const allSelected = cur === '__ALL__';
+  const want = allSelected ? new Set(all) : new Set(cur);
+  grid.innerHTML = all
+    .map((n) => `<label class="persona-item"><input type="checkbox" value="${escapeHtml(n)}"${want.has(n) ? ' checked' : ''}>${escapeHtml(n)}</label>`)
+    .join('');
+  grid.querySelectorAll<HTMLInputElement>('input[type="checkbox"]').forEach((cb) =>
+    cb.addEventListener('change', () => {
+      if (modalChatId !== chatId) return;
+      const picked = [...grid.querySelectorAll<HTMLInputElement>('input:checked')].map((x) => x.value);
+      // 全勾 → '__ALL__'（与映射表语义一致：全选不写死名单，新增人物自动跟随）
+      const sel: string[] | '__ALL__' = picked.length === all.length ? '__ALL__' : picked;
+      void window.pinpin.personas.set(chatId, sel);
+    }),
+  );
+}
+
+function closeChannelModal(): void {
+  modalChatId = null;
+  const overlay = document.getElementById('chan-modal');
+  if (overlay) overlay.style.display = 'none';
+}
+
+/** 弹窗内控件 change → 走原有 setModel/setEffort/setCompactThreshold/setFast IPC（一次性 wire，靠 modalChatId 取目标）。 */
+function wireChannelModal(): void {
+  const overlay = document.getElementById('chan-modal');
+  const card = document.getElementById('chan-modal-card');
+  const modelSel = document.getElementById('modal-model') as HTMLSelectElement | null;
+  const effortSel = document.getElementById('modal-effort') as HTMLSelectElement | null;
+  const compactInp = document.getElementById('modal-compact') as HTMLInputElement | null;
+  const fastInp = document.getElementById('modal-fast') as HTMLInputElement | null;
+
+  document.getElementById('chan-modal-close')?.addEventListener('click', closeChannelModal);
+  // 点遮罩关闭（点卡片内部不关）
+  overlay?.addEventListener('click', (e) => { if (e.target === overlay) closeChannelModal(); });
+  card?.addEventListener('click', (e) => e.stopPropagation());
+  // ESC 关闭
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && overlay && overlay.style.display !== 'none') closeChannelModal();
+  });
+
+  modelSel?.addEventListener('change', () => {
+    if (modalChatId) void window.pinpin.channel.setModel(modalChatId, modelSel.value);
+  });
+  effortSel?.addEventListener('change', () => {
+    if (modalChatId) void window.pinpin.channel.setEffort(modalChatId, effortSel.value);
+  });
+  compactInp?.addEventListener('change', () => {
+    if (!modalChatId) return;
+    let v = Math.round(Number(compactInp.value));
+    if (!Number.isFinite(v)) v = 25;
+    v = Math.max(20, Math.min(50, v));
+    compactInp.value = String(v);
+    void window.pinpin.channel.setCompactThreshold(modalChatId, v);
+  });
+  fastInp?.addEventListener('change', () => {
+    if (modalChatId) void window.pinpin.channel.setFast(modalChatId, fastInp.checked);
+  });
+}
+
+// ── 认识的人 / bot 映射面板 ──
+/** 拉 pending + mapped，渲染设置 page 面板 + 刷新设置红点。 */
+async function refreshNamesPanel(): Promise<void> {
+  try {
+    const [pending, mappings] = await Promise.all([
+      window.pinpin.names.getPending(),
+      window.pinpin.names.getMappings(),
+    ]);
+    renderPendingNames(pending);
+    renderMappedNames(mappings);
+    updateNamesBadge(pending.length);
+  } catch (e) { console.warn('[names] 刷新映射面板失败', e); }
+}
+
+/** 仅刷红点（channel-state-changed 时轻量调，不一定在设置 page）。 */
+async function refreshNamesBadge(): Promise<void> {
+  try {
+    const pending = await window.pinpin.names.getPending();
+    updateNamesBadge(pending.length);
+  } catch (e) { console.warn('[names] 刷新待命名红点失败', e); }
+}
+
+function updateNamesBadge(pendingCount: number): void {
+  const badge = document.getElementById('names-badge');
+  if (badge) badge.style.display = pendingCount > 0 ? '' : 'none';
+  const pc = document.getElementById('names-pending-count');
+  if (pc) {
+    if (pendingCount > 0) { pc.style.display = ''; pc.textContent = `${pendingCount} 待命名`; }
+    else pc.style.display = 'none';
+  }
+}
+
+function nameRowHtml(type: 'human' | 'bot', id: string, value: string, meta: string): string {
+  const typeLabel = type === 'human' ? '人' : 'bot';
+  return `
+    <div class="name-row" data-name-id="${escapeHtml(id)}" data-name-type="${type}">
+      <span class="name-type-badge ${type}">${typeLabel}</span>
+      <span class="name-id" title="${escapeHtml(id)}">…${escapeHtml(id.slice(-6))}</span>
+      ${meta ? `<span class="name-meta">${meta}</span>` : '<span class="name-meta"></span>'}
+      <input class="name-input" type="text" value="${escapeHtml(value)}" placeholder="起个名字">
+      <button class="name-save">保存</button>
+    </div>`;
+}
+
+function renderPendingNames(pending: PendingNameEntry[]): void {
+  const section = document.getElementById('names-pending-section');
+  const list = document.getElementById('names-pending-list');
+  if (!section || !list) return;
+  if (pending.length === 0) { section.style.display = 'none'; list.innerHTML = ''; return; }
+  section.style.display = '';
+  list.innerHTML = pending.map((p) => {
+    const chatName = lastState.channels.find((c) => c.chat_id === p.chat_id)?.chat_name ?? p.chat_id.slice(-8);
+    const meta = `${escapeHtml(chatName)}｜${escapeHtml(p.snippet || '')}`;
+    return nameRowHtml(p.type, p.id, '', meta);
+  }).join('');
+  wireNameSaves(list);
+}
+
+function renderMappedNames(m: NameMappings): void {
+  const list = document.getElementById('names-mapped-list');
+  if (!list) return;
+  const rows: string[] = [];
+  for (const [id, name] of Object.entries(m.humans ?? {})) rows.push(nameRowHtml('human', id, name, ''));
+  for (const [id, name] of Object.entries(m.bots ?? {})) rows.push(nameRowHtml('bot', id, name, ''));
+  list.innerHTML = rows.length > 0 ? rows.join('') : '<div class="empty-hint" style="padding:8px;">暂无映射</div>';
+  wireNameSaves(list);
+}
+
+/** 接线"保存"按钮 + Enter 提交（同走 names.set）。 */
+function wireNameSaves(root: HTMLElement): void {
+  root.querySelectorAll<HTMLDivElement>('.name-row').forEach((rowEl) => {
+    const id = rowEl.getAttribute('data-name-id');
+    const type = rowEl.getAttribute('data-name-type') as 'human' | 'bot' | null;
+    const input = rowEl.querySelector('.name-input') as HTMLInputElement | null;
+    const btn = rowEl.querySelector('.name-save') as HTMLButtonElement | null;
+    if (!id || !type || !input || !btn) return;
+    const save = async (): Promise<void> => {
+      const name = input.value.trim();
+      if (!name) return;
+      await window.pinpin.names.set(type, id, name);
+      btn.textContent = '已存';
+      btn.classList.add('saved');
+      // pending 保存后该条消失、mapped 区出现 → 重拉刷新（state 推送也会触发，这里立即给反馈）
+      setTimeout(() => { void refreshNamesPanel(); }, 350);
+    };
+    btn.addEventListener('click', () => void save());
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter') { e.preventDefault(); void save(); } });
+  });
 }
 
 function renderWorkSessions(): void {
@@ -315,17 +535,17 @@ function renderWorkSessions(): void {
         <div class="card-head">
           <div class="health-dot ${healthDot(w.status)}"></div>
           <div class="card-title" title="${escapeHtml(w.work_dir)}">${escapeHtml(w.work_dir.split(/[\\/]/).pop() ?? w.work_dir)}</div>
-          <div class="card-tag">${w.status}</div>
+          <span class="card-tag" title="哪个频道的品品启动的（${escapeHtml(w.origin_chat_id)}）">⎇ ${escapeHtml(originName)}</span>
         </div>
-        <div class="card-meta">
-          <div class="k">来自</div><div class="v" title="${escapeHtml(w.origin_chat_id)}">${escapeHtml(originName)}</div>
-          <div class="k">模型</div><div class="v">${escapeHtml(w.model)}</div>
-          <div class="k">effort</div><div class="v ${effortClass(w.effort)}">${w.effort}</div>
-          <div class="k">上下文</div><div class="v ${ctxClass}">${ctxText}</div>
-          <div class="k">启动</div><div class="v">${fmtUptime(w.uptime_ms)} 前</div>
+        <div class="card-meta-line">
+          <span title="状态">${w.status}</span><span class="sep">·</span>
+          <span title="模型">${escapeHtml(shortModel(w.model))}</span><span class="sep">·</span>
+          <span class="${effortClass(w.effort)}" title="effort">${w.effort}</span><span class="sep">·</span>
+          <span class="${ctxClass}" title="上下文用量">${ctxText}</span><span class="sep">·</span>
+          <span class="mi-label" title="启动时间">${fmtUptime(w.uptime_ms)} 前</span>
         </div>
         <div class="card-actions">
-          <button class="btn primary" data-work-open-terminal="${w.session_id}" title="打开 work 终端：关窗不杀进程，真结束点 ✕">打开终端</button>
+          <button class="btn primary" data-work-open-terminal="${w.session_id}" title="打开 work 终端：关窗不杀进程，真结束点 ✕">终端</button>
           <button class="btn btn-more" data-work-end="${w.session_id}" title="结束">✕</button>
         </div>
       </div>
@@ -360,7 +580,7 @@ function populateLogSourceFilters(): void {
     '<option value="all">全部</option>' +
     channelNames.map((n) => `<option value="${escapeHtml(n)}">${escapeHtml(n)}</option>`).join('') +
     '<option value="__system__">系统</option>';
-  for (const id of ['log-source-filter-overview', 'log-source-filter-full']) {
+  for (const id of ['log-source-filter-full', 'log-source-filter-overview']) {
     const el = document.getElementById(id) as HTMLSelectElement | null;
     if (!el) continue;
     const prev = el.value;
@@ -371,7 +591,6 @@ function populateLogSourceFilters(): void {
 }
 
 function renderLogs(): void {
-  const overviewList = document.getElementById('log-list-overview');
   const fullList = document.getElementById('log-list-full');
   const channelNames = new Set(lastState.channels.map((c) => c.chat_name ?? c.chat_id.slice(-12)));
   const filtered = logs.filter((l) => {
@@ -394,13 +613,14 @@ function renderLogs(): void {
       <span class="log-msg">${escapeHtml(l.message)}</span>
     </div>
   `).join('');
-  if (overviewList) {
-    overviewList.innerHTML = html;
-    overviewList.scrollTop = overviewList.scrollHeight;
-  }
   if (fullList) {
     fullList.innerHTML = html;
     fullList.scrollTop = fullList.scrollHeight;
+  }
+  const overviewList = document.getElementById('log-list-overview');
+  if (overviewList) {
+    overviewList.innerHTML = html;
+    overviewList.scrollTop = overviewList.scrollHeight;
   }
   const total = document.getElementById('log-total');
   if (total) total.textContent = `${logs.length} 条`;
@@ -447,44 +667,8 @@ function switchPage(page: string): void {
   document.querySelectorAll<HTMLElement>('.page').forEach((el) => {
     el.style.display = el.getAttribute('data-page') === page ? '' : 'none';
   });
-  // 2026-05-28 进入"设置"页时拉一次 forgotten 列表
-  if (page === 'settings') void refreshForgottenList();
-}
-
-async function refreshForgottenList(): Promise<void> {
-  const container = document.getElementById('forgotten-list');
-  if (!container) return;
-  let items: Array<{ chat_id: string; display_name?: string }> = [];
-  try {
-    items = await window.pinpin.channel.listForgotten();
-  } catch (e) {
-    container.innerHTML = `<div class="empty-hint">读取失败：${escapeHtml(String(e))}</div>`;
-    return;
-  }
-  if (items.length === 0) {
-    container.innerHTML = `<div class="empty-hint">没有被删除的频道</div>`;
-    return;
-  }
-  container.innerHTML = items.map((it) => {
-    const name = it.display_name ?? it.chat_id.slice(-12);
-    return `
-      <div class="forgotten-row">
-        <div class="forgotten-name" title="${escapeHtml(it.chat_id)}">${escapeHtml(name)}</div>
-        <button class="btn primary" data-restore-chat-id="${escapeHtml(it.chat_id)}">恢复</button>
-      </div>
-    `;
-  }).join('');
-  container.querySelectorAll<HTMLButtonElement>('button[data-restore-chat-id]').forEach((btn) => {
-    btn.addEventListener('click', async () => {
-      const id = btn.getAttribute('data-restore-chat-id');
-      if (!id) return;
-      btn.setAttribute('disabled', '');
-      btn.textContent = '恢复中…';
-      const ok = await window.pinpin.channel.restoreForgotten(id);
-      if (ok) await refreshForgottenList(); // 重拉一遍
-      else { btn.removeAttribute('disabled'); btn.textContent = '恢复'; }
-    });
-  });
+  // 进设置 page 时刷新"认识的人/bot"面板（拉最新 pending + mapped）
+  if (page === 'settings') void refreshNamesPanel();
 }
 
 function escapeHtml(s: string): string {
@@ -505,23 +689,16 @@ async function init(): Promise<void> {
       if (page) switchPage(page);
     });
   });
-  // log filter
+  // log filter（频道页底部嵌入日志区 + 「日志流」全屏页，共享 filter 状态）
   const f1 = document.getElementById('log-filter-overview') as HTMLSelectElement | null;
-  const f2 = document.getElementById('log-filter-full') as HTMLSelectElement | null;
   if (f1) f1.addEventListener('change', () => { currentLogFilter = f1.value as typeof currentLogFilter; renderLogs(); });
+  const f2 = document.getElementById('log-filter-full') as HTMLSelectElement | null;
   if (f2) f2.addEventListener('change', () => { currentLogFilter = f2.value as typeof currentLogFilter; renderLogs(); });
-  // 2026-05-28 source（频道）filter——双向同步 + 状态绑定
+  // 2026-05-28 source（频道）filter
   const sf1 = document.getElementById('log-source-filter-overview') as HTMLSelectElement | null;
+  if (sf1) sf1.addEventListener('change', () => { currentSourceFilter = sf1.value; renderLogs(); });
   const sf2 = document.getElementById('log-source-filter-full') as HTMLSelectElement | null;
-  const onSourceChange = (sel: HTMLSelectElement): void => {
-    currentSourceFilter = sel.value;
-    // 双向同步：两处 dropdown 选项保持一致体验
-    if (sf1 && sf1.value !== currentSourceFilter) sf1.value = currentSourceFilter;
-    if (sf2 && sf2.value !== currentSourceFilter) sf2.value = currentSourceFilter;
-    renderLogs();
-  };
-  if (sf1) sf1.addEventListener('change', () => onSourceChange(sf1));
-  if (sf2) sf2.addEventListener('change', () => onSourceChange(sf2));
+  if (sf2) sf2.addEventListener('change', () => { currentSourceFilter = sf2.value; renderLogs(); });
   document.getElementById('log-clear')?.addEventListener('click', () => { logs.length = 0; renderLogs(); });
   document.getElementById('errors-clear')?.addEventListener('click', () => { errors.length = 0; renderErrors(); });
   // settings
@@ -540,10 +717,6 @@ async function init(): Promise<void> {
   // footer btn
   // 确认对话框已移到 main process 的 ipcMain.handle('app.restart-bot') 里（dialog.showMessageBox），
   // renderer 不能用 window.confirm（Electron 默认禁用，静默返回 null）
-  // 批3「开启所有」：启动器默认完全静默，点这个才把所有频道 CLI 开起来
-  document.getElementById('btn-start-all')?.addEventListener('click', () => {
-    void window.pinpin.channel.startAll();
-  });
   document.getElementById('btn-restart-bot')?.addEventListener('click', () => {
     void window.pinpin.app.restartBot();
   });
@@ -555,6 +728,18 @@ async function init(): Promise<void> {
     renderAll();
   });
   document.getElementById('footer-err-badge')?.addEventListener('click', () => switchPage('errors'));
+
+  // 频道设置弹窗（一次性 wire；靠 modalChatId 取目标频道）
+  wireChannelModal();
+  // 休眠折叠区 头部 点击展开/收起
+  document.getElementById('standby-fold-head')?.addEventListener('click', () => {
+    const body = document.getElementById('standby-fold-body');
+    const caret = document.getElementById('standby-fold-caret');
+    if (!body) return;
+    const open = body.style.display === 'none';
+    body.style.display = open ? '' : 'none';
+    caret?.classList.toggle('open', open);
+  });
 
   // P1.3: 获取 quota 按钮 + 60s ago tick
   const fetchBtn = document.getElementById('quota-fetch');
@@ -596,8 +781,16 @@ async function init(): Promise<void> {
   lastState = await window.pinpin.getState();
   renderAll();
   document.getElementById('about-ipc')!.textContent = `IPC port: ${lastState.ipc_port}`;
+  void refreshNamesBadge(); // 开局拉一次待命名红点
 
-  window.pinpin.onState((s) => { lastState = s; renderAll(); });
+  window.pinpin.onState((s) => {
+    lastState = s;
+    renderAll();
+    // state 推送（含 channel-state-changed，命名变化也走它）→ 刷红点；在设置 page 时连面板一起刷
+    const onSettings = document.querySelector('.nav-item.active')?.getAttribute('data-page') === 'settings';
+    if (onSettings) void refreshNamesPanel();
+    else void refreshNamesBadge();
+  });
   window.pinpin.onQuota((snap) => renderQuota(snap));
   window.pinpin.onLog((l) => {
     logs.push(l);
@@ -619,6 +812,7 @@ function renderAll(): void {
   // 修内审 Optional #8 E7 本日消息统计 chip
   const msgChip = document.getElementById('quota-messages');
   if (msgChip) msgChip.textContent = String(lastState.today_messages);
+  void refreshNamesBadge(); // 待命名红点跟随 state 推送实时刷新（非设置页也亮）
 }
 
 function fmtTokens(n?: number): string {

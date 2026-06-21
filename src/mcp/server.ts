@@ -8,6 +8,7 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { handleInboundMessage, setBotAppId } from './notifications/chat-message.js';
 import { seedKnownUsersFromEnv } from './utils/sender-names.js';
+import { initNameMapStore } from '../shared/name-map-store.js';
 import { SupervisorClient } from '../ipc/supervisor-client.js';
 import { setSupervisorClient } from '../ipc/client-singleton.js';
 import { IPC_METHODS, type PollVoteParams, type PollVoteResult } from '../ipc/protocol.js';
@@ -47,7 +48,6 @@ import { logBackground } from './utils/background-log.js';
 import { setServerInstance } from './utils/push-channel.js';
 // 阶段 4 批次 2：定时播报类 cron（import 触发 registerCron 副作用）
 import './cron/daily-news.js';
-import './cron/daily-briefing.js';
 import './cron/weekly-recap.js';
 import './cron/memory-audit.js';
 import './cron/free-activity.js';
@@ -71,8 +71,6 @@ import { writeDiaryTool, handleWriteDiary } from './tools/write-diary.js';
 import { writeWeeklyRecapTool, handleWriteWeeklyRecap } from './tools/write-weekly-recap.js';
 import { readPushedNewsUrlsTool, handleReadPushedNewsUrls } from './tools/read-pushed-news-urls.js';
 import { sendDailyNewsCardTool, handleSendDailyNewsCard } from './tools/send-daily-news-card.js';
-import { readBriefingTasksTool, handleReadBriefingTasks } from './tools/read-briefing-tasks.js';
-import { sendBriefingCardTool, handleSendBriefingCard } from './tools/send-briefing-card.js';
 import { memoryAuditReadTool, handleMemoryAuditRead } from './tools/memory-audit-read.js';
 import { memoryRewriteTool, handleMemoryRewrite } from './tools/memory-rewrite.js';
 import { createCloudDocTool, handleCreateCloudDoc } from './tools/create-cloud-doc.js';
@@ -166,7 +164,7 @@ async function main() {
   const ALWAYS_LOAD = new Set<string>([
     'pinpin_reply_text', 'pinpin_reply_voice', 'pinpin_react', 'pinpin_no_reply',
     'pinpin_memorize', 'mood_appraise', 'read_chat_log',
-    'write_diary', 'send_daily_news_card', 'send_briefing_card', 'write_weekly_recap',
+    'write_diary', 'send_daily_news_card', 'write_weekly_recap',
     'write_journey_log', 'memory_rewrite', 'pinpin_peek_work_session',
     // weekly-recap cron 还调 create_cloud_doc + send_private_message；ball-tasks cron 调 read_doc_todos；
     // relay-nudge/callback 调 send_private_message——均自动触发、无法即时实测，保常驻防静默哑。
@@ -190,8 +188,6 @@ async function main() {
       writeWeeklyRecapTool,
       readPushedNewsUrlsTool,
       sendDailyNewsCardTool,
-      readBriefingTasksTool,
-      sendBriefingCardTool,
       memoryAuditReadTool,
       memoryRewriteTool,
       createCloudDocTool,
@@ -300,10 +296,6 @@ async function main() {
         return handleReadPushedNewsUrls(args as unknown as Parameters<typeof handleReadPushedNewsUrls>[0]);
       case 'send_daily_news_card':
         return handleSendDailyNewsCard(args as unknown as Parameters<typeof handleSendDailyNewsCard>[0]);
-      case 'read_briefing_tasks':
-        return handleReadBriefingTasks();
-      case 'send_briefing_card':
-        return handleSendBriefingCard(args as unknown as Parameters<typeof handleSendBriefingCard>[0]);
       case 'memory_audit_read':
         return handleMemoryAuditRead();
       case 'memory_rewrite':
@@ -421,6 +413,9 @@ async function main() {
 
   // C2 身份归一：把 FEISHU_KNOWN_USERS 种子灌入 known_users DB（DB 是真人映射单一运行时权威源）
   seedKnownUsersFromEnv();
+
+  // 人名/bot名共享映射：绑定 supervisor 传来的 name-mappings.json（读端，mtime 热重载=实时）
+  if (process.env.PINPIN_NAME_MAP_PATH) initNameMapStore(process.env.PINPIN_NAME_MAP_PATH);
 
   // F1：启动时打实际读到的关键 env（脱敏）——证明"某 CLI 某点在线" + 排查 env 透传漏配
   // （stderr 进 Claude Code 内部 debug 文件查不到，故走 logBackground → 系统日志\后台账本 这一处可查通道）

@@ -17,10 +17,7 @@ import path from 'node:path';
 import { PtyManager } from './pty-manager.js';
 import { buildInstructions } from '../src/mcp/instructions.js';
 import { DEFAULT_AUTOCOMPACT_PCT } from './channel-config-store.js';
-import { resolveClaudePath, stripAnsi } from './utils.js';
-
-/** 单轮 API 失败重试次数加固（CLI 原生默认 10，env override）。调高 = 多扛网络瞬时抖动、抖动过去自动接上。 */
-const PINPIN_API_MAX_RETRIES = process.env['PINPIN_API_MAX_RETRIES'] ?? '20';
+import { resolveClaudePath, stripAnsi, claudeApiNetEnv } from './utils.js';
 
 
 export interface ChannelCliOptions {
@@ -35,6 +32,8 @@ export interface ChannelCliOptions {
   supervisorPort: number;
   /** 共享 data.db 路径（让子 stdio MCP server 进程通过 PINPIN_DB_PATH env 指向 supervisor 同一个 db） */
   dbPath: string;
+  /** 共享 name-mappings.json 路径（子进程经 PINPIN_NAME_MAP_PATH env 读同一文件，mtime 热重载=实时） */
+  nameMapPath: string;
   /** P1.3: statusLine sink script 绝对路径（scripts/statusline-sink.cjs）。
    *  通过 claude --settings 内联 JSON 注入 statusLine 配置，sink 收 stdin JSON 推 supervisor。 */
   statusLineSinkPath: string;
@@ -148,6 +147,8 @@ export class ChannelCli extends EventEmitter {
       PINPIN_CHAT_ID: this.opts.chatId,
       PINPIN_SUPERVISOR_PORT: String(this.opts.supervisorPort),
       PINPIN_DB_PATH: this.opts.dbPath,
+      // 子 MCP 进程读同一份人名/bot名映射（sender-names / bot-roster 解析最前优先），mtime 热重载
+      PINPIN_NAME_MAP_PATH: this.opts.nameMapPath,
       // MCP tool search：强制所有 MCP tool 折叠（按需 ToolSearch 发现），仅 server ListTools 标
       // app/alwaysLoad 的核心/自动触发工具常驻。省每轮固定 MCP 开销（~40k→~10k）。
       // true=强制开启（跳过走网络时的 fallback；网络 透传 tool_reference 块）。
@@ -159,8 +160,8 @@ export class ChannelCli extends EventEmitter {
       // CLI 到 25% 就地原生压缩（自动留摘要 + system prompt/人格/CLAUDE.md 从磁盘重注入不丢），
       // 无需 supervisor 监测用量阈值（D-6 手工摘要机制已回滚）。
       CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(this.opts.autoCompactPct ?? DEFAULT_AUTOCOMPACT_PCT),
-      // 抗断线加固：多扛 API 瞬时抖动。
-      CLAUDE_CODE_MAX_RETRIES: PINPIN_API_MAX_RETRIES,
+      // API 失败重试加固（单源 utils.claudeApiNetEnv）。
+      ...claudeApiNetEnv(),
     };
 
     const claudePath = resolveClaudePath();
@@ -371,6 +372,8 @@ export class ChannelCli extends EventEmitter {
     autoCompactPct: number;
     fast: boolean;
     session_id?: string;
+    /** 待机标记（实际值由 supervisor.getDisplayChannels 从 configStore 盖戳；ChannelCli 不持有此态） */
+    standby?: boolean;
   } {
     const ptyStats = this.pty?.getStats();
     return {

@@ -38,8 +38,12 @@ export const IPC_METHODS = {
   COMPACT_VIA_PTY: 'compact.via-pty',  // request → returns { ok }
   // 品品主动单聊 / 建群后即时挂频道监听（不等对方或群友先发消息）
   SPAWN_CHANNEL: 'spawn-channel',      // request → returns WorkOkResult
-  // 解散群后停该频道 CLI
-  FORGET_CHANNEL: 'forget-channel',    // request → returns WorkOkResult
+  // 停某频道 CLI + 删配置，不再重 spawn（解散群后调）
+  STOP_CHANNEL: 'stop-channel',        // request → returns WorkOkResult
+  // 人名/bot名映射管理（启动器面板用；后端先就绪，UI 后续阶段做）
+  GET_NAME_MAPPINGS: 'get-name-mappings',  // request → NameMap { humans, bots }
+  GET_PENDING_NAMES: 'get-pending-names',  // request → PendingNameEntry[]（待命名 sender）
+  SET_NAME_MAPPING: 'set-name-mapping',    // request {type,id,name} → WorkOkResult（写映射 + 清待命名）
   // 方案A：投票点击 → supervisor 把记票请求路由到有 DB 的频道子进程执行（main → child request）
   POLL_VOTE: 'poll.vote',              // main → child request → returns PollVoteResult
   // ── 管家(warden)桥接：独立管家进程连 supervisor 固定端口，手机远程看/控 CLI ──
@@ -52,16 +56,12 @@ export const IPC_METHODS = {
   WARDEN_SYSTEM_INFO: 'warden.system-info',       // request → WardenSystemInfo
   // 批1 频道完整管理
   WARDEN_START_CLI: 'warden.start-cli',           // request {chat_id} → WorkOkResult（spawn+start）
-  WARDEN_START_ALL: 'warden.start-all',           // request → WorkOkResult
   WARDEN_COMPACT_CLI: 'warden.compact-cli',       // request {chat_id} → WorkOkResult
   WARDEN_SET_CONFIG: 'warden.set-config',         // request {chat_id, model?/effort?/fast?/autoCompactPct?} → WorkOkResult（持久化，重启生效）
   WARDEN_SET_NAME: 'warden.set-name',             // request {chat_id, name} → WorkOkResult
   WARDEN_SEND_INPUT: 'warden.send-input',         // request {chat_id, text} → WorkOkResult（写 PTY，跟 CLI 对话）
-  // 批2 额度 + 频道删除/恢复
+  // 批2 额度
   WARDEN_FETCH_QUOTA: 'warden.fetch-quota',       // request → 透传 {quota, today_messages, rate_limits}（先触发 fetchQuotaNow 刷新）
-  WARDEN_FORGET_CHANNEL: 'warden.forget-channel', // request {chat_id} → WorkOkResult
-  WARDEN_LIST_FORGOTTEN: 'warden.list-forgotten', // request → {channels: [{chat_id, display_name?}]}
-  WARDEN_RESTORE_CHANNEL: 'warden.restore-channel', // request {chat_id} → WorkOkResult
   // 批3 work session（Owner"干活"session 全复刻：列表/终端看写/结束）
   WARDEN_LIST_WORK: 'warden.list-work',           // request → 透传 {sessions: WorkSession.getStats()[]}
   WARDEN_WORK_SUB_TERMINAL: 'warden.work-sub-terminal',     // request {session_id} → WorkOkResult（attach，push TERMINAL_DATA 以 session_id 作路由 key）
@@ -133,6 +133,8 @@ export interface FeishuInboundMessagePayload {
   content?: string;
   mentions?: unknown[];
   parent_id?: string;
+  /** P2P 单聊标志（supervisor 按入站路径定：WS=true 群poll=false）。子端对话记录命名区分单聊用。 */
+  is_p2p?: boolean;
   /** 原始飞书消息（含 mentions / parent_id / body / sender 全字段），传给子端做后续协议 #33 mention 解析等 */
   raw?: unknown;
 }
@@ -208,14 +210,35 @@ export interface CompactViaPtyParams {
   chat_id: string;
 }
 
-// ── 主动挂/停频道 params（SPAWN_CHANNEL / FORGET_CHANNEL；均复用 WorkOkResult 返回）──
+// ── 主动挂/停频道 params（SPAWN_CHANNEL / STOP_CHANNEL；均复用 WorkOkResult 返回）──
 export interface SpawnChannelParams {
   chat_id: string;
   /** 可选频道友好名（建群时传群名；单聊可不传，supervisor 用 chat_id 兜底） */
   chat_name?: string;
 }
-export interface ForgetChannelParams {
+export interface StopChannelParams {
   chat_id: string;
+}
+
+// ── 人名/bot名映射管理 params/result（GET_NAME_MAPPINGS / GET_PENDING_NAMES / SET_NAME_MAPPING）──
+/** 全部映射；同 name-map-store 的 NameMap（humans: open_id→名, bots: cli_id→名） */
+export interface NameMappings {
+  humans: Record<string, string>;
+  bots: Record<string, string>;
+}
+/** 待命名 sender 条目（解析后仍纯 ID 兜底=没友好名）：供启动器面板列出待Owner补名 */
+export interface PendingNameEntry {
+  id: string;
+  chat_id: string;
+  /** 该 sender 最近一条消息前 30 字（帮Owner认是谁） */
+  snippet: string;
+  type: 'human' | 'bot';
+  ts: number;
+}
+export interface SetNameMappingParams {
+  type: 'human' | 'bot';
+  id: string;
+  name: string;
 }
 
 // ── 批2 work CLI 完工信号 params（work-stop-sink.cjs Stop hook → supervisor）──

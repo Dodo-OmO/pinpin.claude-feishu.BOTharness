@@ -224,6 +224,7 @@ export class FeishuEventSubscriber {
       sender_type: 'user',
       text: msg.content,
       create_time_ms: msg.createTime,
+      is_p2p: msg.chatType === 'p2p', // WS 也会推群消息，按 SDK chatType 权威区分（非硬编码）
       raw,
     };
   }

@@ -3,7 +3,7 @@
 // 双闸 fail-closed：① OWNER 鉴权（checkOwner，本频道最近发言者必须是Owner）
 //                  ② 仅能解散品品 create_group 建过的群（查 pinpin_created_groups 表）
 // 飞书 im.v1.chat.delete：要求机器人是群主——品品建群时不传 owner_id 即自动成群主，满足。
-// 解散后通知 supervisor forgetChannel 停该群 CLI。
+// 解散后通知 supervisor stopChannel 停该群 CLI + 删配置。
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { getFeishuClient } from "./feishu-send.js";
@@ -72,7 +72,7 @@ export async function handleDisbandGroup(
   // 停该群 CLI
   try {
     const client = getSupervisorClient();
-    await client.request<WorkOkResult>(IPC_METHODS.FORGET_CHANNEL, { chat_id });
+    await client.request<WorkOkResult>(IPC_METHODS.STOP_CHANNEL, { chat_id });
   } catch (e) {
     process.stderr.write(
       `[disband_group] 停频道 IPC 失败（群已解散）: ${e instanceof Error ? e.message : e}\n`,

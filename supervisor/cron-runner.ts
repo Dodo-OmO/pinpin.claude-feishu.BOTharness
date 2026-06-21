@@ -131,6 +131,8 @@ export class SupervisorCronRunner {
         for (const c of chats) {
           this.supervisor.getChannel(c.chat_id)?.stop();
         }
+        // 待机频道 stop 后从 Map 移除，使 04:10 不重启它们（维持"待机=睡着不在 Map"，靠消息唤醒）
+        this.supervisor.evictStandbyChannels();
       },
     });
 

@@ -35,8 +35,10 @@ export interface ChannelConfig {
   /** 频道常驻持久化标记（2026-05-28）：spawn 过即写 true，下次启动遍历持久化列表自动 spawn，
    *  P2P 单聊不在飞书 chat.list 也能恢复 */
   seen?: boolean;
-  /** Owner主动 forget 标记。set true 后 onFeishuMessage 入口直接 return 不重新 spawn，防 forget 死循环 */
-  forgotten?: boolean;
+  /** 待机模式标记（2026-06-19）：true 时 spawnAllKnownChannels / 每日 4 点重启都不自动拉起该频道，
+   *  但有人发消息会经 onFeishuMessage 的"!channels.has → 动态 spawn"热路径唤醒（触发消息走缓冲 flush 给品品读）。
+   *  唤醒只临时 spawn、本标记不清，下次 4 点重启又回待机。 */
+  standby?: boolean;
   /** 自动压缩阈值（上下文用量百分比，20-50）。缺省走 DEFAULT_AUTOCOMPACT_PCT。改完需重启该频道 CLI 生效。 */
   autoCompactPct?: number;
   /** fast 模式（Opus 加速输出）。spawn 时注入 --settings 的 fastMode；改完需重启该频道 CLI 生效。
@@ -122,10 +124,10 @@ export class ChannelConfigStore {
     this.flush();
   }
 
-  /** 列出所有已识别频道 chat_id（过滤 __defaults__ + forgotten=true 的） */
+  /** 列出所有已识别频道 chat_id（过滤两个特殊 key） */
   listChatIds(): string[] {
     return Object.keys(this.cache).filter(
-      (k) => k !== DEFAULTS_KEY && k !== WORK_DEFAULTS_KEY && this.cache[k]?.forgotten !== true,
+      (k) => k !== DEFAULTS_KEY && k !== WORK_DEFAULTS_KEY,
     );
   }
 
@@ -133,39 +135,27 @@ export class ChannelConfigStore {
   markSeen(chatId: string): void {
     if (chatId === DEFAULTS_KEY || chatId === WORK_DEFAULTS_KEY) return;
     const existing = this.cache[chatId] ?? {};
-    if (existing.seen === true && existing.forgotten !== true) return; // 已 seen 不重复写盘
-    // 重启 seen 时顺便清 forgotten（用户先 forget 后又主动恢复频道时用，本次未必走到，但安全）
-    this.cache[chatId] = { ...existing, seen: true, forgotten: false };
+    if (existing.seen === true) return;
+    this.cache[chatId] = { ...existing, seen: true };
     this.flush();
   }
 
-  /** 标 forgotten=true（Owner主动删频道）。后续 onFeishuMessage 不再重 spawn */
-  markForgotten(chatId: string): void {
+  /** 彻底删除某 chat 配置（disband 解散群后调，防 spawnAllKnownChannels 重拉已解散群）。 */
+  remove(chatId: string): void {
+    if (chatId === DEFAULTS_KEY || chatId === WORK_DEFAULTS_KEY) return;
+    if (this.cache[chatId]) { delete this.cache[chatId]; this.flush(); }
+  }
+
+  /** 待机标记读写（2026-06-19）。set true = 该频道进待机；false = 恢复常驻。 */
+  isStandby(chatId: string): boolean {
+    return this.cache[chatId]?.standby === true;
+  }
+
+  setStandby(chatId: string, standby: boolean): void {
     if (chatId === DEFAULTS_KEY || chatId === WORK_DEFAULTS_KEY) return;
     const existing = this.cache[chatId] ?? {};
-    this.cache[chatId] = { ...existing, forgotten: true };
+    this.cache[chatId] = { ...existing, standby };
     this.flush();
-  }
-
-  isForgotten(chatId: string): boolean {
-    return this.cache[chatId]?.forgotten === true;
-  }
-
-  /** 列出所有 forgotten=true 的频道（设置页"已删除频道"列表用） */
-  listForgottenChatIds(): Array<{ chat_id: string; display_name?: string }> {
-    return Object.entries(this.cache)
-      .filter(([k, v]) => k !== DEFAULTS_KEY && k !== WORK_DEFAULTS_KEY && v?.forgotten === true)
-      .map(([k, v]) => ({ chat_id: k, display_name: v?.display_name }));
-  }
-
-  /** 清掉 forgotten 标记（设置页"恢复"按钮）。下次 start() 时会 spawn */
-  unmarkForgotten(chatId: string): boolean {
-    if (chatId === DEFAULTS_KEY || chatId === WORK_DEFAULTS_KEY) return false;
-    const existing = this.cache[chatId];
-    if (!existing || existing.forgotten !== true) return false;
-    this.cache[chatId] = { ...existing, forgotten: false };
-    this.flush();
-    return true;
   }
 
   private flush(): void {
