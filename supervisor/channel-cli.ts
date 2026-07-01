@@ -157,10 +157,14 @@ export class ChannelCli extends EventEmitter {
       // 关闭 Claude Code 自动记忆（AutoMem）：品品已有永久记忆50条 + 日记/人物/心境整套记忆系统，
       // AutoMem 与之重复并行，关掉省启动注入 + 统一到 vault 一套记忆。
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
-      // 自动压缩走 CLI 原生 auto-compact：把触发阈值从默认 ~83% 调低到 25%（只能调低不能调高）。
-      // CLI 到 25% 就地原生压缩（自动留摘要 + system prompt/人格/CLAUDE.md 从磁盘重注入不丢），
-      // 无需 supervisor 监测用量阈值（D-6 手工摘要机制已回滚）。
+      // 自动压缩走 CLI 原生 auto-compact：阈值=有效窗口×此百分比（只能调低不能调高），到点就地原生压缩
+      // （自动留摘要 + system prompt/人格/CLAUDE.md 从磁盘重注入不丢），无需 supervisor 监测（D-6 已回滚）。
       CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(this.opts.autoCompactPct ?? DEFAULT_AUTOCOMPACT_PCT),
+      // 必须同时钉死压缩窗口来源：[1m] 模式下 CLI 把窗口算成正好 1e6，落进 source="auto" 分支，
+      // 被内部 SIe 闸判为"非显式来源"→ 整个 auto-compact 被静默关闭、上面的百分比根本不参与比较。
+      // 设本 env → 来源变 "env" 过闸，原生压缩才真生效。值取上限 1e6，CLI 内部 min(模型实际窗口, 此值)
+      // 自动收敛：[1m]→1e6、普通→200k，两类频道都对。（CLI 内部 XIn=1e5..Izr=1e6 合法区间）
+      CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000',
       // API 失败重试加固（单源 utils.claudeApiNetEnv）。
       ...claudeApiNetEnv(),
     };

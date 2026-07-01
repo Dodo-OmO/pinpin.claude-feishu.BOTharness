@@ -30,8 +30,6 @@ export const IPC_METHODS = {
   WORK_END: 'work.end',             // request → returns { ok }
   WORK_PEEK: 'work.peek',           // Q7: request → returns { lines: string[] } 品品主动看 work 翻译行
   WORK_STOPPED: 'work.stopped',     // main → child push notification（stop signal）
-  // 批2: work CLI 的 Stop hook（work-stop-sink.cjs）→ supervisor 推完工信号（fire-and-forget，不走 hello）
-  WORK_STOP_SIGNAL: 'worksession.stop-signal',
   // P1.3: statusLine sink → supervisor 推 per-CLI 上下文用量（fire-and-forget，不走 hello）
   STATUSLINE_UPDATE: 'statusline.update',
   // 手动 /压缩：compact_chat tool → supervisor 往本频道 CLI 的 PTY 写 `/compact\n` 触发原生压缩
@@ -241,16 +239,6 @@ export interface SetNameMappingParams {
   type: 'human' | 'bot';
   id: string;
   name: string;
-}
-
-// ── 批2 work CLI 完工信号 params（work-stop-sink.cjs Stop hook → supervisor）──
-export interface WorkStopSignalParams {
-  /** 哪个 work session（hook command 里 --ws-id= 注入，回传以映射 WorkSession 实例） */
-  ws_id: string;
-  /** work CLI 的 transcript jsonl 路径（hook stdin 直接给，根治 supervisor 找不到 jsonl） */
-  transcript_path: string;
-  /** 本轮最近一条 assistant 文字（sink 反扫 transcript 提取，作完工回报正文） */
-  last_text: string;
 }
 
 // ── 账号级额度（来自 statusLine rate_limits）：每窗口 used_percentage(0-100) + resets_at(Unix 秒) ──

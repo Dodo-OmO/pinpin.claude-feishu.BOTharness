@@ -1,7 +1,7 @@
 /**
  * pinpin_send_to_work_session —— 诉求 B "传话筒"续指令 tool。
  *
- * 品品给后台 work session 发新指令——直接通过 PTY write 进 claude stdin。
+ * 品品给后台 work session 发新指令——写入 headless work CLI 的 stdin（stream-json user 消息）。
  */
 
 import type { Tool } from '@modelcontextprotocol/sdk/types.js';
@@ -11,11 +11,9 @@ import { IPC_METHODS, type WorkOkResult } from '../../ipc/protocol.js';
 export const pinpinSendToWorkSessionTool: Tool = {
   name: 'pinpin_send_to_work_session',
   description:
-    '【诉求 B 传话筒-续指令】给已启动的后台 work session 发新指令（PTY 键入 stdin）。' +
+    '【诉求 B 传话筒-续指令】给已启动的后台 work session 发新指令（写入 stdin，工人下一轮处理）。' +
     '常用于Owner更新工作要求时品品转给 work CLI。' +
-    '也可发斜杠命令遥控 work CLI（如 /compact 压上下文、/model <模型名> 换模型、/context 看用量、/cost 看花费）——' +
-    '但务必用「带参数/立即执行」形式，绝不发会弹选择菜单的裸命令（如裸 /model），' +
-    'work CLI 那端无人能点菜单、会卡住。换 effort 暂无斜杠命令，需重开 work session。',
+    '工人是 headless 进程，不支持 TUI 斜杠命令（/compact、/model 等）——压上下文交给自动压缩，换模型/档位请重开 work session。',
   inputSchema: {
     type: 'object',
     properties: {

@@ -132,6 +132,32 @@ import {
   handleSendPollCard,
   handleConfirmDangerousAction,
 } from './tools/cards.js';
+import { appendFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+/** 黑匣子：把 MCP server 进程级崩溃/降级写盘留证。进程崩了重连代码随之死、launcher.log 接不到，
+ *  故落到 vault 系统日志，下次复发可定位真凶。崩溃 handler 内只做最小同步写盘 + 退出，不碰复杂状态。 */
+function recordMcpCrash(kind: string, detail: unknown): void {
+  try {
+    const chat = (process.env.PINPIN_CHAT_ID ?? '?').slice(-8);
+    const stamp = new Date().toISOString();
+    const stack = detail instanceof Error ? (detail.stack ?? detail.message) : String(detail);
+    const line = `\n[${stamp}] [${kind}] chat=${chat}\n${stack}\n`;
+    const file = join(process.env.BASE_PROJECT_DIR ?? '.', '系统日志', 'mcp-crash.log');
+    appendFileSync(file, line, 'utf8');
+  } catch {
+    /* 黑匣子写盘失败不能再抛——静默兜底 */
+  }
+}
+process.on('uncaughtException', (err) => {
+  recordMcpCrash('uncaughtException', err);
+  process.stderr.write(`[feishu-channel] ❌ uncaughtException，已记黑匣子，退出：${err?.message}\n`);
+  process.exit(1);
+});
+process.on('unhandledRejection', (reason) => {
+  recordMcpCrash('unhandledRejection', reason);
+  process.stderr.write(`[feishu-channel] ⚠️ unhandledRejection，已记黑匣子（不退出）\n`);
+});
 
 async function main() {
   const server = new Server(
@@ -482,10 +508,25 @@ async function main() {
 
     const dispatchWorkStopped = async (p: PendingWorkStopped) => {
       try {
+        // 自动司机已把工人推到终态才触发本通知（非每轮）：done=真完工 / need_human=卡住需Owner /
+        // capped|stuck=没自动做完 / error=出错。按 reason 给品品不同处置指引。
+        const r = p.stop_reason;
+        const head =
+          r === 'done' ? '✅ 完工'
+          : r === 'need_human' ? '🙋 卡住·需你拍板'
+          : r === 'capped' || r === 'stuck' ? '⚠️ 未做完·已自动停'
+          : r === 'error' ? '❌ 出错'
+          : '停下';
+        const advice =
+          r === 'need_human'
+            ? '它需要Owner补充信息/拍板才能继续——转达后可用 pinpin_send_to_work_session 把Owner的答复发回去让它接着干。'
+            : r === 'capped' || r === 'stuck'
+            ? '它没能自动做完，看 peek 里卡在哪，再决定 pinpin_send_to_work_session 指点继续 还是 pinpin_end_work_session 收掉。'
+            : '满意就 pinpin_end_work_session 收掉；想让它再做点别的就 pinpin_send_to_work_session。';
         const summary =
-          `【工作 CLI 停下等指示｜${p.session_id}】` +
-          (p.duration_ms ? `已跑 ${(p.duration_ms / 1000).toFixed(0)}s。` : '') +
-          `它停下工作了， pinpin_peek_work_session 查看本turn全程，然后用你自己的话把最新进展飞书汇报给Owner。不必深度思考。`;
+          `【工作 CLI ${head}｜${p.session_id}】` +
+          (p.duration_ms ? `共跑 ${(p.duration_ms / 1000).toFixed(0)}s。` : '') +
+          `用 pinpin_peek_work_session 查看全程，用你自己的话把结果汇报给Owner。${advice}不必深度思考。`;
         await server.notification({
           method: 'notifications/claude/channel',
           params: sanitizeChannelParams(summary, {
@@ -494,6 +535,7 @@ async function main() {
             trigger: 'work-stopped',
             session_id: p.session_id,
             is_error: String(p.is_error),
+            stop_reason: r ?? '',
           }),
         });
       } catch (e) {
@@ -615,6 +657,7 @@ async function main() {
       process.stderr.write(
         `[feishu-channel] ⚠️ IPC 彻底失联 (chat=${chatId})，重连已耗尽；降级运行（tools 可用、无入站消息），等 supervisor 重启重建本 CLI\n`,
       );
+      recordMcpCrash('ipc-disconnect', `IPC 重连耗尽，降级运行（chat=${chatId}）`);
     });
     ipcClient.on('chat-trigger', (p: { body: string; meta?: Record<string, string> }) => {
       if (!mcpInitialized) {

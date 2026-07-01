@@ -4,7 +4,7 @@
  * 品品在某个 chat 收到Owner"开个 work 改 bug"指令时，调本 tool：
  *   - work_dir: claude code 要工作的目录（绝对路径）
  *   - goal: 注入到新 session stdin 的第一段内容（任务目标）
- *   - model: 可选，默认 supervisor 配的 default（opus 4.6 [1m]）
+ *   - model: 可选，默认 supervisor 配的 default（opus 4.8 [1m]）
  *   - effort: 可选，默认 high
  *
  * supervisor 通过 PTY spawn 一个独立 claude code 进程在 work_dir 跑 goal，
@@ -32,7 +32,7 @@ export const pinpinSpawnWorkSessionTool: Tool = {
     properties: {
       work_dir: { type: 'string', description: '后台 session 的工作目录（绝对路径）' },
       goal: { type: 'string', description: '给后台 session 的第一段指令（任务目标 / prompt）' },
-      model: { type: 'string', description: '可选模型。缺省走 supervisor default (opus 4.6 [1m])' },
+      model: { type: 'string', description: '可选模型。缺省走 supervisor default (opus 4.8 [1m])' },
       effort: { type: 'string', description: '可选 effort：low/medium/high/xhigh/max。缺省 high' },
     },
     required: ['work_dir', 'goal'],

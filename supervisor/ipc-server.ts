@@ -22,7 +22,6 @@ import {
   type FeishuInboundMessagePayload,
   type WorkStoppedPush,
   type StatuslineUpdateParams,
-  type WorkStopSignalParams,
 } from '../src/ipc/protocol.js';
 
 export type RequestHandler = (
@@ -104,6 +103,11 @@ export class IpcServer extends EventEmitter {
   /** 列出已注册的子进程 */
   listClients(): Array<{ chat_id: string; pid: number }> {
     return [...this.clients.values()].map((c) => ({ chat_id: c.chatId, pid: c.pid }));
+  }
+
+  /** 该 chat 是否有活跃 IPC client（断线自愈 grace 到点时二次确认是否已重连） */
+  hasClient(chatId: string): boolean {
+    return this.clients.has(chatId);
   }
 
   /** 推飞书消息给对应 chat_id 的子进程；找不到子进程返回 false */
@@ -290,12 +294,6 @@ export class IpcServer extends EventEmitter {
         // P1.3 sink fire-and-forget notification（短连接，无 hello 注册）
         const p = env.params as StatuslineUpdateParams;
         this.emit('statusline-update', p);
-        break;
-      }
-      case IPC_METHODS.WORK_STOP_SIGNAL: {
-        // 批2 work-stop-sink fire-and-forget notification（短连接，无 hello 注册）
-        const p = env.params as WorkStopSignalParams;
-        this.emit('worksession-stop-signal', p);
         break;
       }
       default:

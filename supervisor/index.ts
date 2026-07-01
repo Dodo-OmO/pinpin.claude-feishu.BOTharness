@@ -43,7 +43,6 @@ import {
   type RateLimits,
   type WardenSystemInfo,
   type WardenLogEntry,
-  type WorkStopSignalParams,
   type CompactViaPtyParams,
   type SpawnChannelParams,
   type StopChannelParams,
@@ -88,11 +87,6 @@ export interface SupervisorOptions {
   defaultFast?: boolean;
 }
 
-/** 完工提醒去重窗口：'stopped' 由 Stop hook 主路径 + idle 兜底两条发出，各自靠文本身份去重，
- *  但两条提取代码/文件来源不同，文本偶有不一致会双发（甚至多发）。同一 work session 在此窗口内的
- *  重复推送收敛为一遍。需 > QUIESCE_MS(6s)+IDLE_TICK_MS(2s) 才能盖住 hook→idle 的发出时间差；
- *  回合制串行下真实两次完工间隔（品品 peek+汇报+Owner再发指令）远大于此值，故不会误吞真完工。 */
-const WORK_STOP_PUSH_DEDUP_MS = 15_000;
 
 export class Supervisor extends EventEmitter {
   readonly opts: Required<SupervisorOptions>;
@@ -117,6 +111,9 @@ export class Supervisor extends EventEmitter {
     string,
     { count: number; windowStart: number; slowRecoveryActive?: boolean; recoveryCount?: number }
   >();
+  /** D3: chat_id → IPC 断线自愈 grace 定时器。断线后等窗口；MCP 自身重连(client-hello)取消之，
+   *  否则判定 CLI 僵尸（PTY 活但 MCP/IPC 死）→ 杀掉重生。 */
+  private graceTimers = new Map<string, NodeJS.Timeout>();
   /** D2: chat_id → CLI 未就绪时缓冲的入站消息（带入队时间戳）。CLI ready（client-hello）后 flush 投递。
    *  每 chat 上限 50 条（超丢最旧）、flush 时丢弃入队 > 10min 的过期消息。stopChannel 时清。 */
   private pendingInbound = new Map<string, Array<{ msg: FeishuInboundMessagePayload; enqueuedAt: number }>>();
@@ -216,9 +213,10 @@ export class Supervisor extends EventEmitter {
     this.ipcServer.removeAllListeners('client-hello');
     this.ipcServer.removeAllListeners('client-disconnected');
     this.ipcServer.removeAllListeners('statusline-update');
-    this.ipcServer.removeAllListeners('worksession-stop-signal');
     this.ipcServer.on('client-hello', (info: { chat_id: string; pid: number }) => {
       process.stderr.write(`[supervisor] IPC client up: chat=${info.chat_id} pid=${info.pid}\n`);
+      // D3: MCP（重）连上 → 取消断线自愈 grace 定时器（自身重连成功，无需杀重生）
+      this.clearGraceTimer(info.chat_id);
       // 通知对应 ChannelCli 启动期结束（停止 auto-confirm 启动 prompts）
       this.channels.get(info.chat_id)?.emit('ipc-ready');
       // D2: CLI 已就绪 → flush 该 chat 在未就绪期间缓冲的入站消息
@@ -227,6 +225,9 @@ export class Supervisor extends EventEmitter {
     });
     this.ipcServer.on('client-disconnected', (info: { chat_id: string; pid: number }) => {
       process.stderr.write(`[supervisor] IPC client down: chat=${info.chat_id} pid=${info.pid}\n`);
+      // D3 抗断线：crashed 只在 PTY 退出触发；MCP 子进程死/IPC 断而 PTY 仍活时只有本事件 →
+      // 启动 grace 自愈，否则消息永久缓冲在 pendingInbound 无人 flush。
+      this.scheduleIpcRecovery(info.chat_id);
     });
 
     // ── P1.3 statusLine sink 推 per-CLI 上下文用量（事件驱动，不轮询）──
@@ -269,16 +270,6 @@ export class Supervisor extends EventEmitter {
       // supervisor 不再监测用量阈值推 trigger（D-6 手工摘要机制已回滚）。
     });
 
-    // ── 批2 work CLI 完工信号：work-stop-sink Stop hook → supervisor（替 idle 猜停的确定性主路径）──
-    this.ipcServer.on('worksession-stop-signal', (p: WorkStopSignalParams) => {
-      const session = this.workSessions.get(p.ws_id);
-      if (!session) {
-        process.stderr.write(`[supervisor] work-stop-signal 收到但 ws_id 未知: ${p.ws_id}\n`);
-        return;
-      }
-      session.notifyStopFromHook(p.transcript_path, p.last_text);
-    });
-
     // ── 2.5 注册 work session IPC request handlers ──
     this.ipcServer.setRequestHandler(IPC_METHODS.WORK_SPAWN, async (params, chatId) => {
       const p = params as WorkSpawnParams;
@@ -289,23 +280,10 @@ export class Supervisor extends EventEmitter {
         model: p.model || this.workDefaultModel || this.opts.defaultModel,
         effort: p.effort || this.workDefaultEffort || 'high',
         fast: this.workDefaultFast ?? false,
-        // 批2: work CLI 的 Stop hook 靠 env 端口回连 supervisor（仿 channel-cli 显式注入，不能靠 process.env 继承）
-        supervisorPort: this.ipcServer.getPort(),
-        stopSinkPath: path.join(this.opts.appRoot, 'scripts', 'work-stop-sink.cjs'),
       });
       this.workSessions.set(session.id, session);
-      // 完工去重兜底（闭包 per-session）：见 WORK_STOP_PUSH_DEDUP_MS 注释。
-      let lastStopPushAt = 0;
+      // headless：每轮 result 事件确定性 emit 一次 'stopped'，无需 idle 猜停/15s 去重——直接 push 给品品。
       session.on('stopped', (info: WorkSessionStopInfo) => {
-        const now = Date.now();
-        if (now - lastStopPushAt < WORK_STOP_PUSH_DEDUP_MS) {
-          process.stderr.write(
-            `[supervisor] work-stopped 去重跳过：session=${session.id} 距上次推送 ${now - lastStopPushAt}ms` +
-              ` < ${WORK_STOP_PUSH_DEDUP_MS}ms（reason=${info.stop_reason}）—— 同一次停止的重复信号\n`,
-          );
-          return;
-        }
-        lastStopPushAt = now;
         const pushed = this.ipcServer.pushWorkStopped(session.opts.originChatId, {
           session_id: session.id,
           result: info.result,
@@ -610,6 +588,109 @@ export class Supervisor extends EventEmitter {
     }
   }
 
+  /** 崩溃/IPC断线统一熔断决策：记一次故障，返回 true=可立即重启 / false=已转入慢速自愈（调用方勿再重启）。
+   *  crashed 链与 IPC 断线自愈链共用 crashState，单源防 flapping、避免双重计数/双重启。 */
+  private registerFaultAndShouldRestart(chatId: string): boolean {
+    const now = Date.now();
+    let state = this.crashState.get(chatId);
+    if (!state) {
+      state = { count: 0, windowStart: now };
+      this.crashState.set(chatId, state);
+    }
+    // 已进入有界慢速自愈期：重启与计数都交给慢速链（避免"快重启 + 慢速重启"双重启 + 计数窗口重置打架）。
+    if (state.slowRecoveryActive) {
+      process.stderr.write(
+        `[supervisor] channel ${chatId.slice(-8)} 慢速自愈期内又故障，等下次慢速尝试\n`,
+      );
+      return false;
+    }
+    if (now - state.windowStart > 5 * 60_000) {
+      state.windowStart = now;
+      state.count = 0;
+    }
+    state.count++;
+    if (state.count > 3) {
+      // 不再"永久等手动"，转入有界慢速自愈（每 5min 一次、上限 6 次≈30min）；仍救不回才通知Owner交手动 [↻]。
+      state.slowRecoveryActive = true;
+      state.recoveryCount = 0;
+      process.stderr.write(
+        `[supervisor] channel ${chatId.slice(-8)} 5min 内故障 ${state.count} 次，转入慢速自愈（每5min，上限6次）\n`,
+      );
+      this.scheduleSlowRecovery(chatId);
+      return false;
+    }
+    return true;
+  }
+
+  /** 清掉某 chat 待触发的 IPC 断线自愈 grace 定时器。重连成功 / 主动 pause / stop 时调——
+   *  防定时器泄漏 + 防"pause 后立即被消息动态 respawn、grace 到点误杀新 CLI"（新 CLI 握手前 status 已是 running）。 */
+  private clearGraceTimer(chatId: string): void {
+    const gt = this.graceTimers.get(chatId);
+    if (gt) {
+      clearTimeout(gt);
+      this.graceTimers.delete(chatId);
+    }
+  }
+
+  /** D3 抗断线：IPC client 断开后启动 grace 窗口。窗口内 MCP 自身重连(client-hello)会取消本定时器；
+   *  否则判定 CLI 僵尸（PTY 活但 MCP/IPC 死）→ recoverDeadChannel 杀掉重生。
+   *  grace=15s 覆盖 MCP 重连前 3 次(2/4/8s≈14s)，正常重连(1-2次,2-6s)早回；仍不回则该频道大概率真坏。 */
+  private scheduleIpcRecovery(chatId: string): void {
+    if (this.graceTimers.has(chatId)) return; // 已有定时器在跑，不重复
+    const timer = setTimeout(() => {
+      this.graceTimers.delete(chatId);
+      this.recoverDeadChannel(chatId);
+    }, 15_000);
+    this.graceTimers.set(chatId, timer);
+  }
+
+  /** grace 期满仍无 IPC client → 该频道 MCP 僵尸，恢复处理。 */
+  private recoverDeadChannel(chatId: string): void {
+    if (this.ipcServer.hasClient(chatId)) return; // 边缘时刻已重连（hello 与 grace 到点竞态）
+    const cli = this.channels.get(chatId);
+    if (!cli) return; // 已被 pause/daily-restart evict（grace 15s 足够让主动 stop 的 channels.delete 先发生）
+    if (cli.status !== 'running') return; // 非 running（stopped/failed/starting）→ pause/crashed 等路径接管，不抢
+    const standby = this.channelConfigStore.isStandby(chatId);
+    const hasPending = (this.pendingInbound.get(chatId)?.length ?? 0) > 0;
+    process.stderr.write(
+      `[supervisor] channel ${chatId.slice(-8)} IPC 断 15s 未重连 → 判定 MCP 僵尸，恢复（standby=${standby}, pending=${hasPending}）\n`,
+    );
+    cli.stop(); // 树杀僵尸 PTY + 残余 MCP server
+    this.channels.delete(chatId);
+    // 睡眠频道且无积压 → 回睡，不重生（与 crashed 的 standby 分支一致，靠下条消息唤醒）
+    if (standby && !hasPending) {
+      process.stderr.write(
+        `[supervisor] channel ${chatId.slice(-8)} 睡眠态且无积压 → 回睡，不重生（下条消息唤醒）\n`,
+      );
+      return;
+    }
+    if (!this.registerFaultAndShouldRestart(chatId)) return; // 超频 → 慢速自愈接管
+    this.spawnChannelCli(chatId, this.channelConfigStore.get(chatId)?.display_name);
+    this.notifyAutoRecovered(chatId);
+  }
+
+  /** D3 自愈重生后给该 chat 发一句飞书提示（Owner要"吭一声"）。延迟到新 CLI 大概率起来后发。 */
+  private notifyAutoRecovered(chatId: string): void {
+    setTimeout(() => {
+      void getFeishuClient()
+        .im.v1.message.create({
+          data: {
+            receive_id: chatId,
+            msg_type: 'text',
+            content: JSON.stringify({
+              text: '（我刚跟服务器断了一下线，已经自动重连好啦～断线期间你发的消息我补看到了，这就回你）',
+            }),
+          },
+          params: { receive_id_type: 'chat_id' },
+        })
+        .catch((e: unknown) => {
+          process.stderr.write(
+            `[supervisor] 自愈提示发送失败 chat=${chatId.slice(-8)}: ${e instanceof Error ? e.message : e}\n`,
+          );
+        });
+    }, 8_000);
+  }
+
   getWorkSessionStats(): Array<ReturnType<WorkSession['getStats']>> {
     return [...this.workSessions.values()].map((ws) => ws.getStats());
   }
@@ -720,6 +801,7 @@ export class Supervisor extends EventEmitter {
    *  evict 后频道 OFF——下条入站消息经 onFeishuMessage 的"!channels.has → 动态 spawn"热路径自动唤醒。
    *  cli.stop() 置 userStopped=true，PTY 退出不触发 crash 自愈重 spawn。 */
   pauseChannel(chatId: string): void {
+    this.clearGraceTimer(chatId); // 主动关闭 → 清待触发的断线自愈定时器，防 evict 后误杀重生的新 CLI
     const cli = this.channels.get(chatId);
     if (cli) {
       cli.stop();
@@ -869,38 +951,10 @@ export class Supervisor extends EventEmitter {
         );
         return;
       }
-      const now = Date.now();
-      let state = this.crashState.get(chatId);
-      if (!state) {
-        state = { count: 0, windowStart: now };
-        this.crashState.set(chatId, state);
-      }
-      // 已进入有界慢速自愈期：快重启与计数都交给慢速链，本次崩溃只记日志
-      // （避免"快重启 + 慢速重启"双重启 + 计数窗口被重置打架）。
-      if (state.slowRecoveryActive) {
-        process.stderr.write(
-          `[supervisor] channel ${chatId.slice(-8)} 慢速自愈期内又崩，等下次慢速尝试\n`,
-        );
-        return;
-      }
-      if (now - state.windowStart > 5 * 60_000) {
-        state.windowStart = now;
-        state.count = 0;
-      }
-      state.count++;
-      if (state.count > 3) {
-        // 抗断线加固：不再"永久等手动"，转入有界慢速自愈（每 5min 一次、上限 6 次≈30min）；
-        // 仍救不回才发飞书通知Owner并彻底交手动 [↻]——绝不无限刷。
-        state.slowRecoveryActive = true;
-        state.recoveryCount = 0;
-        process.stderr.write(
-          `[supervisor] channel ${chatId.slice(-8)} 5min 内崩 ${state.count} 次，转入慢速自愈（每5min，上限6次）\n`,
-        );
-        this.scheduleSlowRecovery(chatId);
-        return;
-      }
+      // 计数 + 熔断决策走公共方法（与 IPC 断线自愈链共用 crashState，单源防 flapping）。
+      if (!this.registerFaultAndShouldRestart(chatId)) return;
       process.stderr.write(
-        `[supervisor] channel ${chatId.slice(-8)} 崩溃，5s 后自动重启 (count=${state.count})\n`,
+        `[supervisor] channel ${chatId.slice(-8)} 崩溃，5s 后自动重启\n`,
       );
       setTimeout(() => {
         const ch = this.channels.get(chatId);
@@ -1428,6 +1482,7 @@ export class Supervisor extends EventEmitter {
     this.channelUsage.delete(chatId);
     this.crashState.delete(chatId); // D1: 频道彻底停掉才清熔断计数（正常 respawn 不清=熔断跨 respawn 持续）
     this.pendingInbound.delete(chatId); // D2: 清未就绪缓冲队列，避免泄漏
+    this.clearGraceTimer(chatId); // D3: 清待触发的断线自愈定时器
     process.stderr.write(`[supervisor] stop channel: ${chatId}\n`);
     this.emit('channel-state-changed', chatId);
     return true;

@@ -115,7 +115,7 @@ function effortClass(effort: string): string {
 
 // ── 频道行渲染 ──
 // ⚠️ model 名与 [1m] 之间必须有空格；sonnet 不带 [1m]（Owner 2026-05-31 定）
-const MODEL_OPTIONS = ['claude-opus-4-8 [1m]', 'claude-opus-4-7 [1m]', 'claude-opus-4-6 [1m]', 'claude-sonnet-4-6'];
+const MODEL_OPTIONS = ['claude-opus-4-8 [1m]', 'claude-opus-4-7 [1m]', 'claude-opus-4-6 [1m]', 'claude-sonnet-5', 'claude-sonnet-4-6'];
 const EFFORT_OPTIONS = ['low', 'medium', 'high', 'max'];
 
 /** 生成 model <option> 列表。current 不在 MODEL_OPTIONS 时补一个（兼容旧持久化值，避免 select 静默回退第一项后被覆盖）。 */
