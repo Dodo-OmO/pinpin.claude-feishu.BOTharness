@@ -1,5 +1,5 @@
 // read_attachment tool——读非图片附件的文本内容（xlsx/docx/csv/txt/md/json 等）。
-// 起因：品品 Read 工具不解析 xlsx/docx 二进制；示例工作群要能读串联单(xlsx)/台本(docx)。
+// 起因：品品 Read 工具不解析 xlsx/docx 二进制，群里发来的表格/文档读不了。
 // xlsx→exceljs 各表转文本；docx→mammoth 抽正文；纯文本直读；图片/pdf 引导用 Read。
 
 import fs from "node:fs";

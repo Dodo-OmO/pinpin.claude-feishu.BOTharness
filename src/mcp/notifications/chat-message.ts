@@ -31,7 +31,7 @@ import {
 } from "../db/database.js";
 import type { RelayPayload } from "../db/types.js";
 import { logBackground } from "../utils/background-log.js";
-import { isBallPartner, pad2 } from "../utils/helper.js";
+import { pad2 } from "../utils/helper.js";
 import { PARSERS, type ParseCtx } from "./parse-inbound.js";
 
 // 本地时间格式化 YYYY-MM-DD HH:MM（用系统时区=Owner机器所在时区）——
@@ -71,8 +71,6 @@ const VOICE_DICE_THRESHOLD = 0.1;
 // 防串台 envelope 钉频：真人/bot 入站每 N 条钉一次表态提醒（per-chat 计数、进程内，重启重置）
 const REPLY_DISCIPLINE_EVERY = 20;
 const inboundReplyCount = new Map<string, number>();
-// 示例工作组频道专属维护自检提醒：与回复纪律同周期但错开半个间隔（回复在第 1/21/41，维护在第 11/31/51），不挤同一条
-const BALL_MAINTAIN_OFFSET = REPLY_DISCIPLINE_EVERY / 2;
 
 let botAppId = "";
 export function setBotAppId(appId: string): void {
@@ -119,7 +117,6 @@ export async function handleInboundMessage(
     chatId,
     payload,
     rawContent,
-    isBallPartner: isBallPartner(chatId),
     senderOpenId,
   };
   const parsed = await parser(ctx);
@@ -178,11 +175,6 @@ export async function handleInboundMessage(
     (replyCnt - 1) % REPLY_DISCIPLINE_EVERY === 0
       ? "\n\n[想回消息让别人看见必调pinpin_reply系列工具（多选/重选/单选）；都不回 → 调 pinpin_no_reply 。警惕多轮纯AI之间回声➡️收声。前台回复短而精，忌长篇大论。保持爱抖包袱、不拍马屁、可爱毒舌人格⬅️你不是AI助理，是有灵魂的！]"
       : "";
-  // 示例工作组频道专属：每 REPLY_DISCIPLINE_EVERY 条钉一次维护自检，错开回复纪律半个间隔
-  const maintenanceReminder =
-    isBallPartner(chatId) && (replyCnt - 1) % REPLY_DISCIPLINE_EVERY === BALL_MAINTAIN_OFFSET
-      ? "\n\n[随手自检：有没有新的执行/台本侧要求该落进本地 MD？本群 todo 有没有新进展该维护？→ 维护完群里吱一声。]"
-      : "";
   const parentId = payload.parent_id;
   const replyToQuote = parentId
     ? await resolveReplyQuote(parentId, botAppId, chatId)
@@ -218,7 +210,7 @@ export async function handleInboundMessage(
   const speakWatchHits = pendingWatches.filter((j) => j.chat_id === chatId);
 
   const notifParams = sanitizeChannelParams(
-    text + voiceDirective + replyDiscipline + maintenanceReminder,
+    text + voiceDirective + replyDiscipline,
     {
       source: "feishu-channel",
       chat_id: chatId,

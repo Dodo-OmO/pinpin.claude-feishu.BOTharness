@@ -20,12 +20,11 @@
 
 import { logBackground } from "../utils/background-log.js";
 
-export type CronOwnerKind = "tea" | "owner" | "ballpartner";
+export type CronOwnerKind = "tea" | "owner";
 
 const OWNER_ENV_MAP: Record<CronOwnerKind, string> = {
   tea: "PINPIN_TEA_CHAT_ID",
   owner: "PINPIN_OWNER_CHAT_ID",
-  ballpartner: "BALL_PARTNER_CHAT_ID",
 };
 
 const warned = new Set<string>();

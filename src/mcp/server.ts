@@ -52,7 +52,6 @@ import './cron/weekly-recap.js';
 import './cron/memory-audit.js';
 import './cron/free-activity.js';
 import './cron/daily-diary.js';
-import './cron/ball-partner-tasks.js';
 import { schedulerStart, schedulerStop } from './cron/scheduled-jobs-tick.js';
 // 阶段 4 批次 1 步骤 1.5：read_chat_log tool
 import { readChatLogTool, handleReadChatLog } from './tools/read-chat-log.js';

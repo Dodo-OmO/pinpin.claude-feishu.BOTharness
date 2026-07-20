@@ -19,7 +19,6 @@ export interface ParseCtx {
   chatId: string;
   payload: FeishuInboundMessagePayload;
   rawContent: string;
-  isBallPartner: boolean;
   senderOpenId: string;
 }
 
@@ -115,14 +114,12 @@ export async function parseText(ctx: ParseCtx): Promise<string | null> {
 }
 
 export async function parseImage(ctx: ParseCtx): Promise<string | null> {
-  const { payload, rawContent, chatId } = ctx;
+  const { payload, rawContent } = ctx;
   try {
     const imageKey = (JSON.parse(rawContent || "{}") as { image_key?: string }).image_key;
     if (!imageKey) return null;
-    const localPath = await saveInboundImage(payload.message_id, imageKey, chatId);
-    return ctx.isBallPartner
-      ? `[图片] 有人发了图片，已存本地原图——**这轮先用 Read 工具读这张图、看清内容再回应**：${localPath}`
-      : `[图片] 有人发了图片，已压缩存本地——**这轮先用 Read 工具读这张图、看清内容再回应**：${localPath}`;
+    const localPath = await saveInboundImage(payload.message_id, imageKey);
+    return `[图片] 有人发了图片，已压缩存本地——**这轮先用 Read 工具读这张图、看清内容再回应**：${localPath}`;
   } catch (e) {
     process.stderr.write(
       `[chat-message] 图片处理失败 msg_id=${payload.message_id}: ${e instanceof Error ? e.message : e}\n`,
@@ -148,10 +145,8 @@ export async function parseFile(ctx: ParseCtx): Promise<string | null> {
       });
       return `[文件附件「${parsed.file_name ?? "未命名"}」] 你发的文件默认没自动存（你本机通常已有）。要存进库就回复这条文件跟我说"存下来"，我用 pinpin_save_file 给你存。`;
     }
-    const localPath = await saveInboundFile(payload.message_id, parsed.file_key, parsed.file_name ?? "file", chatId);
-    return ctx.isBallPartner
-      ? `[文件附件「${parsed.file_name ?? "未命名"}」] 已存本地——需要看内容就用 read_attachment 工具读（xlsx/docx 都能读），或 Read：${localPath}`
-      : `[文件附件「${parsed.file_name ?? "未命名"}」] 已备份到本地，默认不读——需要时再 Read：${localPath}`;
+    const localPath = await saveInboundFile(payload.message_id, parsed.file_key, parsed.file_name ?? "file");
+    return `[文件附件「${parsed.file_name ?? "未命名"}」] 已备份到本地，默认不读——需要时再 Read：${localPath}`;
   } catch (e) {
     process.stderr.write(
       `[chat-message] 文件处理失败 msg_id=${payload.message_id}: ${e instanceof Error ? e.message : e}\n`,
@@ -264,7 +259,7 @@ export async function parsePost(ctx: ParseCtx): Promise<string | null> {
     const imagePaths: string[] = [];
     for (const imgKey of allImageKeys) {
       try {
-        imagePaths.push(await saveInboundImage(payload.message_id, imgKey, chatId));
+        imagePaths.push(await saveInboundImage(payload.message_id, imgKey));
       } catch (imgErr) {
         process.stderr.write(
           `[chat-message] post 内嵌图片下载失败 key=${imgKey}: ${imgErr instanceof Error ? imgErr.message : imgErr}\n`,

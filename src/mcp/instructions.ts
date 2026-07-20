@@ -15,7 +15,6 @@ import fs from "node:fs";
 import path from "node:path";
 import { loadMemoryBlock } from "./utils/memory.js";
 import { loadBotRoster } from "./utils/bot-roster.js";
-import { isBallPartner } from "./utils/helper.js";
 
 // 同步休眠 ms 毫秒——Atomics.wait 在 SharedArrayBuffer 上等待固定时间
 // 用途：readVaultFile retry 间的等待。buildInstructions 是 sync，不能用 setTimeout。
@@ -55,24 +54,6 @@ function loadMoodCurrentBlock(vaultRoot: string): string {
   const raw = readVaultFile(vaultRoot, "记忆系统\\心境\\当前.md");
   if (!raw.trim()) return "";
   return `---\n[当前心境]\n${raw}`;
-}
-
-// 示例工作群专属规则：注入 `频道规则\示例工作群\` 下全部 MD（项目背景/台本要求/
-// 执行要求/资料地图），每次重启必读。非该群返回 ""（其它频道零影响）。品品改这些 MD 后重启生效。
-function loadChannelRules(vaultRoot: string, chatId: string): string {
-  if (!isBallPartner(chatId)) return "";
-  const relDir = path.join("频道规则", "示例工作群");
-  let files: string[];
-  try {
-    files = fs.readdirSync(path.join(vaultRoot, relDir)).filter((f) => f.endsWith(".md")).sort();
-  } catch {
-    return "";
-  }
-  const blocks = files
-    .map((f) => readVaultFile(vaultRoot, path.join(relDir, f)))
-    .filter((b) => b.trim());
-  if (blocks.length === 0) return "";
-  return `---\n[本群工作规则·每次必读]\n\n${blocks.join("\n\n")}`;
 }
 
 // 按当前 chat 注入相关人物画像。chatId 由 supervisor 传入（一聊一进程）。
@@ -196,7 +177,6 @@ export function buildInstructions(vaultRoot: string, chatId: string): string {
     loadBotRoster(),       // 群里已知 bot 花名册
     loadMemoryBlock(vaultRoot),
     loadPersonaProfiles(vaultRoot, chatId),   // 按需注入相关人物画像
-    loadChannelRules(vaultRoot, chatId),      // 示例工作组群专属规则（必读；非该群为空）
     loadMoodCurrentBlock(vaultRoot),          // 心境放最后保 prompt cache
   ]
     .filter((block) => block.trim().length > 0)

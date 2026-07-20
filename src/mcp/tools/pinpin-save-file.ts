@@ -1,7 +1,7 @@
 // pinpin_save_file——把Owner刚发/刚回复的、默认没自动存的文件存进本地库。
 // 背景：owner-skip 默认不存Owner自己发的文件（她常发本机已有的文件给别人），
 // 但她说"存下来"时品品调本工具。文件句柄由 save-target 槽位提供（parseFile / 回复 owner 文件时写），
-// 品品只需传 chat_id，不碰 message_id。下载落盘复用 saveInboundFile（落点按对话：示例工作组→群附件\文件，私聊→他人附件）。
+// 品品只需传 chat_id，不碰 message_id。下载落盘复用 saveInboundFile（统一落 vault\他人附件）。
 
 import { getPendingSaveFile, clearPendingSaveFile } from "../utils/save-target.js";
 import { saveInboundFile } from "../utils/media-attachments.js";
@@ -42,7 +42,7 @@ export async function handlePinpinSaveFile(
     };
   }
   try {
-    const localPath = await saveInboundFile(target.fileMessageId, target.fileKey, target.fileName, chat_id);
+    const localPath = await saveInboundFile(target.fileMessageId, target.fileKey, target.fileName);
     clearPendingSaveFile(chat_id);
     return {
       content: [{ type: "text", text: JSON.stringify({ saved: true, file_name: target.fileName, path: localPath }) }],
