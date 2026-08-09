@@ -143,12 +143,9 @@ export class SupervisorCronRunner {
       schedule: { kind: 'daily', h: STARTUP_HOUR, m: STARTUP_MIN },
       handler: () => {
         process.stderr.write('[supervisor-cron] daily-restart-startup 04:10 触发，重启所有常驻频道\n');
-        // ① 03:55 stop 后仍在 Map（status=stopped）的常驻频道 → 走 start() 复活实例。
-        for (const c of this.supervisor.getChannelCliStats()) {
-          if (c.status === 'stopped') {
-            this.supervisor.getChannel(c.chat_id)?.start();
-          }
-        }
+        // ① 03:55 stop 后仍在 Map（status=stopped）的常驻频道 → 错峰 start() 复活实例
+        //   （与 spawnAllKnownChannels 共用错峰闸，防全频道同 tick 齐开 IO 风暴 → MCP 连接超时聋频道）。
+        this.supervisor.startStoppedChannelsStaggered();
         // ② 被 /下线 / ✕关闭 evict 出 Map 的常驻频道（不在 ① 的遍历里）→ spawnAllKnownChannels 重拉。
         //    它跳过睡眠归属（睡眠频道维持"重启不上线、靠消息唤醒"），且对已在 Map 的幂等跳过。
         this.supervisor.spawnAllKnownChannels();

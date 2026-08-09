@@ -8,7 +8,7 @@ import path from "node:path";
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
 import { getFeishuClient } from "./feishu-send.js";
 import { insertMarkdownBlocks } from "./create-cloud-doc.js";
-import { getVaultRoot } from "../utils/helper.js";
+import { getVaultRoot, dateYYYYMM } from "../utils/helper.js";
 
 type Client = ReturnType<typeof getFeishuClient>;
 
@@ -119,7 +119,7 @@ export async function handleEditCloudDoc(args: { doc_token: string; markdown: st
       try {
         const cur = await client.docx.v1.document.rawContent({ path: { document_id: doc_token } });
         rawContent = cur.data?.content ?? "";
-        const backupDir = path.join(getVaultRoot(), "系统日志", "云文档替换备份");
+        const backupDir = path.join(getVaultRoot(), "系统日志", "云文档替换备份", dateYYYYMM());
         try {
           fs.mkdirSync(backupDir, { recursive: true });
           const backupFile = path.join(backupDir, `${doc_token}-${Date.now()}.md`);

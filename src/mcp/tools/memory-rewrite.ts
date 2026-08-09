@@ -12,7 +12,7 @@ import path from "node:path";
 import { dateYYYYMMDD, getVaultRoot } from "../utils/helper.js";
 import { MEMORY_FILE } from "../utils/memory.js";
 
-const BACKUP_DIR = path.join(getVaultRoot(), "记忆系统", "备份");
+const BACKUP_ROOT = path.join(getVaultRoot(), "记忆系统", "备份");
 
 // 大小阈值：新内容 byte 不得 < 旧 50%（极宽松，防完全失误，不挡正常增删）
 const MIN_SIZE_RATIO = 0.5;
@@ -29,7 +29,7 @@ export const memoryRewriteTool: Tool = {
     type: "object",
     properties: {
       new_content: { type: "string", description: "50 行全文" },
-      summary: { type: "string", description: "本周改动摘要（写到 vault\\记忆系统\\记忆自检\\YYYY-WW.md 的 sub-agent 用）" },
+      summary: { type: "string", description: "本周改动摘要（写到 vault\\记忆系统\\记忆自检\\YYYY-MM\\YYYY-Www.md 的 sub-agent 用）" },
     },
     required: ["new_content"],
   },
@@ -76,11 +76,13 @@ export async function handleMemoryRewrite(args: { new_content: string; summary?:
     };
   }
 
-  // 备份③（写盘前先备份）
+  // 备份③（写盘前先备份，按备份日期分月，不是当前时刻另算）
   try {
-    if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const backupDate = dateYYYYMMDD();
+    const backupDir = path.join(BACKUP_ROOT, backupDate.slice(0, 7));
+    if (!fs.existsSync(backupDir)) fs.mkdirSync(backupDir, { recursive: true });
     if (fs.existsSync(MEMORY_FILE)) {
-      const backupPath = path.join(BACKUP_DIR, `永存记忆-自动备份-${dateYYYYMMDD()}.md`);
+      const backupPath = path.join(backupDir, `永存记忆-自动备份-${backupDate}.md`);
       fs.copyFileSync(MEMORY_FILE, backupPath);
     }
   } catch (e) {

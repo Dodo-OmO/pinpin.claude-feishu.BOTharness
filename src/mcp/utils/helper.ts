@@ -40,7 +40,8 @@ export function getVaultRoot(): string {
   return process.env.PINPIN_VAULT_DIR ?? process.env.BASE_PROJECT_DIR ?? "/path/to/obsidian-vault";
 }
 
-/** ISO 8601 周数 + 年份——给永存记忆自检 / 周回顾文件命名用 */
+/** ISO 8601 周数 + 年份——给永存记忆自检 / 周回顾文件命名用。
+ *  要该周归哪个月目录 → 用 isoWeekToMonth(year, week)（两者同一套算法）。 */
 export function getISOWeek(d: Date = new Date()): { year: number; week: number } {
   const target = new Date(d.valueOf());
   const dayNr = (d.getDay() + 6) % 7;
@@ -49,4 +50,16 @@ export function getISOWeek(d: Date = new Date()): { year: number; week: number }
   const diff = target.getTime() - firstThursday.getTime();
   const week = 1 + Math.round(diff / (7 * 24 * 60 * 60 * 1000));
   return { year: target.getFullYear(), week };
+}
+
+/** 从任意 ISO (year, week) 反推该周周四所在月（YYYY-MM）——复用 getISOWeek 同一套算法：
+ *  取该年 Jan4 所在周的周一，加 (week-1)*7+3 天 = 目标周周四。 */
+export function isoWeekToMonth(year: number, week: number): string {
+  const jan4 = new Date(year, 0, 4);
+  const jan4DayNr = (jan4.getDay() + 6) % 7;
+  const week1Monday = new Date(jan4.valueOf());
+  week1Monday.setDate(jan4.getDate() - jan4DayNr);
+  const thursday = new Date(week1Monday.valueOf());
+  thursday.setDate(week1Monday.getDate() + (week - 1) * 7 + 3);
+  return dateYYYYMM(thursday);
 }

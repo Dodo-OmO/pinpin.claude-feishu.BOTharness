@@ -155,7 +155,7 @@ export interface WorkSpawnParams {
   origin_chat_id: string;
   work_dir: string;
   goal: string;
-  /** 可选——默认 supervisor 用 opus 4.6 [1m] / high */
+  /** 可选——不传则用 supervisor 的默认（见 supervisor/index.ts defaultModel）/ high */
   model?: string;
   effort?: string;
 }

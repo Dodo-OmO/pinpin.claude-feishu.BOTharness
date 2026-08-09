@@ -131,8 +131,9 @@ import {
   handleSendPollCard,
   handleConfirmDangerousAction,
 } from './tools/cards.js';
-import { appendFileSync } from 'node:fs';
+import { appendFileSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
+import { getVaultRoot, dateYYYYMMDD } from './utils/helper.js';
 
 /** 黑匣子：把 MCP server 进程级崩溃/降级写盘留证。进程崩了重连代码随之死、launcher.log 接不到，
  *  故落到 vault 系统日志，下次复发可定位真凶。崩溃 handler 内只做最小同步写盘 + 退出，不碰复杂状态。 */
@@ -142,7 +143,10 @@ function recordMcpCrash(kind: string, detail: unknown): void {
     const stamp = new Date().toISOString();
     const stack = detail instanceof Error ? (detail.stack ?? detail.message) : String(detail);
     const line = `\n[${stamp}] [${kind}] chat=${chat}\n${stack}\n`;
-    const file = join(process.env.BASE_PROJECT_DIR ?? '.', '系统日志', 'mcp-crash.log');
+    const today = dateYYYYMMDD();
+    const dir = join(getVaultRoot(), '系统日志', 'mcp-crash', today.slice(0, 7));
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${today}.log`);
     appendFileSync(file, line, 'utf8');
   } catch {
     /* 黑匣子写盘失败不能再抛——静默兜底 */

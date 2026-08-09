@@ -157,6 +157,10 @@ export class ChannelCli extends EventEmitter {
       // 关闭 Claude Code 自动记忆（AutoMem）：品品已有永久记忆50条 + 日记/人物/心境整套记忆系统，
       // AutoMem 与之重复并行，关掉省启动注入 + 统一到 vault 一套记忆。
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
+      // MCP 启动连接超时 30s→60s（毫秒，官方 env）：launcher 重启时多频道 CLI+MCP 同时开机 IO 风暴，
+      // dist/mcp/server.js 冷启动实测 12.6s、峰值可超 30s；超时被 CLI 放弃且**永不重试**（文档+实测确认）
+      // → 频道表面正常实际永久聋。60s = 正常耗时 5 倍余量；配套 supervisor 就绪看门狗（90s 无 hello 重启）兜底。
+      MCP_TIMEOUT: '60000',
       // 自动压缩走 CLI 原生 auto-compact：阈值=有效窗口×此百分比（只能调低不能调高），到点就地原生压缩
       // （自动留摘要 + system prompt/人格/CLAUDE.md 从磁盘重注入不丢），无需 supervisor 监测（D-6 已回滚）。
       CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(this.opts.autoCompactPct ?? DEFAULT_AUTOCOMPACT_PCT),

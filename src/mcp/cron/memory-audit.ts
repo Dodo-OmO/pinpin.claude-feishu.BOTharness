@@ -12,7 +12,7 @@ if (isOwnerOfCron("owner")) {
       trigger: "memory-audit",
       chat_id: process.env.PINPIN_OWNER_CHAT_ID,
       body:
-        "🧠 永存记忆自检触发（周日 23:30）。请 Task 派 memory-audit-agent。sub-agent 返回摘要后主 session 写到 vault\\记忆系统\\记忆自检\\YYYY-WW.md。\n",
+        "🧠 永存记忆自检触发（周日 23:30）。请 Task 派 memory-audit-agent。sub-agent 返回摘要后主 session 写到 vault\\记忆系统\\记忆自检\\YYYY-MM\\YYYY-Www.md（如 2026-07\\2026-W30.md）。\n",
     });
   });
 }

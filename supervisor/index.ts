@@ -114,6 +114,10 @@ export class Supervisor extends EventEmitter {
   /** D3: chat_id → IPC 断线自愈 grace 定时器。断线后等窗口；MCP 自身重连(client-hello)取消之，
    *  否则判定 CLI 僵尸（PTY 活但 MCP/IPC 死）→ 杀掉重生。 */
   private graceTimers = new Map<string, NodeJS.Timeout>();
+  /** 就绪看门狗：chat_id → spawn 后等首次 IPC hello 的定时器。90s（> MCP_TIMEOUT 60s + CLI 启动余量）
+   *  未 hello = CLI 活着但 MCP 连接已被放弃（CLI 对超时 MCP 永不重试）→ 重启该频道自愈。
+   *  与 graceTimers 互补：本表管"从未握手"，graceTimers 管"握手过后断线"。 */
+  private helloWatchdogs = new Map<string, NodeJS.Timeout>();
   /** D2: chat_id → CLI 未就绪时缓冲的入站消息（带入队时间戳）。CLI ready（client-hello）后 flush 投递。
    *  每 chat 上限 50 条（超丢最旧）、flush 时丢弃入队 > 10min 的过期消息。stopChannel 时清。 */
   private pendingInbound = new Map<string, Array<{ msg: FeishuInboundMessagePayload; enqueuedAt: number }>>();
@@ -217,6 +221,8 @@ export class Supervisor extends EventEmitter {
       process.stderr.write(`[supervisor] IPC client up: chat=${info.chat_id} pid=${info.pid}\n`);
       // D3: MCP（重）连上 → 取消断线自愈 grace 定时器（自身重连成功，无需杀重生）
       this.clearGraceTimer(info.chat_id);
+      // 就绪看门狗：首次握手完成 → 取消
+      this.clearHelloWatchdog(info.chat_id);
       // 通知对应 ChannelCli 启动期结束（停止 auto-confirm 启动 prompts）
       this.channels.get(info.chat_id)?.emit('ipc-ready');
       // D2: CLI 已就绪 → flush 该 chat 在未就绪期间缓冲的入站消息
@@ -511,6 +517,9 @@ export class Supervisor extends EventEmitter {
     // 或 Electron 抢着退出，taskkill /F /T 也已先发，绝不留孤儿 claude.exe / MCP server）。
     for (const cli of this.channels.values()) cli.stop();
     this.channels.clear();
+    // 清所有就绪看门狗（restart() 复用实例，防 stale 定时器带旧 cli 引用晚触发）
+    for (const t of this.helloWatchdogs.values()) clearTimeout(t);
+    this.helloWatchdogs.clear();
     for (const ws of this.workSessions.values()) ws.end();
     this.workSessions.clear();
     this.cronRunner.stop();
@@ -543,8 +552,9 @@ export class Supervisor extends EventEmitter {
         this.crashState.delete(chatId);
         return;
       }
-      if (ch.status === 'running') {
-        // 上次尝试已稳定运行满 5min → 自愈成功，重置熔断状态
+      if (ch.status === 'running' && this.ipcServer.hasClient(chatId)) {
+        // 上次尝试已稳定运行满 5min 且 MCP 已握手 → 自愈成功，重置熔断状态
+        // （仅 running 不够：聋频道 = running 但无 IPC client，不能误判成功）
         process.stderr.write(
           `[supervisor] channel ${chatId.slice(-8)} 慢速自愈成功，频道已稳定运行\n`,
         );
@@ -563,7 +573,16 @@ export class Supervisor extends EventEmitter {
       process.stderr.write(
         `[supervisor] channel ${chatId.slice(-8)} 慢速自愈第 ${state.recoveryCount}/6 次尝试重启\n`,
       );
-      if (ch.status === 'failed') ch.start();
+      if (ch.status === 'failed') {
+        ch.start();
+      } else if (ch.status === 'running' && !this.ipcServer.hasClient(chatId)) {
+        // 聋频道（running 但从未/不再握手）→ stop 后延迟重启（与就绪看门狗同路径，同款 jitter 错峰）
+        ch.stop();
+        setTimeout(() => {
+          const c = this.channels.get(chatId);
+          if (c === ch && c.status === 'stopped') c.start();
+        }, 1_500 + Math.floor(Math.random() * 3_000));
+      }
       this.scheduleSlowRecovery(chatId);
     }, 5 * 60_000);
   }
@@ -620,6 +639,38 @@ export class Supervisor extends EventEmitter {
       return false;
     }
     return true;
+  }
+
+  /** 就绪看门狗上膛：每次 CLI spawn（'started'）后调。90s 内该 chat 首次 IPC hello 到达则由
+   *  clearHelloWatchdog 取消；到点仍无 hello 且 CLI 还"活着"（running 但无 IPC client）→ 记一次故障
+   *  （与崩溃共用熔断，防无限循环）→ stop + 重启。二次启动时 IO 风暴已过，大概率快速握手成功。 */
+  private armHelloWatchdog(chatId: string, cli: ChannelCli): void {
+    this.clearHelloWatchdog(chatId);
+    const timer = setTimeout(() => {
+      this.helloWatchdogs.delete(chatId);
+      if (this.channels.get(chatId) !== cli) return; // 已被 evict / 替换
+      if (cli.status !== 'running') return; // 崩溃/停止路径已接管
+      if (this.ipcServer.hasClient(chatId)) return; // 已握手（保险二查）
+      process.stderr.write(
+        `[supervisor] channel ${chatId.slice(-8)} spawn 后 90s 未完成 MCP 握手（CLI 已放弃连接且不重试）→ 自动重启该频道\n`,
+      );
+      if (!this.registerFaultAndShouldRestart(chatId)) return; // 熔断中→转慢速自愈链，不硬重启
+      cli.stop();
+      // 1.5s 基础 + 0~3s 随机 jitter：多频道同 tick 触发看门狗时错峰重 spawn，防重演并发 IO 风暴
+      setTimeout(() => {
+        const ch = this.channels.get(chatId);
+        if (ch === cli && ch.status === 'stopped') ch.start();
+      }, 1_500 + Math.floor(Math.random() * 3_000));
+    }, 90_000);
+    this.helloWatchdogs.set(chatId, timer);
+  }
+
+  private clearHelloWatchdog(chatId: string): void {
+    const t = this.helloWatchdogs.get(chatId);
+    if (t) {
+      clearTimeout(t);
+      this.helloWatchdogs.delete(chatId);
+    }
   }
 
   /** 清掉某 chat 待触发的 IPC 断线自愈 grace 定时器。重连成功 / 主动 pause / stop 时调——
@@ -781,19 +832,61 @@ export class Supervisor extends EventEmitter {
 
   /** spawn 所有已识别频道（飞书 chat.list + channel-config 持久化的，跳过睡眠归属）。start() 调（启动器一开全上线）、
    *  04:10 daily-restart 调（把被 /下线 evict 出 Map 的常驻频道也重新拉起）。spawnChannelCli 幂等，已在 Map 的跳过。 */
+  /** 错峰启动共用闸的下一空档时间戳。多频道 CLI+MCP 同 tick 齐开会造成 IO 风暴，
+   *  dist/mcp/server.js 启动被拖过 MCP 连接超时线 → 频道聋（同一根因也是就绪看门狗防的）。 */
+  private nextStaggerAt = 0;
+
+  /** 把一次频道启动动作排进错峰队列：与上一个排入动作至少隔 2s（空闲时立即执行）。
+   *  app 启动 spawnAllKnownChannels 与 04:10 daily-restart startStoppedChannelsStaggered 共用本闸，
+   *  两批混排也整体错峰。action 内部自带幂等/状态防御查。 */
+  private staggerChannelBoot(action: () => void): void {
+    const now = Date.now();
+    const at = Math.max(now, this.nextStaggerAt);
+    this.nextStaggerAt = at + 2_000;
+    const delay = at - now;
+    if (delay <= 0) {
+      action();
+    } else {
+      setTimeout(() => {
+        if (this.started) action();
+      }, delay);
+    }
+  }
+
+  /** 04:10 daily-restart 用：把 Map 内 status=stopped 的常驻频道错峰 start()（03:55 stop 不 evict 的那批）。 */
+  startStoppedChannelsStaggered(): void {
+    for (const [chatId, cli] of this.channels) {
+      if (cli.status !== 'stopped') continue;
+      this.staggerChannelBoot(() => {
+        const ch = this.channels.get(chatId);
+        if (ch === cli && ch.status === 'stopped') ch.start();
+      });
+    }
+  }
+
   spawnAllKnownChannels(): void {
+    // 本轮已排队集合：5a 排入的多数是延迟执行（尚未进 channels Map），5b 靠 channels.has 查不到，
+    // 用显式集合防同一 chatId 双占错峰槽位（活跃频道几乎必然同时在两份名单里）
+    const queued = new Set<string>();
     // 5a. 飞书 chat.list 拿到的群（含Owner已加入的群聊）
     for (const c of this.feishuPoll?.getChats() ?? []) {
       if (this.channelConfigStore.isStandby(c.chat_id)) continue; // 待机频道不自动拉起（有人说话才唤醒）
-      this.spawnChannelCli(c.chat_id, c.name);
+      if (this.channels.has(c.chat_id)) continue; // 已在 Map（spawnChannelCli 本就幂等）→ 不占错峰槽位
+      queued.add(c.chat_id);
+      this.staggerChannelBoot(() => {
+        if (!this.channels.has(c.chat_id)) this.spawnChannelCli(c.chat_id, c.name);
+      });
     }
     // 5b. 频道常驻：channel-config.json 持久化但飞书 chat.list 没返的（P2P 单聊 / 历史已识别群）
     const persistedIds = this.channelConfigStore.listChatIds();
     for (const chatId of persistedIds) {
-      if (this.channels.has(chatId)) continue; // 5a 已 spawn 跳过
+      if (queued.has(chatId)) continue; // 5a 本轮已排队跳过
+      if (this.channels.has(chatId)) continue; // 已在 Map 跳过
       if (this.channelConfigStore.isStandby(chatId)) continue; // 待机频道不自动拉起
       const persisted = this.channelConfigStore.get(chatId);
-      this.spawnChannelCli(chatId, persisted?.display_name);
+      this.staggerChannelBoot(() => {
+        if (!this.channels.has(chatId)) this.spawnChannelCli(chatId, persisted?.display_name);
+      });
     }
   }
 
@@ -915,6 +1008,8 @@ export class Supervisor extends EventEmitter {
     });
     // P1.2: 事件驱动 state push（替代 1Hz 心跳 race）—— 状态变即向 main 推
     cli.on('started', () => {
+      // 就绪看门狗：每次 spawn 都上膛，首次 IPC hello 时取消（client-hello handler 调 clear）
+      this.armHelloWatchdog(chatId, cli);
       this.emit('channel-state-changed', chatId);
     });
     // 手动重启（cli.restart()，仅启动器 [↻] 触发）= Owner人工介入 → 重置崩溃熔断计数。
@@ -926,6 +1021,7 @@ export class Supervisor extends EventEmitter {
     cli.on('stopped', () => {
       // P1.3: stopped 时清掉 per-CLI usage（chat_id 仍在但 session 没了，避免显示陈旧 %）
       this.channelUsage.delete(chatId);
+      this.clearHelloWatchdog(chatId); // 主动停止 → 看门狗随之撤（watchdog 自身重启路径除外，其到点前已 delete）
       this.emit('channel-state-changed', chatId);
     });
     cli.on('failed', () => this.emit('channel-state-changed', chatId));
@@ -934,6 +1030,7 @@ export class Supervisor extends EventEmitter {
     // D1: 计数存 this.crashState（实例级，key=chatId），不随闭包重建清零
     cli.on('crashed', () => {
       this.channelUsage.delete(chatId);
+      this.clearHelloWatchdog(chatId); // PTY 已死 → 本次 spawn 的看门狗作废（respawn 的 'started' 会重新上膛）
       this.emit('channel-state-changed', chatId);
       // 本 cli 已不在 Map（被 /下线 / 启动器✕ / 切睡眠 pauseChannel evict，或被新 spawn 替换）→ 非活跃频道的退出，不计数不重启。
       if (this.channels.get(chatId) !== cli) {

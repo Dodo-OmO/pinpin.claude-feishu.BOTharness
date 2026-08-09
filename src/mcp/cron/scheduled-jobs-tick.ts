@@ -87,7 +87,10 @@ async function fireJob(jobId: number): Promise<void> {
           `⏰ 定时任务触发（job_id=${job.id}）。\n` +
           `原始 hint：${job.context_hint ?? "（无）"}\n` +
           `payload: ${job.payload ?? "（无）"}\n` +
-          `请按品品风格说出原提醒内容。`,
+          // 分路判据跟着消息走（原来放在常驻 system prompt 里，一天只触发几次却每轮都烧）
+          `看上面「原始 hint」分两种走法：\n` +
+          `① **不以〔嗅探〕开头** = 有人明确托你提醒 → **立刻调 pinpin_reply_text 到本 chat 说出来**，按品品风格讲、一段话、别照抄 payload 原文，自然带"该 X 啦"的语气。不调 tool 就等于失约——本条 meta.intent=${job.intent ?? "soft"}，**hard 的失约更严重**（那是人家郑重托付你的）。\n` +
+          `② **以〔嗅探〕开头** = 你自己主动猜记的 → 先掂量：这事还成立吗？是不是早做完了？现在打扰值不值？值得 → 用商量确认的语气轻问（"你之前说…，搞定了吗 / 还要我盯不？"），别当板上钉钉硬报；不值得 → 调 pinpin_no_reply 悄悄跳过，**不算失约**。`,
         meta: { job_id: jobId, intent: job.intent },
       },
       { throwOnError: true }
