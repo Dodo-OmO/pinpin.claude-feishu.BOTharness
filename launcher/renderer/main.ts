@@ -418,7 +418,7 @@ function wireChannelModal(): void {
     if (!modalChatId) return;
     let v = Math.round(Number(compactInp.value));
     if (!Number.isFinite(v)) v = 25;
-    v = Math.max(20, Math.min(50, v));
+    v = Math.max(20, Math.min(70, v));
     compactInp.value = String(v);
     void window.pinpin.channel.setCompactThreshold(modalChatId, v);
   });
@@ -715,7 +715,7 @@ async function init(): Promise<void> {
     const df = (document.getElementById('default-fast') as HTMLInputElement | null)?.checked ?? false;
     let dc = Math.round(Number((document.getElementById('default-compact') as HTMLInputElement).value));
     if (!Number.isFinite(dc)) dc = 25;
-    dc = Math.max(20, Math.min(50, dc));
+    dc = Math.max(20, Math.min(70, dc));
     await window.pinpin.settings.set({ default_model: m, default_effort: e, work_default_model: wm, work_default_effort: we, work_default_fast: wf, default_fast: df, default_compact_pct: dc });
   });
   // footer btn

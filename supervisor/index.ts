@@ -1000,6 +1000,8 @@ export class Supervisor extends EventEmitter {
       effort: persisted?.effort ?? this.opts.defaultEffort,
       autoCompactPct: persisted?.autoCompactPct ?? this.opts.defaultAutoCompactPct,
       fast: persisted?.fast ?? this.opts.defaultFast ?? false,
+      addDirs: persisted?.addDirs,
+      voiceDice: persisted?.voiceDice,
       supervisorPort: this.ipcServer.getPort(),
       dbPath: this.dbPath,
       nameMapPath: this.nameMapPath,

@@ -39,8 +39,13 @@ export interface ChannelConfig {
    *  但有人发消息会经 onFeishuMessage 的"!channels.has → 动态 spawn"热路径唤醒（触发消息走缓冲 flush 给品品读）。
    *  唤醒只临时 spawn、本标记不清，下次 4 点重启又回待机。 */
   standby?: boolean;
-  /** 自动压缩阈值（上下文用量百分比，20-50）。缺省走 DEFAULT_AUTOCOMPACT_PCT。改完需重启该频道 CLI 生效。 */
+  /** 自动压缩阈值（上下文用量百分比，20-70）。缺省走 DEFAULT_AUTOCOMPACT_PCT。改完需重启该频道 CLI 生效。 */
   autoCompactPct?: number;
+  /** 语音骰子开关（缺省=开）。false 时 spawn 注入 PINPIN_VOICE_DICE=off，该频道不掷语音骰。重启生效。 */
+  voiceDice?: boolean;
+  /** 外挂知识目录（绝对路径数组）。spawn 时逐个 --add-dir（其 .claude/skills 原生加载、文件访问放行），
+   *  非空时注入 CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 让各目录 CLAUDE.md 原生加载。重启生效。 */
+  addDirs?: string[];
   /** fast 模式（Opus 加速输出）。spawn 时注入 --settings 的 fastMode；改完需重启该频道 CLI 生效。
    *  per-channel / __defaults__ / __work_defaults__ 三处通用。 */
   fast?: boolean;

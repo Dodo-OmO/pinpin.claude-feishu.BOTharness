@@ -41,6 +41,10 @@ export interface ChannelCliOptions {
   autoCompactPct?: number;
   /** fast 模式（Opus 加速输出）。true 时把 fastMode:true 合并进 --settings JSON（自动切 Opus、扣 usage credits）。 */
   fast?: boolean;
+  /** 外挂知识目录（--add-dir 逐个注入；非空时附 env CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1）。 */
+  addDirs?: string[];
+  /** 语音骰子开关（缺省 true）。false → 注入 PINPIN_VOICE_DICE=off，子 MCP 掷骰短路（chat-message.ts）。 */
+  voiceDice?: boolean;
 }
 
 export type ChannelCliStatus = 'starting' | 'running' | 'stopped' | 'failed';
@@ -130,6 +134,8 @@ export class ChannelCli extends EventEmitter {
       '--settings',
       statusLineCfg,
       ...(sysPromptOk ? ['--append-system-prompt-file', sysPromptFile] : []),
+      // 外挂知识目录（如三兄弟提示词工作频道绑九州目录）：skills/CLAUDE.md 原生加载 + 文件访问放行
+      ...(this.opts.addDirs ?? []).flatMap((d) => ['--add-dir', d]),
       '--permission-mode',
       'bypassPermissions',
       '--tools',
@@ -171,6 +177,10 @@ export class ChannelCli extends EventEmitter {
       CLAUDE_CODE_AUTO_COMPACT_WINDOW: '1000000',
       // API 失败重试加固（单源 utils.claudeApiNetEnv）。
       ...claudeApiNetEnv(),
+      // 外挂目录的 CLAUDE.md 原生加载开关（官方 env，仅配 addDirs 的频道注入）
+      ...(this.opts.addDirs?.length ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' } : {}),
+      // 语音骰子关闭（工作频道用；chat-message.ts 掷骰处读此 env 短路）
+      ...(this.opts.voiceDice === false ? { PINPIN_VOICE_DICE: 'off' } : {}),
     };
 
     const claudePath = resolveClaudePath();

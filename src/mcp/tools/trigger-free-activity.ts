@@ -21,6 +21,17 @@ export const triggerFreeActivityTool: Tool = {
 
 export async function handleTriggerFreeActivity(args: { chat_id: string }) {
   const { chat_id } = args;
+  // 门禁（2026-08-24）：自由活动只许在 cron 特权频道触发（对齐 cron-owner 归属：茶水间/Owner单聊）。
+  // 此前无校验——任意频道（含工作频道）都可被一句话带去自由活动。env 未配 → fail-closed 全拒。
+  const allowed = [process.env.PINPIN_TEA_CHAT_ID, process.env.PINPIN_OWNER_CHAT_ID].filter(Boolean);
+  if (!allowed.includes(chat_id)) {
+    return {
+      content: [{
+        type: "text" as const,
+        text: JSON.stringify({ triggered: false, reason: "该频道不在自由活动允许范围（仅茶水间/Owner单聊）" }),
+      }],
+    };
+  }
   await pushChannelTrigger({
     trigger: "free-activity",
     chat_id,

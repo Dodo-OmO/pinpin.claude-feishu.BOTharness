@@ -24,7 +24,8 @@ function sleepSync(ms: number): void {
 }
 
 // retry 3 × 50ms 抗网盘瞬断（vault 在 OneDrive/坚果云同步盘时偶有 EBUSY/ENOENT 瞬时错）
-function readVaultFile(vaultRoot: string, relativePath: string): string {
+// export：server.ts 的 channel-warmup 读简报复用同一套重试（同一块同步盘、同一类瞬时锁）
+export function readVaultFile(vaultRoot: string, relativePath: string): string {
   const fullPath = path.join(vaultRoot, relativePath);
   const delays = [50, 50, 50];
   let lastErr: unknown = null;
@@ -99,6 +100,21 @@ function loadPersonaProfiles(vaultRoot: string, chatId: string): string {
   return `---\n[你认识的人·画像]\n（按本聊天相关性注入；补充事实 Edit \`记忆系统\\人物\\<人>.md\` 对应小节，次日重启生效）\n\n${blocks.join("\n\n")}`;
 }
 
+// 频道简报（2026-08-24）：per-channel 专属规矩。`vault\频道简报\<chatId>.md` 存在则注入，
+// 无文件频道零影响。放画像后、心境前（心境每小时变，静态块须在其前保 prompt cache）。
+// 简报可含 `## 启动预读` 节——server.ts 冷启动 warmup 会推该节内容让品品先读知识库。
+export function channelBriefPath(vaultRoot: string, chatId: string): string {
+  return path.join(vaultRoot, "频道简报", `${chatId}.md`);
+}
+
+function loadChannelBrief(vaultRoot: string, chatId: string): string {
+  if (!chatId) return "";
+  if (!fs.existsSync(channelBriefPath(vaultRoot, chatId))) return "";
+  const raw = readVaultFile(vaultRoot, path.join("频道简报", `${chatId}.md`));
+  if (!raw.trim()) return "";
+  return `---\n[本频道专属规矩]\n（本节为当前频道量身定制，与前文冲突时以本节为准）\n${raw}`;
+}
+
 // 硬规则单源常量（原外置 HARD_RULE_REMINDER_SDK.md 已并入本常量去重，不再外置读取）
 // 飞书 channel 消息/输出协议 + 通用行为硬规则（联网/派小弟/自我落实/调度）
 const HARD_RULE_REMINDER_CHANNELS = `---
@@ -171,6 +187,7 @@ export function buildInstructions(vaultRoot: string, chatId: string): string {
     loadBotRoster(),       // 群里已知 bot 花名册
     loadMemoryBlock(vaultRoot),
     loadPersonaProfiles(vaultRoot, chatId),   // 按需注入相关人物画像
+    loadChannelBrief(vaultRoot, chatId),      // 频道简报（per-channel 专属规矩，多数频道无）
     loadMoodCurrentBlock(vaultRoot),          // 心境放最后保 prompt cache
   ]
     .filter((block) => block.trim().length > 0)

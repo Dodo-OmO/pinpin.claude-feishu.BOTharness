@@ -45,7 +45,8 @@ import { PINPIN_SAVE_FILE_TOOL, handlePinpinSaveFile } from './tools/pinpin-save
 import { initDatabase, closeDatabase } from './db/database.js';
 import { startAllCrons, stopAllCrons } from './cron/registry.js';
 import { logBackground } from './utils/background-log.js';
-import { setServerInstance } from './utils/push-channel.js';
+import { setServerInstance, pushChannelTrigger } from './utils/push-channel.js';
+import { channelBriefPath, readVaultFile } from './instructions.js';
 // 阶段 4 批次 2：定时播报类 cron（import 触发 registerCron 副作用）
 import './cron/daily-news.js';
 import './cron/weekly-recap.js';
@@ -131,7 +132,7 @@ import {
   handleSendPollCard,
   handleConfirmDangerousAction,
 } from './tools/cards.js';
-import { appendFileSync, mkdirSync } from 'node:fs';
+import { appendFileSync, mkdirSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { getVaultRoot, dateYYYYMMDD } from './utils/helper.js';
 
@@ -465,6 +466,10 @@ async function main() {
 
   // ── 传输连接 ──
 
+  // 注入 server 实例供 push-channel.ts 推 trigger——必须在 connect 之前就位：
+  // oninitialized（含 channel-warmup 首推）可能在 connect 后毫秒级到达，serverRef 晚注入会被静默丢推送
+  setServerInstance(server);
+
   const transport = new StdioServerTransport();
   await server.connect(transport);
 
@@ -590,9 +595,40 @@ async function main() {
       }, delay);
     }
 
+    // ── 频道简报 warmup（2026-08-24）──
+    // 简报（vault\频道简报\<chatId>.md）含「## 启动预读」节 → 冷启动就绪后推预读 trigger，
+    // 品品先读好知识库再等人提问（三兄弟提示词工作频道用）。once per 进程；每次重启（上下文清零）都重预读。
+    // 安全网：借 lastToolCallAt 信号（与冷启动补发同款），20s 无任何工具调用 → 重推一次。
+    let warmupFired = false;
+    function scheduleChannelWarmup(): void {
+      if (warmupFired) return;
+      warmupFired = true;
+      // readVaultFile 带 3×50ms 重试（同步盘瞬时锁防护）；无简报/读失败返回 ""（绝大多数频道走这里）。
+      // 但 existsSync 先探一下：不存在就别让 readVaultFile 打 4 连 WARN 日志。
+      let section = '';
+      if (existsSync(channelBriefPath(getVaultRoot(), chatId as string))) {
+        const briefRaw = readVaultFile(getVaultRoot(), `频道简报/${chatId as string}.md`);
+        // $(?![\s\S]) = 真·字符串末尾（m 标志下裸 $ 是行尾，会把多行预读节截成一行）
+        const m = briefRaw.match(/^## 启动预读\s*\n([\s\S]*?)(?=\n## |$(?![\s\S]))/m);
+        if (m) section = m[1].trim();
+      }
+      if (!section) return;
+      const body =
+        `🧭 频道启动预读（系统触发，本频道每次重启后自动执行一次）。先把知识库读好再服务提问：\n${section}\n` +
+        `读完调 pinpin_no_reply 留痕即可，不用在群里说话。`;
+      const sentAt = Date.now();
+      void pushChannelTrigger({ trigger: 'channel-warmup', chat_id: chatId as string, body });
+      setTimeout(() => {
+        if (lastToolCallAt >= sentAt) return; // claude 已动过工具 = 已收到
+        logBackground('warmup', `chat=${(chatId as string).slice(-8)} 20s 无工具调用，warmup 重推一次`);
+        void pushChannelTrigger({ trigger: 'channel-warmup', chat_id: chatId as string, body, meta: { resend: 'true' } });
+      }, 20_000);
+    }
+
     server.oninitialized = () => {
       mcpInitialized = true;
       logBackground('mcp-gate', `chat=${chatId.slice(-8)} oninitialized triggered, pendingQueue=${pendingQueue.length}`);
+      scheduleChannelWarmup();
       if (pendingQueue.length > 0) {
         process.stderr.write(`[feishu-channel] MCP initialized，flush ${pendingQueue.length} 条缓冲消息\n`);
         const items = pendingQueue.splice(0);
@@ -698,9 +734,6 @@ async function main() {
       `[feishu-channel] PINPIN_CHAT_ID / PINPIN_SUPERVISOR_PORT 未设，degraded mode（tools only，无入站消息流）\n`,
     );
   }
-
-  // 阶段 4：注入 server 实例供 push-channel.ts 推 trigger
-  setServerInstance(server);
 
   // cron + timer scheduler 在本子进程跑；多子进程同名 cron 靠 scheduled_tasks last_run_at 去重。
   startAllCrons();

@@ -158,8 +158,11 @@ export async function handleInboundMessage(
   // 不再注入被动数字 dice_preroll 让品品自己读（旧做法品品把数字当背景噪音忽略，从不语音）。
   // 指令进 channel content（品品本轮看得到、按它行动，跟 trigger 同款"系统发指令"模式），
   // 但**不进 chat-log**（appendUserMessage 用原始 text，下方写盘不含指令）。
+  // PINPIN_VOICE_DICE=off（per-channel，spawn 注入）→ 本频道不掷语音骰（如提示词工作频道）
   const voiceDirective =
-    payload.msg_type === "text" && Math.random() < VOICE_DICE_THRESHOLD
+    payload.msg_type === "text" &&
+    process.env.PINPIN_VOICE_DICE !== "off" &&
+    Math.random() < VOICE_DICE_THRESHOLD
       ? "\n\n〔系统·本轮语音〕——这轮优先用 pinpin_reply_voice 语音回复，" +
         "除非①有人明示要你打字/别发语音 ②要说的超 120 字 ③关键信息打字更清楚。"
       : "";
