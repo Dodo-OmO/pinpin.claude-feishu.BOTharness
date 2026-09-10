@@ -47,6 +47,7 @@ function parseTextContent(raw: string): string {
 function cardLineText(node: unknown): string {
   if (node == null) return "";
   if (typeof node === "string") return node;
+  if (typeof node === "number" || typeof node === "boolean") return String(node);
   if (Array.isArray(node)) return node.map(cardLineText).join("");
   if (typeof node !== "object") return "";
   const obj = node as Record<string, unknown>;
@@ -58,15 +59,27 @@ function cardLineText(node: unknown): string {
     return "";
   }
   if (tag === "hr") return "";
-  // 标准 v2 卡片标题在 header.title（真实卡片多用顶层 title，此处兼容 header 形态）
-  if (obj.header && typeof obj.header === "object") {
-    return cardLineText((obj.header as Record<string, unknown>).title);
+  if (tag === "img") {
+    const alt = cardLineText(obj.alt).trim();
+    return alt ? `[图：${alt}]` : "[图]";
   }
-  if (obj.text && typeof obj.text === "object") return cardLineText(obj.text);
+  // 卡片 2.0 表格：rows = 按列名键值的对象数组，每行 " | " 拼
+  if (tag === "table" && Array.isArray(obj.rows)) {
+    return (obj.rows as unknown[])
+      .map((r) => (r && typeof r === "object" ? Object.values(r as Record<string, unknown>).map(cardLineText).join(" | ") : ""))
+      .filter(Boolean)
+      .join("\n");
+  }
+  // 容器（div / note / column_set / collapsible_panel / interactive_container / form / button…）：
+  // 标题 + 自身 text + 子元素依次拼；1.0 段落内联数组走上面 Array 分支无缝拼接
+  const parts: string[] = [];
+  if (obj.header && typeof obj.header === "object") parts.push(cardLineText((obj.header as Record<string, unknown>).title));
+  if (obj.text && typeof obj.text === "object") parts.push(cardLineText(obj.text));
+  const sep = tag === "note" ? "" : "\n"; // note = 同行内联小字（图标+时间+说明），保持飞书原生同行观感
   for (const key of ["elements", "fields", "columns"]) {
-    if (Array.isArray(obj[key])) return (obj[key] as unknown[]).map(cardLineText).join("");
+    if (Array.isArray(obj[key])) parts.push((obj[key] as unknown[]).map(cardLineText).filter((s) => s.trim()).join(sep));
   }
-  return "";
+  return parts.filter((s) => s.trim()).join("\n");
 }
 
 /**
@@ -90,7 +103,8 @@ function extractCardText(rawContent: string): string {
     const ht = cardLineText((card.header as Record<string, unknown>).title);
     if (ht.trim()) lines.push(`**${ht.trim()}**`);
   }
-  const elements = card.elements;
+  // 1.0 元素在顶层 elements；2.0（schema:"2.0"）在 body.elements
+  const elements = card.elements ?? (card.body as Record<string, unknown> | undefined)?.elements;
   if (Array.isArray(elements)) {
     for (const para of elements) {
       const line = cardLineText(para);
@@ -101,6 +115,18 @@ function extractCardText(rawContent: string): string {
     if (line.trim()) lines.push(line);
   }
   return lines.join("\n").trim();
+}
+
+type PostBody = {
+  title?: string;
+  content?: Array<Array<{ tag: string; text?: string; image_key?: string; href?: string }>>;
+};
+/** post 剥壳（同飞书 SDK unwrapLocale）：扁平 {title,content}（poll 路径 / todo.summary）优先，否则取语言壳 zh_cn / 首个。 */
+function unwrapPost(json: unknown): PostBody | undefined {
+  if (!json || typeof json !== "object") return undefined;
+  const o = json as Record<string, unknown>;
+  if ("title" in o || "content" in o) return o as PostBody;
+  return (o["zh_cn"] ?? Object.values(o)[0]) as PostBody | undefined;
 }
 
 // ── 六个 Parser 函数 ──
@@ -198,19 +224,14 @@ export async function parsePost(ctx: ParseCtx): Promise<string | null> {
   //   ② rawContent 手动解析（poll 路径 raw.body.content / WSClient 路径 raw.message.content；
   //      解析 post JSON 遍历 tag='img' 元素提取 image_key）
   // 文字提取走 rawContent 手动解析（优先），fallback SDK 归一化 payload.text。
-  // 结构：{"zh_cn":{"title":"...","content":[[{"tag":"text","text":"..."},{"tag":"img","image_key":"..."},...],...]}}
+  // 结构两种形态（同飞书 SDK unwrapLocale）：
+  //   扁平（poll 路径 im.v1.message.list/get，bot 消息唯一入口）：{"title":"...","content":[[{"tag":"text","text":"..."},{"tag":"img","image_key":"..."},...],...]}
+  //   语言壳（事件推送）：{"zh_cn":{同上}}
+  // 必须先判扁平：按语言壳取会把 "title" 键当 locale、body 变成标题字符串 → 一字提不出且不抛错（bot 富文本白板根因）。
   let parsed = "";
   try {
     // ── 文字提取（rawContent 手动解析）──
-    const postJson = JSON.parse(rawContent || "{}") as {
-      [locale: string]: {
-        title?: string;
-        content?: Array<Array<{ tag: string; text?: string; image_key?: string; href?: string }>>;
-      };
-    };
-    // 取第一个 locale（zh_cn 优先，否则取第一个）
-    const localeKeys = Object.keys(postJson);
-    const body = postJson["zh_cn"] ?? (localeKeys.length > 0 ? postJson[localeKeys[0]] : undefined);
+    const body = unwrapPost(JSON.parse(rawContent || "{}"));
 
     // ── 图片 key 提取（双保险）──
     // ① 优先用 SDK 已解析的 _sdk_resources（WSClient 路径，最可靠）
@@ -288,6 +309,47 @@ export async function parseInteractive(ctx: ParseCtx): Promise<string | null> {
   return cardText || payload.text || "[卡片消息] 收到一张卡片（内容解析失败）";
 }
 
+// ── 其余类型：可读标签，让品品至少知道来了什么（system 系统提示不入，仍丢弃）──
+
+const str = (v: unknown): string => (typeof v === "string" ? v : "");
+/** 秒级时间戳 → `YYYY-MM-DD HH:mm`（同 chat-message fmtLocalTime 风格），非法返回空。 */
+const fmtTs = (v: unknown, prefix: string): string => {
+  const n = Number(v);
+  if (!Number.isFinite(n) || n <= 0) return "";
+  const d = new Date(n * 1000);
+  const p = (x: number) => String(x).padStart(2, "0");
+  return `${prefix}${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+};
+const label =
+  (fn: (c: Record<string, unknown>) => string): Parser =>
+  async ({ rawContent }) => {
+    try {
+      return fn(JSON.parse(rawContent || "{}") as Record<string, unknown>);
+    } catch {
+      return fn({});
+    }
+  };
+const calendarLabel = label((c) => `[日程] ${str(c.summary)}${fmtTs(c.start_time, " ")}${fmtTs(c.end_time, " ~ ")}`);
+
+/** 视频：本体不下载，封面缩略图存本地供 Read。 */
+export async function parseMedia(ctx: ParseCtx): Promise<string | null> {
+  const { payload, rawContent } = ctx;
+  let c: { file_name?: string; image_key?: string } = {};
+  try {
+    c = JSON.parse(rawContent || "{}");
+  } catch {
+    return "[视频] 收到一条视频消息（内容解析失败）";
+  }
+  const head = `[视频「${c.file_name ?? "未命名"}」]`;
+  if (!c.image_key) return `${head} 视频本体未下载`;
+  try {
+    return `${head} 封面已存本地，用 Read 看：${await saveInboundImage(payload.message_id, c.image_key)}`;
+  } catch (e) {
+    process.stderr.write(`[chat-message] 视频封面下载失败 msg_id=${payload.message_id}: ${e instanceof Error ? e.message : e}\n`);
+    return `${head} 视频本体未下载`;
+  }
+}
+
 // ── 路由表 ──
 
 export const PARSERS: Record<string, Parser> = {
@@ -297,4 +359,18 @@ export const PARSERS: Record<string, Parser> = {
   audio: parseAudio,
   post: parsePost,
   interactive: parseInteractive,
+  media: parseMedia,
+  sticker: label(() => "[表情包]"),
+  share_chat: label(() => "[分享了一个群名片]"),
+  share_user: label(() => "[分享了一张个人名片]"),
+  merge_forward: label(() => "[合并转发的聊天记录]（正文看不到）"),
+  location: label((c) => `[位置] ${str(c.name)}${str(c.address) ? ` ${str(c.address)}` : ""}`),
+  todo: label((c) => `[任务] ${unwrapPost(c.summary)?.title || "（无标题）"}${fmtTs(c.due_time, " 截止 ")}`),
+  vote: label((c) => `[投票] ${str(c.topic)}｜选项：${(Array.isArray(c.options) ? c.options : []).map(str).join(" / ")}`),
+  hongbao: label(() => "[红包]"),
+  video_chat: label((c) => `[视频会议] ${str(c.topic)}${fmtTs(c.start_time, " ")}`),
+  folder: label((c) => `[文件夹「${str(c.file_name)}」]（飞书文件夹不可下载）`),
+  calendar: calendarLabel,
+  share_calendar_event: calendarLabel,
+  general_calendar: calendarLabel,
 };

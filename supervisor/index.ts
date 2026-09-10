@@ -1415,6 +1415,8 @@ export class Supervisor extends EventEmitter {
     const labels: Record<string, string> = {
       image: '图片', file: '文件', audio: '语音', media: '视频', post: '图文',
       interactive: '卡片', sticker: '表情', share_chat: '分享群', share_user: '名片',
+      merge_forward: '合并转发', location: '位置', todo: '任务', vote: '投票', hongbao: '红包',
+      video_chat: '视频会议', folder: '文件夹', calendar: '日程', share_calendar_event: '日程', general_calendar: '日程',
     };
     return `非文字内容·${labels[msgType] ?? msgType}`;
   }
