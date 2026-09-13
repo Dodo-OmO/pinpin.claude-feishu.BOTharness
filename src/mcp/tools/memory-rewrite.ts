@@ -24,7 +24,7 @@ export const memoryRewriteTool: Tool = {
   description:
     "用新内容（必须恰好 50 行）重写 永存记忆50条.md。" +
     "内部三重保护：先备份 → 大小校验（新内容 byte ≥ 旧 50%）→ 行数校验（必须 50 行）。" +
-    "任一校验失败回滚 + 返 isError，主 session 收到 isError 应 send_private_message 私聊Owner告警。",
+    "任一校验失败即拒写（原文不动）+ 返 isError，主 session 收到 isError 应 send_private_message 私聊Owner告警。",
   inputSchema: {
     type: "object",
     properties: {

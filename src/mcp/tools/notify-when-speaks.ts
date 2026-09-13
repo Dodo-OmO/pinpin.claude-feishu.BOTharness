@@ -14,29 +14,27 @@ export const notifyWhenSpeaksTool: Tool = {
   inputSchema: {
     type: "object",
     properties: {
-      chat_id: { type: "string", description: "目标群 chat_id（可不传；当前版本固定监听本频道）" },
       target_name: { type: "string", description: "目标姓名（known_users 反查；与 target_open_id 二选一）" },
       target_open_id: { type: "string", description: "目标 open_id" },
       message: { type: "string", description: "fire 时要带的提醒内容" },
     },
-    required: ["chat_id", "message"],
+    required: ["message"],
   },
 };
 
 export async function handleNotifyWhenSpeaks(args: {
-  chat_id: string;
   target_name?: string;
   target_open_id?: string;
   message: string;
 }) {
   const { target_name, target_open_id, message } = args;
-  // 多 CLI 架构（2026-05-28）：强制 chat_id = 自家 PINPIN_CHAT_ID
-  const ownChatId = process.env.PINPIN_CHAT_ID;
-  const chat_id = ownChatId ?? args.chat_id;
-  if (ownChatId && args.chat_id && args.chat_id !== ownChatId) {
-    process.stderr.write(
-      `[notify_when_speaks] LLM 传入 chat_id=${args.chat_id.slice(-8)} 与自家 ${ownChatId.slice(-8)} 不一致，强制改为自家\n`,
-    );
+  // 固定监听本频道（多 CLI 架构：一聊一进程，chat 身份来自 supervisor 注入）
+  const chat_id = process.env.PINPIN_CHAT_ID;
+  if (!chat_id) {
+    return {
+      isError: true,
+      content: [{ type: "text" as const, text: JSON.stringify({ error: "本进程无 PINPIN_CHAT_ID，无法注册 speak-watch" }) }],
+    };
   }
   let openId = target_open_id;
   if (!openId && target_name) openId = resolveOpenId(target_name);

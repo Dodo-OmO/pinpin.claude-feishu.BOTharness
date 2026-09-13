@@ -11,12 +11,12 @@ export const cancelScheduledTool: Tool = {
   description:
     "取消一个之前注册的 timer/speak-watch 任务。" +
     "传 job_id = 取消该任务（仅 status=pending 可取消）；" +
-    "不传 = 返当前所有 pending 任务列表（Owner说'有啥任务' / '取消任务'但没给 id 时用）。",
+    "不传 = 返本频道 pending 任务列表（Owner说'有啥任务' / '取消任务'但没给 id 时用）。",
   inputSchema: {
     type: "object",
     properties: {
       job_id: { type: "number", description: "要取消的任务 id（不传 = 列清单）" },
-      chat_id: { type: "string", description: "可选过滤——只列某 chat 的 pending" },
+      chat_id: { type: "string", description: "列清单时只列某 chat 的 pending；默认本频道" },
     },
   },
 };
@@ -34,7 +34,8 @@ export async function handleCancelScheduled(args: { job_id?: number; chat_id?: s
       ],
     };
   }
-  const pending = listAllPendingJobs(args.chat_id);
+  // 默认只列本频道，别把别的频道的 context_hint/payload 全库倒给当前会话
+  const pending = listAllPendingJobs(args.chat_id ?? process.env.PINPIN_CHAT_ID);
   return {
     content: [
       {

@@ -161,15 +161,14 @@ async function main() {
 
   // alwaysLoad 白名单：ENABLE_TOOL_SEARCH=true 下所有 MCP tool 默认折叠（按需 ToolSearch），
   // 仅本名单内 tool 注入 _meta['app/alwaysLoad'] 豁免常驻。
-  // 划分依据：① 每轮回话必调 ② 每轮 reply 后 trigger 自动触发（心情/记忆）③ cron 必成功
-  // ④ work-stopped 被动触发——这些自动场景多数无法即时实测，保常驻防"搜不到→静默哑"。
-  // 其余（建群/owner/卡片等）= 主动随机用，折叠按需（主动场景 ToolSearch 可靠）。飞书云文档/任务等走 lark-cli，不在 MCP。
+  // 划分依据：① 每轮回话必调 ② 每轮 reply 后 trigger 自动触发（心情/记忆）③ 高频 cron 产出工具。
+  // 其余折叠按需——被 cron 提示词 / sub-agent frontmatter 按名点到的折叠工具（write_weekly_recap /
+  // memory_rewrite / read_chat_log / pinpin_peek_work_session 等）实测都能按名 ToolSearch 到，不必常驻。
+  // 飞书云文档/任务等走 lark-cli，不在 MCP。
   const ALWAYS_LOAD = new Set<string>([
     'pinpin_reply_text', 'pinpin_reply_voice', 'pinpin_react', 'pinpin_no_reply',
-    'pinpin_memorize', 'mood_appraise', 'read_chat_log',
-    'write_diary', 'send_daily_news_card', 'write_weekly_recap',
-    'write_journey_log', 'memory_rewrite', 'pinpin_peek_work_session',
-    // weekly-recap cron / relay-nudge/callback 调 send_private_message——自动触发、无法即时实测，保常驻防静默哑。
+    'pinpin_memorize', 'mood_appraise',
+    'write_diary', 'send_daily_news_card', 'write_journey_log',
     'send_private_message',
   ]);
   server.setRequestHandler(ListToolsRequestSchema, async () => ({

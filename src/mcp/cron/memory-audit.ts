@@ -1,5 +1,5 @@
 // 永存记忆自检 cron（MCP 版）
-// 阶段 4 批次 2 步骤 2.4：方案 A #23——周日 23:30 推 memory-audit trigger（错峰周回顾 23:00）
+// 周日 23:30 推 memory-audit trigger（错峰周回顾 22:00）
 
 import { registerCron } from "./registry.js";
 import { pushChannelTrigger } from "../utils/push-channel.js";

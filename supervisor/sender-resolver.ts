@@ -17,12 +17,19 @@ import { parseEnvMap, resolveMentions } from '../src/shared/sender-shared.js';
 import { getHumanNameMapping, getBotNameMapping } from '../src/shared/name-map-store.js';
 export type { FeishuMentionShared as FeishuMention } from '../src/shared/sender-shared.js';
 
-// 跨应用合并（appRoot 传空串——这里只取 knownUsers/botRoster 字段，larkBotDir 不用）
-const BOT_NAME_MAP: Record<string, string> = {};
-const ENV_KNOWN_USERS: Record<string, string> = {};
-for (const a of loadFeishuApps(process.env, '')) {
-  Object.assign(BOT_NAME_MAP, parseEnvMap(a.botRoster));
-  Object.assign(ENV_KNOWN_USERS, parseEnvMap(a.knownUsers));
+// 跨应用合并（appRoot 传空串——这里只取 knownUsers/botRoster 字段，larkBotDir 不用）。
+// 惰性构建：本模块随 ESM import 早于 main.ts 的 dotenv.config() 执行，模块顶层读 process.env 只会拿到空表。
+let envMaps: { bots: Record<string, string>; users: Record<string, string> } | null = null;
+function envNameMaps(): { bots: Record<string, string>; users: Record<string, string> } {
+  if (envMaps) return envMaps;
+  const apps = loadFeishuApps(process.env, '');
+  const built = { bots: {} as Record<string, string>, users: {} as Record<string, string> };
+  for (const a of apps) {
+    Object.assign(built.bots, parseEnvMap(a.botRoster));
+    Object.assign(built.users, parseEnvMap(a.knownUsers));
+  }
+  if (apps.length > 0) envMaps = built; // env 还没加载（无应用）时不缓存空表，下次再建
+  return built;
 }
 
 /** 同步 user 缓存（首次返 fallback，async 预热后下次命中） */
@@ -35,12 +42,12 @@ export function resolveSenderNameSync(senderOpenId: string, senderType: 'user' |
   if (senderType === 'app') {
     const mapped = getBotNameMapping(senderOpenId);
     if (mapped) return mapped;
-    return BOT_NAME_MAP[senderOpenId] ?? senderOpenId.slice(-8);
+    return envNameMaps().bots[senderOpenId] ?? senderOpenId.slice(-8);
   }
   // user
   const mapped = getHumanNameMapping(senderOpenId);
   if (mapped) return mapped;
-  const envName = ENV_KNOWN_USERS[senderOpenId];
+  const envName = envNameMaps().users[senderOpenId];
   if (envName) return envName;
   const cached = userNameCache.get(senderOpenId);
   if (cached) return cached;

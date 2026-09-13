@@ -40,10 +40,6 @@ export const IPC_METHODS = {
   SPAWN_CHANNEL: 'spawn-channel',      // request → returns WorkOkResult
   // 停某频道 CLI + 删配置，不再重 spawn（解散群后调）
   STOP_CHANNEL: 'stop-channel',        // request → returns WorkOkResult
-  // 人名/bot名映射管理（启动器面板用；后端先就绪，UI 后续阶段做）
-  GET_NAME_MAPPINGS: 'get-name-mappings',  // request → NameMap { humans, bots }
-  GET_PENDING_NAMES: 'get-pending-names',  // request → PendingNameEntry[]（待命名 sender）
-  SET_NAME_MAPPING: 'set-name-mapping',    // request {type,id,name} → WorkOkResult（写映射 + 清待命名）
   // 多飞书应用：supervisor 持有全部应用 client，跨应用能力集中在此（子进程只有本 chat 所属应用的 client）
   LIST_CHATS: 'list-chats',              // child → main request {} → ListChatsResult（全部应用的群，带 app 标签）
   PEER_MESSAGE: 'peer-message',          // child → main request PeerMessageParams → PeerMessageResult（给另一频道的品品捎话，main 推 trigger=peer-message）
@@ -223,7 +219,7 @@ export interface StopChannelParams {
   chat_id: string;
 }
 
-// ── 人名/bot名映射管理 params/result（GET_NAME_MAPPINGS / GET_PENDING_NAMES / SET_NAME_MAPPING）──
+// ── 人名/bot名映射（supervisor 方法返回给启动器 Electron IPC 用；不走 TCP IPC）──
 /** 全部映射；同 name-map-store 的 NameMap（humans: open_id→名, bots: cli_id→名） */
 export interface NameMappings {
   humans: Record<string, string>;
@@ -237,11 +233,6 @@ export interface PendingNameEntry {
   snippet: string;
   type: 'human' | 'bot';
   ts: number;
-}
-export interface SetNameMappingParams {
-  type: 'human' | 'bot';
-  id: string;
-  name: string;
 }
 
 // ── 多飞书应用（LIST_CHATS / PEER_MESSAGE）──

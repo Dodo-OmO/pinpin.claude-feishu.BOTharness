@@ -24,8 +24,11 @@ export function markInboundChat(chatId: string, senderOpenId?: string): void {
   }
 }
 
-/** 取某 chat 最近 inbound 发送者 open_id（OWNER 鉴权用，未记录返 undefined） */
+/** 取某 chat 近 5 分钟内最后一条 inbound 的发送者 open_id（OWNER 鉴权用，未记录或已过 TTL 返 undefined）。
+ *  读侧必须自己判 TTL：单频道进程里 markInboundChat 的清扫永远清不到"刚刷新过的自己"。 */
 export function getLastInboundSenderOpenId(chatId: string): string | undefined {
+  const ts = recentInbound.get(chatId);
+  if (!ts || Date.now() - ts > RECENT_INBOUND_TTL_MS) return undefined;
   return recentInboundSender.get(chatId);
 }
 

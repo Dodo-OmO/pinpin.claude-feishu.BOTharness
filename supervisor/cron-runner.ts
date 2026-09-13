@@ -1,17 +1,16 @@
 /**
  * supervisor 主进程内 cron runner（2026-05-28 多 CLI 架构落地）
  *
- * 这里跑的 3 个 cron 共同点：**不依赖任何 CLI 在线**：
- *   1. mood-decay      每小时整点  → 直接调 decayMoodlets() 写 mood-state 文件
- *   2. feishu-token-keepalive 04:00 → 以Owner本人身份跑一次 lark-cli 用户接口：触发 token 续期 + 校验，失效即私聊Owner
- *   3. daily-restart   编排  → 03:55 stop 所有 CLI + 04:10 start 所有 CLI
+ * 这里跑的 4 个 job 共同点：**不依赖任何 CLI 在线**：
+ *   1. mood-decay               每小时整点 → 直接调 decayMoodlets() 写 mood-state 文件
+ *   2. feishu-token-keepalive   04:00      → 以Owner本人身份跑一次 lark-cli 用户接口：触发 token 续期 + 校验，失效即私聊Owner
+ *   3. daily-restart-shutdown   03:55      → stop 所有 CLI
+ *   4. daily-restart-startup    04:10      → start 所有常驻 CLI
  *
  * 跟 src/mcp/cron/registry.ts 的关系：
  *   - 复用 computeNextRunAt / nextDailyAt / nextHourlyAt 的时间计算
  *   - 但 supervisor 这边**不读 SQLite scheduled_tasks 表做 catch-up**——supervisor 启动时刻
- *     直接 scheduleNext，漏跑就漏跑（这 3 个 cron 漏一次影响极小：mood 多衰减一格 / token
- *     等下次 refresh 临期再补 / restart 第二天再来）
- *   - daily-restart 不在每天准点 06:00（旧版语义）—— 改成Owner指定的 03:55 stop + 04:10 start
+ *     直接 scheduleNext，漏跑就漏跑（漏一次影响极小：mood 多衰减一格 / token 等下次 refresh 临期再补 / restart 第二天再来）
  */
 
 import {
@@ -122,9 +121,8 @@ export class SupervisorCronRunner {
     const mark = this.reauthMarkPath();
     try {
       if (mark && existsSync(mark) && readFileSync(mark, 'utf8').trim() === today) return;
-      if (mark) writeFileSync(mark, today);
     } catch {
-      /* 标记读写失败不影响提醒 */
+      /* 标记读失败不影响提醒 */
     }
     const start = await this.larkCliJson(['auth', 'login', '--no-wait', '--json', '--recommend'], 60_000, app.larkUserDir);
     const url = start?.verification_url;
@@ -154,6 +152,8 @@ export class SupervisorCronRunner {
         data: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text }) },
         params: { receive_id_type: 'chat_id' },
       });
+      // 发送成功才落当日去重标记——发送失败时不能把今天"用掉"，否则失效会静默过夜
+      try { if (mark) writeFileSync(mark, today); } catch { /* ignore */ }
     } catch (e) {
       process.stderr.write(`[supervisor-cron] 重授权提醒发送失败: ${e instanceof Error ? e.message : e}\n`);
     }

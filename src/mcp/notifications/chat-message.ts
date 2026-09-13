@@ -250,16 +250,24 @@ export async function handleInboundMessage(
   }
 
   for (const watch of speakWatchHits) {
-    await pushChannelTrigger({
-      trigger: "speak-watch",
-      chat_id: chatId,
-      body:
-        `🔔 speak-watch 命中（${senderName} 刚开口）。原任务 hint：${watch.context_hint ?? "（无）"}\n` +
-        `payload: ${watch.payload ?? "（无）"}\n` +
-        `请按品品风格说出原提醒内容（一段话，不要重复 payload 原文）。说完后任务已自动 markJobFired。`,
-      meta: { job_id: String(watch.id) },
-    });
-    markJobFired(watch.id);
+    // 推送成功才标 fired；失败保持 pending，等 ta 下次开口再命中（与 timer 路径同款"先推成功再 markFired"）
+    try {
+      await pushChannelTrigger(
+        {
+          trigger: "speak-watch",
+          chat_id: chatId,
+          body:
+            `🔔 speak-watch 命中（${senderName} 刚开口）。原任务 hint：${watch.context_hint ?? "（无）"}\n` +
+            `payload: ${watch.payload ?? "（无）"}\n` +
+            `请按品品风格说出原提醒内容（一段话，不要重复 payload 原文）。说完后任务已自动 markJobFired。`,
+          meta: { job_id: String(watch.id) },
+        },
+        { throwOnError: true },
+      );
+      markJobFired(watch.id);
+    } catch (e) {
+      logBackground("inbound", `speak-watch job=${watch.id} 推送失败，保持 pending: ${e instanceof Error ? e.message : e}`);
+    }
   }
 
   // ── relay 回音检测：B 发消息时，看 ta 是否有 pending relay 任务 ──

@@ -164,16 +164,19 @@ export async function writeMemoryLine(index: number, content: string): Promise<b
     .join("\n");
   const fileContent = header + body + "\n";
 
-  // EBUSY 重试
+  // EBUSY 重试；tmp+rename 原子落盘（多频道 CLI 都可能同时 mempin，读者不能读到半截文件）
   const delays = [50, 100, 150];
+  const tmp = `${MEMORY_FILE}.tmp.${process.pid}`;
   for (let i = 0; i <= delays.length; i++) {
     try {
       const dir = path.dirname(MEMORY_FILE);
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-      fs.writeFileSync(MEMORY_FILE, fileContent, "utf-8");
+      fs.writeFileSync(tmp, fileContent, "utf-8");
+      fs.renameSync(tmp, MEMORY_FILE);
       process.stderr.write(`[memory] 写入第 ${index} 条: ${trimmed}\n`);
       return true;
     } catch (e) {
+      try { fs.unlinkSync(tmp); } catch { /* ignore */ }
       if (i === delays.length) {
         process.stderr.write(
           `[memory] writeMemoryLine 失败 (${delays.length + 1} 次): ${e instanceof Error ? e.message : e}\n`,

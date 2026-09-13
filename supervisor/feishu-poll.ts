@@ -47,6 +47,8 @@ export interface FeishuPollApp {
   client: Lark.Client;
   /** 无 → 全放行；有 → 只服务返回 true 的 chat（FEISHU_CHAT_ALLOWLIST） */
   isChatAllowed?: (chatId: string) => boolean;
+  /** 发送者 app_id 是否属于品品的任一飞书应用（多应用同群时防自环）；无 → 只认本 appId */
+  isOwnApp?: (senderAppId: string) => boolean;
 }
 
 export class FeishuPoll {
@@ -61,11 +63,13 @@ export class FeishuPoll {
   private readonly appId: string;
   private readonly client: Lark.Client;
   private readonly isChatAllowed: (chatId: string) => boolean;
+  private readonly isOwnApp: (senderAppId: string) => boolean;
 
   constructor(app: FeishuPollApp, callbacks: FeishuPollCallbacks = {}) {
     this.appId = app.appId;
     this.client = app.client;
     this.isChatAllowed = app.isChatAllowed ?? (() => true);
+    this.isOwnApp = app.isOwnApp ?? ((id) => id === this.appId);
     this.callbacks = callbacks;
   }
 
@@ -223,8 +227,8 @@ export class FeishuPoll {
     if (this.processedIds.has(m.message_id)) return;
     if (m.deleted) return;
     if (m.msg_type === 'system') return;
-    // 防自环：bot 自己发的消息（app 类型 + sender.id 是本 bot 的 app_id）
-    if (m.sender.sender_type === 'app' && m.sender.id === this.appId) return;
+    // 防自环：品品自己发的消息（app 类型 + sender.id 是品品任一飞书应用的 app_id）
+    if (m.sender.sender_type === 'app' && this.isOwnApp(m.sender.id)) return;
 
     this.processedIds.add(m.message_id);
     const ct = Number(m.create_time);

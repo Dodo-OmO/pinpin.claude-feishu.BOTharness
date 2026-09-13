@@ -132,12 +132,17 @@ function readMoodCurrent(): MoodState {
   }
 }
 
+// 写者有 N 个频道 CLI（appraise）+ supervisor（hourly decay）：tmp+rename 原子落盘，
+// 保证读者永远读到完整文件（半截文件会被 parseMoodCurrent 静默退回 DEFAULT_STATE = 心境清零）。
 function writeMoodCurrent(state: MoodState): void {
+  const tmp = `${CURRENT_FILE}.tmp.${process.pid}`;
   try {
     ensureDir(MOOD_ROOT);
     const stamped: MoodState = { ...state, updatedAt: `${dateYYYYMMDD()} ${timeHHMM()}` };
-    fs.writeFileSync(CURRENT_FILE, serializeMoodCurrent(stamped), "utf-8");
+    fs.writeFileSync(tmp, serializeMoodCurrent(stamped), "utf-8");
+    fs.renameSync(tmp, CURRENT_FILE);
   } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* ignore */ }
     process.stderr.write(`[mood-state] 写 当前.md 失败: ${e instanceof Error ? e.message : e}\n`);
   }
 }

@@ -268,14 +268,15 @@ export function getJobById(id: number): ScheduledJob | undefined {
     .get(id) as ScheduledJob | undefined;
 }
 
+/** 只从 pending 推进到 fired（多进程各自先读后写时，第二个写者不会把已 fired/cancelled 的行再改一遍） */
 export function markJobFired(id: number): void {
   getDb()
-    .prepare(`UPDATE scheduled_jobs SET status = 'fired', fired_at = datetime('now') WHERE id = ?`)
+    .prepare(`UPDATE scheduled_jobs SET status = 'fired', fired_at = datetime('now') WHERE id = ? AND status = 'pending'`)
     .run(id);
 }
 
 export function revertJobToPending(id: number): number {
-  const result = getDb()
+  getDb()
     .prepare(
       `UPDATE scheduled_jobs SET status = 'pending', retry_count = retry_count + 1 WHERE id = ?`
     )
@@ -295,10 +296,6 @@ export function cancelJob(id: number): boolean {
     .prepare(`UPDATE scheduled_jobs SET status = 'cancelled' WHERE id = ? AND status = 'pending'`)
     .run(id);
   return result.changes > 0;
-}
-
-export function rescheduleJob(id: number, fireAtIso: string): void {
-  getDb().prepare(`UPDATE scheduled_jobs SET fire_at = ? WHERE id = ?`).run(fireAtIso, id);
 }
 
 // ============ relay payload (主动单聊传话催回) ============
@@ -465,18 +462,6 @@ export function setMeta(key: string, value: string): void {
        ON CONFLICT(key) DO UPDATE SET value = excluded.value, updated_at = datetime('now')`
     )
     .run(key, value);
-}
-
-export function deleteMeta(key: string): void {
-  getDb().prepare(`DELETE FROM app_meta WHERE key = ?`).run(key);
-}
-
-/** 列所有 app_meta 条目（清缓存用：删清单时清掉指向它的 name→guid 缓存） */
-export function listMetaEntries(): Array<{ key: string; value: string }> {
-  return getDb().prepare(`SELECT key, value FROM app_meta`).all() as Array<{
-    key: string;
-    value: string;
-  }>;
 }
 
 // ============ diy_polls + diy_poll_votes (协议 #51) ============

@@ -7,7 +7,7 @@
  *   - model: 可选，默认 supervisor 配的 default（opus 4.8 [1m]）
  *   - effort: 可选，默认 high
  *
- * supervisor 通过 PTY spawn 一个独立 claude code 进程在 work_dir 跑 goal，
+ * supervisor 以 headless 管道（非 PTY）spawn 一个独立 claude code 进程在 work_dir 跑 goal，
  * 用 --output-format stream-json 解析 type:"result" 作为 stop 信号。
  * stop 后 supervisor 通过 IPC push WORK_STOPPED 回**原 chat** 的 stdio MCP server，
  * server 转 channel notification 给本 CLI，品品收到后向飞书该 chat 汇报 result。
@@ -32,8 +32,8 @@ export const pinpinSpawnWorkSessionTool: Tool = {
     properties: {
       work_dir: { type: 'string', description: '后台 session 的工作目录（绝对路径）' },
       goal: { type: 'string', description: '给后台 session 的第一段指令（任务目标 / prompt）' },
-      model: { type: 'string', description: '可选模型。缺省走 supervisor default (opus 4.8 [1m])' },
-      effort: { type: 'string', description: '可选 effort：low/medium/high/xhigh/max。缺省 high' },
+      model: { type: 'string', description: '可选模型，缺省走启动器设置的工人默认' },
+      effort: { type: 'string', description: '可选 effort：low/medium/high/max，缺省走启动器默认' },
     },
     required: ['work_dir', 'goal'],
   },

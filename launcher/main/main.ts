@@ -10,14 +10,7 @@ import {
   resolveMentions,
   type FeishuMention,
 } from '../../supervisor/sender-resolver.js';
-import type {
-  ChannelStatusInfo,
-  WorkSessionInfo,
-  SupervisorStateSnapshot,
-  LogEntry,
-  AppSettings,
-  QuotaSnapshot,
-} from '../shared-types.js';
+import type { SupervisorStateSnapshot, LogEntry } from '../shared-types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -324,8 +317,8 @@ app.whenReady().then(async () => {
       const isTea = chatId === process.env['PINPIN_TEA_CHAT_ID'];
       const role = isTea ? '茶水间' : 'Owner单聊';
       const crons = isTea
-        ? 'daily-news / weekly-recap / daily-diary / free-activity'
-        : 'daily-briefing / memory-audit';
+        ? 'daily-news / daily-diary / free-activity'
+        : 'weekly-recap / memory-audit';
       const choice = await dialog.showMessageBox(mainWindow ?? new BrowserWindow({ show: false }), {
         type: 'warning',
         buttons: ['取消', '仍要停止'],

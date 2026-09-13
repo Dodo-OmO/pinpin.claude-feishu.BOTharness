@@ -52,7 +52,6 @@ import {
   type PollVoteResult,
   type NameMappings,
   type PendingNameEntry,
-  type SetNameMappingParams,
   type ChatSummary,
   type ListChatsResult,
   type PeerMessageParams,
@@ -148,7 +147,7 @@ export class Supervisor extends EventEmitter {
   /** name-mappings.json 绝对路径（supervisor 唯一写者；透传给子 CLI env 让两进程读同一文件）。 */
   private nameMapPath: string;
   /** 待命名追踪：解析后仍是纯 ID 兜底（没友好名）的 sender，记一笔供启动器"待命名"面板拉。
-   *  key = open_id/cli_id；已在映射里的不记。SET_NAME_MAPPING 成功后 delete 对应 key。 */
+   *  key = open_id/cli_id；已在映射里的不记。setNameMappingFromUI 成功后 delete 对应 key。 */
   private pendingNames = new Map<
     string,
     { id: string; chat_id: string; snippet: string; type: 'human' | 'bot'; ts: number }
@@ -432,20 +431,6 @@ export class Supervisor extends EventEmitter {
       return { ok } as WorkOkResult;
     });
 
-    // ── 人名/bot名映射管理 IPC（启动器面板用；UI 后续阶段做）──
-    this.ipcServer.setRequestHandler(IPC_METHODS.GET_NAME_MAPPINGS, async () => {
-      return this.getNameMappings();
-    });
-    this.ipcServer.setRequestHandler(IPC_METHODS.GET_PENDING_NAMES, async () => {
-      return this.getPendingNames();
-    });
-    this.ipcServer.setRequestHandler(IPC_METHODS.SET_NAME_MAPPING, async (params) => {
-      const p = params as SetNameMappingParams;
-      if (!p.id || !p.type) return { ok: false, error: 'missing type/id' } as WorkOkResult;
-      this.setNameMappingFromUI(p.type, p.id, p.name);
-      return { ok: true } as WorkOkResult;
-    });
-
     this.ipcServer.setRequestHandler(IPC_METHODS.WORK_END, async (params) => {
       const p = params as WorkEndParams;
       const session = this.workSessions.get(p.session_id);
@@ -465,7 +450,8 @@ export class Supervisor extends EventEmitter {
       const client = initFeishuClient(cfg.appId, cfg.appSecret);
       const allowed = (chatId: string) => isChatAllowed(cfg, chatId);
       const poll = new FeishuPoll(
-        { appId: cfg.appId, client, isChatAllowed: allowed },
+        // isOwnApp：多应用同群时，另一应用里的品品发言也是"自己"，不能当别的 bot 回灌
+        { appId: cfg.appId, client, isChatAllowed: allowed, isOwnApp: (id) => this.apps.has(id) },
         {
           onMessage: (msg) => this.onFeishuMessage(msg),
           onChatListDiff: (diff) => this.onChatListDiff(diff, cfg.appId),
@@ -1253,6 +1239,7 @@ export class Supervisor extends EventEmitter {
     if (persisted.model) cli.setModel(persisted.model);
     if (persisted.effort) cli.setEffort(persisted.effort);
     if (persisted.autoCompactPct !== undefined) cli.setAutoCompactPct(persisted.autoCompactPct);
+    if (persisted.fast !== undefined) cli.setFast(persisted.fast);
   }
 
   /** main.ts pushLog 同步灌入仪表盘日志 ring buffer（warden 手机端读）。上限 300 条，超丢最旧 */
@@ -1443,6 +1430,8 @@ export class Supervisor extends EventEmitter {
     const voterOpenId = evt.operator.openId;
     const chatId = evt.chatId;
     const messageId = evt.messageId;
+    const pollApp = this.apps.get(this.resolveAppId(chatId));
+    if (!pollApp || !isChatAllowed(pollApp.cfg, chatId)) return; // 不在 allowlist 的群点票不拉 CLI
     process.stderr.write(
       `[supervisor] poll action: poll_id=${poll_id} option=${option_idx} voter=${voterOpenId.slice(0, 8)}… chat=${chatId.slice(-8)}\n`,
     );
@@ -1565,6 +1554,9 @@ export class Supervisor extends EventEmitter {
 
   /** 事件投递前确保目标频道 CLI 就绪（find-or-spawn + 等 hello，仿 onPollAction 离线兜底） */
   private async ensureChannelReadyForEvent(chatId: string, appId?: string): Promise<boolean> {
+    // 事件入口（表情 / 拉群 / 评论）与消息入口同受 allowlist 约束，否则旧群一个表情就能拉起一个频道 CLI
+    const appEntry = this.apps.get(appId ?? this.resolveAppId(chatId));
+    if (!appEntry || !isChatAllowed(appEntry.cfg, chatId)) return false;
     if (!this.channels.has(chatId)) this.spawnChannelCli(chatId, undefined, appId);
     return this.waitForChannelReady(chatId, 15000);
   }
@@ -1649,6 +1641,8 @@ export class Supervisor extends EventEmitter {
 
   private onChatListDiff(diff: ChatListDiff, appId: string): void {
     for (const added of diff.added) {
+      // 睡眠频道维持"不上线、靠消息唤醒"——chat.list 抖动（removed→added）不能把它无声叫醒
+      if (this.channelConfigStore.isStandby(added.chat_id)) continue;
       process.stderr.write(`[supervisor] 新群发现，自动 spawn: ${added.name ?? added.chat_id}\n`);
       this.spawnChannelCli(added.chat_id, added.name, appId);
     }

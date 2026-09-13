@@ -3,7 +3,7 @@
 //                              （替代 早期版本 30s tick 扫表，CPU 更低 + 触发更准）
 //
 // 启动序列：
-//   server.ts → schedulerStart() → listPendingTimerJobs(now+24h) → 给每个设 setTimeout
+//   server.ts → schedulerStart() → listPendingTimerJobs(now+365d, 本 chat) → 给每个设 setTimeout
 //   新 timer schedule 后调 scheduleJob(jobId) 即时安排
 //   cancel 时调 unscheduleJob(jobId) clearTimeout
 //   fire 时 markJobFired + 推 channel trigger，不续链（一次性任务）
@@ -171,7 +171,7 @@ async function fireRelayJob(jobId: number, job: ScheduledJob): Promise<void> {
 
   // 有意 bump 在 push 前：宁可丢一次催也不重复催（at-most-once）
   const newCount = bumpRelayNudge(jobId, nextFireAt);
-  // relay job 保持 pending 状态（bumpRelayNudge 已写 fire_at，无需 rescheduleJob 重复 UPDATE）
+  // relay job 保持 pending 状态（bumpRelayNudge 已写 fire_at）
   // 重新 schedule 下一次 fire
   scheduleJob(jobId);
 
@@ -204,8 +204,13 @@ async function fireRelayJob(jobId: number, job: ScheduledJob): Promise<void> {
  *  PINPIN_CHAT_ID env 由 supervisor spawn 时注入（channel-cli.ts L121）。
  */
 export function schedulerStart(): void {
-  const horizon = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
   const ownChatId = process.env.PINPIN_CHAT_ID;
+  if (!ownChatId) {
+    // degraded mode（无 supervisor 注入的 chat 身份）：不调度——否则会把全库别的频道的 timer 抢来在本进程 fire 并标 fired
+    logBackground("scheduled-jobs", "schedulerStart skipped: 无 PINPIN_CHAT_ID（degraded mode）");
+    return;
+  }
+  const horizon = new Date(Date.now() + 365 * 24 * 3600 * 1000).toISOString();
   const timerPending = listPendingTimerJobs(horizon, ownChatId);
   for (const job of timerPending) {
     scheduleJob(job.id);
@@ -216,7 +221,7 @@ export function schedulerStart(): void {
   }
   logBackground(
     "scheduled-jobs",
-    `schedulerStart fired (${timerPending.length} timers, ${relayPending.length} relays for chat=${ownChatId?.slice(-8) ?? "all"})`,
+    `schedulerStart fired (${timerPending.length} timers, ${relayPending.length} relays for chat=${ownChatId.slice(-8)})`,
   );
 }
 
