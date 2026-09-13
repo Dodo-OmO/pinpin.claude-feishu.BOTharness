@@ -641,7 +641,7 @@ export class Supervisor extends EventEmitter {
     return true;
   }
 
-  /** 就绪看门狗上膛：每次 CLI spawn（'started'）后调。90s 内该 chat 首次 IPC hello 到达则由
+  /** 就绪看门狗上膛：每次 CLI spawn（'started'）后调。150s 内（= MCP_TIMEOUT 120s + 30s 余量）该 chat 首次 IPC hello 到达则由
    *  clearHelloWatchdog 取消；到点仍无 hello 且 CLI 还"活着"（running 但无 IPC client）→ 记一次故障
    *  （与崩溃共用熔断，防无限循环）→ stop + 重启。二次启动时 IO 风暴已过，大概率快速握手成功。 */
   private armHelloWatchdog(chatId: string, cli: ChannelCli): void {
@@ -652,7 +652,7 @@ export class Supervisor extends EventEmitter {
       if (cli.status !== 'running') return; // 崩溃/停止路径已接管
       if (this.ipcServer.hasClient(chatId)) return; // 已握手（保险二查）
       process.stderr.write(
-        `[supervisor] channel ${chatId.slice(-8)} spawn 后 90s 未完成 MCP 握手（CLI 已放弃连接且不重试）→ 自动重启该频道\n`,
+        `[supervisor] channel ${chatId.slice(-8)} spawn 后 150s 未完成 MCP 握手（CLI 已放弃连接且不重试）→ 自动重启该频道\n`,
       );
       if (!this.registerFaultAndShouldRestart(chatId)) return; // 熔断中→转慢速自愈链，不硬重启
       cli.stop();
@@ -661,7 +661,7 @@ export class Supervisor extends EventEmitter {
         const ch = this.channels.get(chatId);
         if (ch === cli && ch.status === 'stopped') ch.start();
       }, 1_500 + Math.floor(Math.random() * 3_000));
-    }, 90_000);
+    }, 150_000);
     this.helloWatchdogs.set(chatId, timer);
   }
 
@@ -836,13 +836,13 @@ export class Supervisor extends EventEmitter {
    *  dist/mcp/server.js 启动被拖过 MCP 连接超时线 → 频道聋（同一根因也是就绪看门狗防的）。 */
   private nextStaggerAt = 0;
 
-  /** 把一次频道启动动作排进错峰队列：与上一个排入动作至少隔 2s（空闲时立即执行）。
+  /** 把一次频道启动动作排进错峰队列：与上一个排入动作至少隔 8s（空闲时立即执行；单频道 MCP 冷启动实测 12~30s，2s 盖不住重叠）。
    *  app 启动 spawnAllKnownChannels 与 04:10 daily-restart startStoppedChannelsStaggered 共用本闸，
    *  两批混排也整体错峰。action 内部自带幂等/状态防御查。 */
   private staggerChannelBoot(action: () => void): void {
     const now = Date.now();
     const at = Math.max(now, this.nextStaggerAt);
-    this.nextStaggerAt = at + 2_000;
+    this.nextStaggerAt = at + 8_000;
     const delay = at - now;
     if (delay <= 0) {
       action();

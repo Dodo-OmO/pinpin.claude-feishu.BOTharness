@@ -16,7 +16,6 @@ import type {
   AddSpeakWatchJobInput,
   AddRelayJobInput,
   KnownUser,
-  FeishuTaskMap,
   DiyPollDef,
   RelayPayload,
 } from "./types.js";
@@ -98,18 +97,6 @@ export function initDatabase(): void {
       voter_open_id TEXT NOT NULL,
       updated_at TEXT DEFAULT (datetime('now')),
       PRIMARY KEY (poll_id, voter_open_id)
-    );
-
-    -- 协议 #49：飞书自带任务 ↔ 本地 OB 台账映射
-    -- 品品建飞书任务时落 1 行，作 feishu_task_done/delete 按关键词定位的索引
-    CREATE TABLE IF NOT EXISTS feishu_task_map (
-      task_guid TEXT PRIMARY KEY,
-      ob_file TEXT,
-      ob_marker TEXT,
-      summary TEXT NOT NULL,
-      status TEXT NOT NULL DEFAULT 'open',
-      created_at TEXT DEFAULT (datetime('now')),
-      done_at TEXT
     );
 
     -- 品品按语义自建的群（解散群鉴权用）：只解散品品自己建的群，防误删Owner正式群
@@ -529,42 +516,3 @@ export function countPollVotes(pollId: string): Array<{ option_idx: number; coun
     )
     .all(pollId) as Array<{ option_idx: number; count: number }>;
 }
-
-// ============ feishu_task_map (协议 #49) ============
-
-export function insertFeishuTaskMap(rec: {
-  taskGuid: string;
-  obFile: string | null;
-  obMarker: string | null;
-  summary: string;
-}): void {
-  getDb()
-    .prepare(
-      `INSERT INTO feishu_task_map (task_guid, ob_file, ob_marker, summary)
-       VALUES (?, ?, ?, ?)`
-    )
-    .run(rec.taskGuid, rec.obFile, rec.obMarker, rec.summary);
-}
-
-export function listOpenFeishuTaskMaps(): FeishuTaskMap[] {
-  return getDb()
-    .prepare(`SELECT * FROM feishu_task_map WHERE status = 'open' ORDER BY created_at DESC`)
-    .all() as FeishuTaskMap[];
-}
-
-export function markFeishuTaskMapDone(taskGuid: string): void {
-  getDb()
-    .prepare(`UPDATE feishu_task_map SET status = 'done', done_at = datetime('now') WHERE task_guid = ?`)
-    .run(taskGuid);
-}
-
-export function getFeishuTaskMap(taskGuid: string): FeishuTaskMap | undefined {
-  return getDb()
-    .prepare(`SELECT * FROM feishu_task_map WHERE task_guid = ?`)
-    .get(taskGuid) as FeishuTaskMap | undefined;
-}
-
-export function deleteFeishuTaskMap(taskGuid: string): void {
-  getDb().prepare(`DELETE FROM feishu_task_map WHERE task_guid = ?`).run(taskGuid);
-}
-

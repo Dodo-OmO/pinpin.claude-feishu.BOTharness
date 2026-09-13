@@ -17,7 +17,6 @@ import { appendBotReply } from "../utils/chat-log.js";
 // 挡住被社工诱导把 .env / 飞书 token / 私钥等凭据发到群里。工作文件（.docx/.png 等）一律放行。
 const BLOCKED_EXTS = new Set([".pem", ".key", ".pfx", ".p12", ".ppk"]); // 私钥/证书（含 PuTTY .ppk）
 const BLOCKED_NAMES = new Set([
-  ".feishu-user-token.json",
   ".envrc", "credentials", // direnv 环境 / 云凭据文件
   "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", // SSH 私钥
   ".git-credentials", ".npmrc", // git 凭据 / npm token

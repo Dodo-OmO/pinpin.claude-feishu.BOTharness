@@ -33,7 +33,6 @@ const ALLOW_TOOLS = new Set([
   'mcp__feishu-channel__send_card',
   'mcp__feishu-channel__send_poll_card',
   'mcp__feishu-channel__pinpin_send_file',
-  'mcp__feishu-channel__create_cloud_doc',
   'mcp__feishu-channel__create_group',
   'mcp__feishu-channel__disband_group',
 ]);

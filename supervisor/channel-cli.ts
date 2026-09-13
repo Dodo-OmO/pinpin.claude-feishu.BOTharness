@@ -163,10 +163,10 @@ export class ChannelCli extends EventEmitter {
       // 关闭 Claude Code 自动记忆（AutoMem）：品品已有永久记忆50条 + 日记/人物/心境整套记忆系统，
       // AutoMem 与之重复并行，关掉省启动注入 + 统一到 vault 一套记忆。
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
-      // MCP 启动连接超时 30s→60s（毫秒，官方 env）：launcher 重启时多频道 CLI+MCP 同时开机 IO 风暴，
+      // MCP 启动连接超时（毫秒，官方 env）：launcher 重启 / 04:10 批量重启时多频道 CLI+MCP 同时开机 IO 风暴，
       // dist/mcp/server.js 冷启动实测 12.6s、峰值可超 30s；超时被 CLI 放弃且**永不重试**（文档+实测确认）
-      // → 频道表面正常实际永久聋。60s = 正常耗时 5 倍余量；配套 supervisor 就绪看门狗（90s 无 hello 重启）兜底。
-      MCP_TIMEOUT: '60000',
+      // → 频道表面正常实际永久聋。120s 给冷启动方差留足余量（批量场景实测常撞 60s 线，第一次慢一点通好过 90s 后重来）；配套 supervisor 就绪看门狗（150s 无 hello 重启）兜底。
+      MCP_TIMEOUT: '120000',
       // 自动压缩走 CLI 原生 auto-compact：阈值=有效窗口×此百分比（只能调低不能调高），到点就地原生压缩
       // （自动留摘要 + system prompt/人格/CLAUDE.md 从磁盘重注入不丢），无需 supervisor 监测（D-6 已回滚）。
       CLAUDE_AUTOCOMPACT_PCT_OVERRIDE: String(this.opts.autoCompactPct ?? DEFAULT_AUTOCOMPACT_PCT),
@@ -182,6 +182,9 @@ export class ChannelCli extends EventEmitter {
       // 语音骰子关闭（工作频道用；chat-message.ts 掷骰处读此 env 短路）
       ...(this.opts.voiceDice === false ? { PINPIN_VOICE_DICE: 'off' } : {}),
     };
+    // lark-cli 身份：Owner DM 频道回落到她本人配置（~/.lark-cli，user 身份，日历/邮件/任务可用）；
+    // 其余频道继承启动器注入的品品专用目录（bot 身份）。见 launcher/main/main.ts。
+    if (this.opts.chatId === process.env.PINPIN_OWNER_CHAT_ID) delete childEnv.LARKSUITE_CLI_CONFIG_DIR;
 
     const claudePath = resolveClaudePath();
     try {

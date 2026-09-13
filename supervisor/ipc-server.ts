@@ -45,6 +45,8 @@ export class IpcServer extends EventEmitter {
   private port = 0;
   /** chat_id → client（最新一个 hello 覆盖；同 chat_id 二次 spawn 时旧的应已断） */
   private clients = new Map<string, ClientEntry>();
+  /** 全部活跃 socket（含未 hello 注册的：短连接 sink / 管家 / 被同名 hello 顶掉的旧连接）——stop() 要全销毁，否则 server.close() 等不到回调 */
+  private sockets = new Set<net.Socket>();
   /** request method → handler */
   private requestHandlers = new Map<string, RequestHandler>();
   /** 方案A：主→子 request 的 pending 表（id → resolve/reject/timer）。30s 超时。 */
@@ -81,13 +83,14 @@ export class IpcServer extends EventEmitter {
   }
 
   async stop(): Promise<void> {
-    for (const c of this.clients.values()) {
+    for (const sock of this.sockets) {
       try {
-        c.socket.end();
+        sock.destroy();
       } catch {
         /* ignore */
       }
     }
+    this.sockets.clear();
     this.clients.clear();
     for (const p of this.pendingRequests.values()) {
       clearTimeout(p.timer);
@@ -211,6 +214,7 @@ export class IpcServer extends EventEmitter {
   private onConnection(socket: net.Socket): void {
     // entry 占位——hello 来了再填 chatId / pid
     const entry: ClientEntry = { chatId: '', pid: 0, socket, buffer: '' };
+    this.sockets.add(socket);
 
     socket.on('data', (chunk) => {
       entry.buffer += chunk.toString('utf8');
@@ -223,6 +227,7 @@ export class IpcServer extends EventEmitter {
     });
 
     socket.on('close', () => {
+      this.sockets.delete(socket);
       if (entry.chatId) {
         // 只清掉 map 中 socket 是同一个的——避免 stale close 删掉重连后的新 entry
         const current = this.clients.get(entry.chatId);

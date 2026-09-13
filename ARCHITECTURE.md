@@ -38,7 +38,7 @@
 入口 `src/mcp/server.ts`，用 `@modelcontextprotocol/sdk` 的 `StdioServerTransport` 跟它的宿主 `claude` 进程通信。它注册了几十个工具（`src/mcp/tools/`），按域分：
 
 - **飞书收发**：`pinpin-reply-text` / `pinpin-reply-voice` / `pinpin-react`（表情回应）/ `pinpin-no-reply`（明确不回但留痕）/ `cross-chat-message`（主动跨频道发言）。
-- **飞书能力**：建群 / 解散群、任务（`feishu-task.ts`）、云文档、确认卡片。
+- **飞书能力**：建群 / 解散群、确认卡片。云文档 / 任务 / 日历 / 邮件等飞书业务能力不在 MCP 里，交给官方 lark-cli（见 §5）。
 - **人格机制**：`mood-appraise`（心境评估）、`memory-rewrite`（永存记忆重写）、`write-diary`、`trigger-free-activity`。
 - **后台 work**：`pinpin-spawn-work-session` / `peek` / `send-to` / `end`（"传话筒"，见 §6）。
 
@@ -71,12 +71,12 @@
 
 ## 5. 鉴权
 
-- **飞书 OAuth user token**（`src/mcp/feishu/feishu-token.ts`）：高权操作（如建飞书任务）需以 OWNER 身份调用。授权流程生成链接 → 用户贴回 code → 换 token 落盘；后台 cron 定期刷新，快过期时私聊告警（带去重窗防轰炸）。
+- **lark-cli 身份隔离**（`launcher/main/main.ts` + `supervisor/channel-cli.ts`）：云文档 / 任务 / 日历 / 邮件等飞书业务能力走官方 lark-cli（内嵌的 AI skills 由 `scripts/lark-skills-sync.cjs` 同步到本机 Claude Code 的 skills 目录）。品品全家（Supervisor / 频道 CLI / MCP 子进程 / 工人 CLI）通过 `LARKSUITE_CLI_CONFIG_DIR` 指向一个品品专用配置目录——同一飞书应用、strict-mode 机器人身份、永不持有 OWNER 的用户 token；只有 OWNER 私聊频道去掉该 env，回落到 OWNER 本人的 `~/.lark-cli`（用户身份）。`scripts/lark-guard.cjs` 是注册在全局的 PreToolUse 守门 hook：全机禁止 `lark-cli event`（同一应用的长连接是集群模式，再起一个会抢走 Supervisor 的消息）；品品进程（env `PINPIN_LARK_GUARD=1`）再禁切 profile / 覆盖 `LARKSUITE_CLI_*` / 改配置 / 登录登出 / 自升级。
 - **OWNER 硬鉴权**（`src/mcp/owner-auth.ts`）：危险工具（重启 / 下线 / 跨频道发言等）校验"本频道最近 inbound 发送者是否为 OWNER"，fail-closed（识别不到就拒绝，引导去单聊触发）。
 
 ## 6. 后台任务（cron）与"传话筒"
 
-- **Supervisor 级 cron**（`supervisor/cron-runner.ts`）：心境衰减、飞书 token 保活——由主进程单点跑，避免 N 个频道争抢写锁。
+- **Supervisor 级 cron**（`supervisor/cron-runner.ts`）：心境衰减、OWNER 用户身份保活（每天以 OWNER 本人的 lark-cli 配置跑一次用户接口触发续期；失效则品品自己发起设备码授权、把链接私聊给 OWNER 点一下、后台轮询到完成）——由主进程单点跑，避免 N 个频道争抢写锁。
 - **频道级 cron**（`src/mcp/cron/`）：日记（每日 00:00）、早报 / 新闻 / 周回顾 / 记忆自检、自由活动——按 `chat_id` 归属分发到对应频道（`cron-owner.ts` 判定，避免重复触发）。
 - **临时 job**（`scheduled-jobs-tick.ts`）：轮询 DB 的 scheduled_job 表，到期 fire（提醒 timer / 等某人开口 / 传话转达）。
 - **传话筒 work session**（`supervisor/work-session.ts`）：品品可以 spawn 一个独立的后台 claude code 进程去某目录干活，监听它的 transcript（jsonl）判断"停下等指示"，完工后通过 IPC 把结果回报到原频道，由品品转告用户。
@@ -87,7 +87,7 @@
 
 ## 8. 持久化
 
-**SQLite（`better-sqlite3`，仅频道子进程持有）** —— 9 张表：`scheduled_tasks`（周期任务 catch-up）/ `scheduled_jobs`（一次性 timer + speak_watch + relay 传话，按 type 区分）/ `known_users`（认人：open_id↔显示名，单一权威源）/ `app_meta`（bot 持久 kv，含 OAuth state / 去重）/ `diy_polls` + `diy_poll_votes`（投票卡）/ `feishu_task_map`（飞书任务双写索引）/ `pinpin_created_groups`（建群 / 解散群追踪）/ `channel_message_ids`（消息去重）。
+**SQLite（`better-sqlite3`，仅频道子进程持有）** —— 7 张表：`scheduled_tasks`（周期任务 catch-up）/ `scheduled_jobs`（一次性 timer + speak_watch + relay 传话，按 type 区分）/ `known_users`（认人：open_id↔显示名，单一权威源）/ `app_meta`（bot 持久 kv / 去重）/ `diy_polls` + `diy_poll_votes`（投票卡）/ `pinpin_created_groups`（建群 / 解散群追踪）。入口消息去重已改为纯内存 Set，不再落表。
 
 **为什么 DB 只由频道子进程持有、Supervisor 不碰 DB**：Supervisor 跑在 Electron 内置 node（原生模块 ABI 与系统 node 不同），让 `better-sqlite3` 只被系统 node 的频道子进程持有，从架构上消除双 ABI 冲突；Supervisor 需要的 DB 操作（如投票计票）经 IPC 路由到对应 chat 子进程执行。唯一需为 Electron ABI 重编的原生模块是 `node-pty`（postinstall 跑 `electron-rebuild --only node-pty`）。
 
@@ -99,7 +99,8 @@
 
 | 依赖 | 用途 |
 |---|---|
-| `@larksuiteoapi/node-sdk` | 飞书开放平台 SDK（消息 / 事件订阅 / 任务 / 云文档） |
+| `@larksuiteoapi/node-sdk` | 飞书开放平台 SDK（消息 / 事件订阅 / 建群 / 联系人） |
+| `lark-cli`（官方飞书 CLI，本机安装、非 npm 依赖） | 云文档 / 任务 / 日历 / 邮件等飞书业务能力 + 内嵌 AI skills（品品以机器人身份、OWNER 私聊以用户身份调用） |
 | `@modelcontextprotocol/sdk` | MCP 通信框架 |
 | `better-sqlite3` | 同步 SQLite |
 | `node-pty` | 伪终端，spawn 交互式 CLI 子进程 |

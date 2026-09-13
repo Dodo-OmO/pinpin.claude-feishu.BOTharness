@@ -47,16 +47,6 @@ export interface KnownUser {
   updated_at: string;
 }
 
-export interface FeishuTaskMap {
-  task_guid: string;
-  ob_file: string | null;
-  ob_marker: string | null;
-  summary: string;
-  status: "open" | "done";
-  created_at: string;
-  done_at: string | null;
-}
-
 export interface DiyPollDef {
   poll_id: string;
   question: string;

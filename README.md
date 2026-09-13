@@ -1,8 +1,8 @@
 # 品品 · Pinpin
 
-> 一个住在飞书里的 AI 伙伴。基于 **Claude Code CLI + MCP + 飞书（Lark）SDK**，跑在 Electron 启动器里，每个聊天频道一个独立的交互式 CLI 进程。
+> 一个住在飞书里的 AI 伙伴。基于 **Claude Code CLI + MCP + 飞书（Lark）SDK + 官方 lark-cli**，跑在 Electron 启动器里，每个聊天频道一个独立的交互式 CLI 进程。
 >
-> *A companion AI that lives inside Feishu (Lark). Built on **Claude Code CLI + MCP + the Lark SDK**, running inside an Electron launcher, with one isolated interactive CLI process per chat channel.*
+> *A companion AI that lives inside Feishu (Lark). Built on **Claude Code CLI + MCP + the Lark SDK + the official lark-cli**, running inside an Electron launcher, with one isolated interactive CLI process per chat channel.*
 
 这是一个**技术作品展示仓**——把我做的飞书 bot「品品」的架构与设计思路开源出来，给同好参考。它**不是**一个能一键跑起来的产品（原因见下）。
 
@@ -43,7 +43,7 @@
 诚实地说：**这个仓克隆下来跑不起来**，因为它强耦合于我本机的运行环境：
 
 - 依赖本机安装的 **Claude Code CLI**（品品的每个频道都 spawn 一个交互式 `claude` 进程）；
-- 需要一套**飞书企业自建应用**凭据 + OAuth 授权；
+- 需要一套**飞书企业自建应用**凭据 + 本机装好官方 **lark-cli** 并登录（机器人身份 / 我本人身份两套配置目录）；
 - 人格 / 记忆 / 日记 / 心境的**真实内容全部在一个 Obsidian vault 里**（不在本仓，且永不公开）——代码只是读写它的机制；
 - Windows + Electron + `node-pty` 原生模块 + ElevenLabs（语音）key 等。
 
@@ -52,7 +52,7 @@
 > *Honestly: **you can't just clone this and run it** — it's tightly coupled to my local setup:*
 >
 > - *needs **Claude Code CLI** installed locally (each channel spawns its own interactive `claude` process);*
-> - *needs a set of **Feishu custom-app** credentials + OAuth;*
+> - *needs a set of **Feishu custom-app** credentials + the official **lark-cli** installed and logged in (two config dirs: bot identity / my own identity);*
 > - *the **real content** of personality / memory / diary / mood all lives in an Obsidian vault (not in this repo, and never public) — the code only reads and writes it;*
 > - *Windows + Electron + the `node-pty` native module + an ElevenLabs (voice) key, and so on.*
 >
@@ -81,8 +81,8 @@ Electron 启动器 / Electron launcher
 
 - **多频道 CLI 隔离**——一聊一进程，互不串扰，各自独立的上下文与人格注入。
 - **Supervisor 多进程编排**——单点拉消息、分发、生命周期管理、崩溃熔断退避。
-- **MCP 工具层**——飞书收发 / 表情回应 / 任务 / 云文档 / 心境评估 / 记忆读写 / 后台 work session 等几十个工具。
-- **双鉴权**——飞书 OAuth user token（任务等高权操作）+ OWNER open_id 硬比对（危险操作仅本人可触发）。
+- **MCP 工具层**——飞书收发 / 表情回应 / 建群 / 心境评估 / 记忆读写 / 后台 work session 等几十个工具；云文档 / 任务 / 日历 / 邮件等飞书业务能力交给官方 **lark-cli**（内嵌 28 个 skill，`scripts/lark-skills-sync.cjs` 同步到本机）。
+- **双鉴权**——lark-cli 两配置目录身份隔离（群里 = 机器人身份、我的私聊 = 我本人身份；`scripts/lark-guard.cjs` 全局守门 hook 拦切身份 / 改配置 / 登录登出）+ OWNER open_id 硬比对（危险操作仅本人可触发）。
 - **后台任务**——日记 / 早报 / 周回顾 / 记忆自检 / 自由活动等定时触发，按 chat_id 归属分发。
 - **传话筒**——品品能 spawn 一个独立的后台 claude code session 去干活，完工后自动回报到原频道。
 
@@ -90,8 +90,8 @@ Electron 启动器 / Electron launcher
 >
 > - ***Multi-channel CLI isolation*** *— one process per chat, fully isolated, each with its own context and personality injection.*
 > - ***Supervisor multi-process orchestration*** *— single point to poll, route, manage lifecycle, and back off via a crash circuit-breaker.*
-> - ***MCP tool layer*** *— dozens of tools: Feishu send/receive, emoji reactions, tasks, cloud docs, mood appraisal, memory read/write, background work sessions, and more.*
-> - ***Dual auth*** *— Feishu OAuth user token (for high-privilege actions like tasks) + a hard OWNER open_id check (dangerous actions only the owner can trigger).*
+> - ***MCP tool layer*** *— dozens of tools: Feishu send/receive, emoji reactions, group creation, mood appraisal, memory read/write, background work sessions, and more; cloud docs / tasks / calendar / mail are delegated to the official **lark-cli** (28 embedded skills, synced locally by `scripts/lark-skills-sync.cjs`).*
+> - ***Dual auth*** *— lark-cli identity isolation via two config dirs (bot identity in groups, my own identity in my DM; the global guard hook `scripts/lark-guard.cjs` blocks identity / config switching and login/logout) + a hard OWNER open_id check (dangerous actions only the owner can trigger).*
 > - ***Background jobs*** *— diary / briefings / weekly recap / memory audit / free activity, scheduled and routed by chat_id ownership.*
 > - ***"Relay" work sessions*** *— Pinpin can spawn an independent background Claude Code session to do work, then auto-report back to the original chat.*
 
@@ -120,8 +120,8 @@ supervisor/       Supervisor：飞书 poll、频道 CLI 池、IPC、cron、崩�
                   Feishu poll, channel-CLI pool, IPC, cron, crash circuit-breaker
 launcher/         Electron 启动器（main / preload / renderer）
                   Electron launcher (main / preload / renderer)
-scripts/          构建辅助脚本（node-pty 修补 / 状态栏 / 桌面快捷方式等）
-                  Build-helper scripts (node-pty patch / status line / desktop shortcut, etc.)
+scripts/          构建辅助脚本（node-pty 修补 / 状态栏 / 桌面快捷方式 / lark-cli 守门 hook 与 skill 同步等）
+                  Helper scripts (node-pty patch / status line / desktop shortcut / lark-cli guard hook & skill sync, etc.)
 ```
 
 ---

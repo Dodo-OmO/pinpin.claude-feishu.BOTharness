@@ -26,6 +26,11 @@ const VAULT_CWD = process.env['PINPIN_VAULT_CWD'] ?? '/path/to/obsidian-vault';
 
 dotenv.config({ path: join(APP_ROOT, '.env') });
 process.env['PINPIN_DB_PATH'] = join(APP_ROOT, 'data.db');
+// lark-cli 身份隔离：品品全家（supervisor / 频道 CLI / MCP 子进程 / 工人 CLI）走独立配置目录（同一飞书应用，
+// strict-mode bot = 只能机器人身份、永不持有Owner的用户 token）；Owner本人的 ~/.lark-cli 只给她自己的窗口 +
+// 品品 DM 频道（channel-cli 对 DM 删掉此 env 回落）。PINPIN_LARK_GUARD 供全局 hook scripts/lark-guard.cjs 识别品品进程。
+process.env['LARKSUITE_CLI_CONFIG_DIR'] = join(APP_ROOT, '..', 'lark-cli-pinpin');
+process.env['PINPIN_LARK_GUARD'] = '1';
 
 // 全局兜底网：任何未捕获异常 / Promise 拒绝（尤其 node-pty、setTimeout 回调里的抛错）只记全栈日志，
 // 不弹"A JavaScript error occurred in the main process"模态框、不退出，保活 supervisor。

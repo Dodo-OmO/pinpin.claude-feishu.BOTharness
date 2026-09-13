@@ -12,7 +12,7 @@ if (isOwnerOfCron("tea")) {
       trigger: "weekly-recap",
       chat_id: process.env.PINPIN_TEA_CHAT_ID,
       body:
-        "📚 周对话回顾触发（周日 23:00）。请 Task 派 weekly-recap-agent。收集所有小结返主 session 后调 write_weekly_recap({yyyy_ww, markdown}) 写本地 + create_cloud_doc + send_private_message 给Owner。",
+        "📚 周对话回顾触发（周日 23:00）。请 Task 派 weekly-recap-agent。收集所有小结返主 session 后调 write_weekly_recap({yyyy_ww, markdown}) 写本地 → `lark-cli docs +create --doc-format markdown --title <标题> --content @<本地文件>` 建云文档 → `lark-cli drive +member-add --member-type openid --member-id <Owner open_id> --perm view --yes` 给Owner开权限 → send_private_message 把链接发给Owner。",
     });
   });
 }

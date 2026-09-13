@@ -56,26 +56,18 @@ import './cron/daily-diary.js';
 import { schedulerStart, schedulerStop } from './cron/scheduled-jobs-tick.js';
 // 阶段 4 批次 1 步骤 1.5：read_chat_log tool
 import { readChatLogTool, handleReadChatLog } from './tools/read-chat-log.js';
-// 阶段 4 批次 2 tools（13 个）
+// 阶段 4 批次 2 tools
 import { sendPrivateMessageTool, handleSendPrivateMessage } from './tools/send-private-message.js';
 import { createGroupTool, handleCreateGroup } from './tools/create-group.js';
 import { disbandGroupTool, handleDisbandGroup } from './tools/disband-group.js';
 import { listActiveChatsTool, handleListActiveChats } from './tools/list-active-chats.js';
-import { listChatTabsTool, handleListChatTabs } from './tools/list-chat-tabs.js';
-import { deleteCloudDocTool, handleDeleteCloudDoc } from './tools/delete-cloud-doc.js';
-import { readDocTodosTool, handleReadDocTodos, setDocTodoTool, handleSetDocTodo } from './tools/doc-todos.js';
-import { writeSheetTool, handleWriteSheet } from './tools/write-sheet.js';
-import { writeBitableTool, handleWriteBitable } from './tools/write-bitable.js';
-import { listWikiSpacesTool, handleListWikiSpaces } from './tools/list-wiki-spaces.js';
 import { writeDiaryTool, handleWriteDiary } from './tools/write-diary.js';
 import { writeWeeklyRecapTool, handleWriteWeeklyRecap } from './tools/write-weekly-recap.js';
 import { readPushedNewsUrlsTool, handleReadPushedNewsUrls } from './tools/read-pushed-news-urls.js';
 import { sendDailyNewsCardTool, handleSendDailyNewsCard } from './tools/send-daily-news-card.js';
 import { memoryAuditReadTool, handleMemoryAuditRead } from './tools/memory-audit-read.js';
 import { memoryRewriteTool, handleMemoryRewrite } from './tools/memory-rewrite.js';
-import { createCloudDocTool, handleCreateCloudDoc } from './tools/create-cloud-doc.js';
 import { readAttachmentTool, handleReadAttachment } from './tools/read-attachment.js';
-import { readCloudDocTool, handleReadCloudDoc, editCloudDocTool, handleEditCloudDoc } from './tools/cloud-doc-rw.js';
 import { writeJourneyLogTool, handleWriteJourneyLog } from './tools/write-journey-log.js';
 import { triggerFreeActivityTool, handleTriggerFreeActivity } from './tools/trigger-free-activity.js';
 // 阶段 4 批次 3 tools（6 个）
@@ -88,25 +80,6 @@ import { notifyWhenSpeaksTool, handleNotifyWhenSpeaks } from './tools/notify-whe
 import { CROSS_CHAT_MESSAGE_TOOL, handleCrossChatMessage } from './tools/cross-chat-message.js';
 // 传话主动催 relay tool
 import { relayMessageTool, handleRelayMessage } from './tools/relay-message.js';
-// 2026-05-28 阶段补齐：飞书自带任务 6 tool（task CRUD + OAuth）
-import {
-  FEISHU_AUTHORIZE_TOOL,
-  FEISHU_SUBMIT_AUTH_CODE_TOOL,
-  FEISHU_TASK_CREATE_TOOL,
-  FEISHU_TASK_DONE_TOOL,
-  FEISHU_TASK_DELETE_TOOL,
-  FEISHU_SUBTASK_ADD_TOOL,
-  FEISHU_TASK_QUERY_TOOL,
-  FEISHU_TASK_MANAGE_TOOL,
-  handleFeishuAuthorize,
-  handleFeishuSubmitAuthCode,
-  handleFeishuTaskCreate,
-  handleFeishuTaskDone,
-  handleFeishuTaskDelete,
-  handleFeishuSubtaskAdd,
-  handleFeishuTaskQuery,
-  handleFeishuTaskManage,
-} from './tools/feishu-task.js';
 // 2026-05-28 阶段补齐：OWNER 命令 3 tool
 import {
   RESTART_SELF_TOOL,
@@ -190,15 +163,14 @@ async function main() {
   // 仅本名单内 tool 注入 _meta['app/alwaysLoad'] 豁免常驻。
   // 划分依据：① 每轮回话必调 ② 每轮 reply 后 trigger 自动触发（心情/记忆）③ cron 必成功
   // ④ work-stopped 被动触发——这些自动场景多数无法即时实测，保常驻防"搜不到→静默哑"。
-  // 其余（建群/云文档/飞书任务/owner/chrome 等）= 主动随机用，折叠按需（主动场景 ToolSearch 可靠）。
+  // 其余（建群/owner/卡片等）= 主动随机用，折叠按需（主动场景 ToolSearch 可靠）。飞书云文档/任务等走 lark-cli，不在 MCP。
   const ALWAYS_LOAD = new Set<string>([
     'pinpin_reply_text', 'pinpin_reply_voice', 'pinpin_react', 'pinpin_no_reply',
     'pinpin_memorize', 'mood_appraise', 'read_chat_log',
     'write_diary', 'send_daily_news_card', 'write_weekly_recap',
     'write_journey_log', 'memory_rewrite', 'pinpin_peek_work_session',
-    // weekly-recap cron 还调 create_cloud_doc + send_private_message；ball-tasks cron 调 read_doc_todos；
-    // relay-nudge/callback 调 send_private_message——均自动触发、无法即时实测，保常驻防静默哑。
-    'create_cloud_doc', 'send_private_message', 'read_doc_todos',
+    // weekly-recap cron / relay-nudge/callback 调 send_private_message——自动触发、无法即时实测，保常驻防静默哑。
+    'send_private_message',
   ]);
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
@@ -210,22 +182,15 @@ async function main() {
       PINPIN_SEND_FILE_TOOL,
       PINPIN_SAVE_FILE_TOOL,
       readChatLogTool,
-      // 阶段 4 批次 2（13 个）
+      // 阶段 4 批次 2
       sendPrivateMessageTool,
       listActiveChatsTool,
-      listChatTabsTool,
       writeDiaryTool,
       writeWeeklyRecapTool,
       readPushedNewsUrlsTool,
       sendDailyNewsCardTool,
       memoryAuditReadTool,
       memoryRewriteTool,
-      createCloudDocTool,
-      readCloudDocTool,
-      editCloudDocTool,
-      deleteCloudDocTool,
-      readDocTodosTool,
-      setDocTodoTool,
       readAttachmentTool,
       writeJourneyLogTool,
       triggerFreeActivityTool,
@@ -247,16 +212,6 @@ async function main() {
       disbandGroupTool,
       // 传话主动催
       relayMessageTool,
-      // 2026-05-28 阶段补齐：飞书自带任务 6 tool
-      FEISHU_AUTHORIZE_TOOL,
-      FEISHU_SUBMIT_AUTH_CODE_TOOL,
-      FEISHU_TASK_CREATE_TOOL,
-      FEISHU_TASK_DONE_TOOL,
-      FEISHU_TASK_DELETE_TOOL,
-      FEISHU_SUBTASK_ADD_TOOL,
-      // C3 扩权：看全貌(query) + 改/移/分组/评论(manage)
-      FEISHU_TASK_QUERY_TOOL,
-      FEISHU_TASK_MANAGE_TOOL,
       // 2026-05-28 阶段补齐：OWNER 命令 3 tool
       RESTART_SELF_TOOL,
       SLEEP_SELF_TOOL,
@@ -268,10 +223,6 @@ async function main() {
       SEND_CARD_TOOL,
       SEND_POLL_CARD_TOOL,
       CONFIRM_DANGEROUS_ACTION_TOOL,
-      // 群云文档：填电子表格 / 填多维表 / 列知识库（create_cloud_doc 已含建表+挂群+权限）
-      writeSheetTool,
-      writeBitableTool,
-      listWikiSpacesTool,
     ].map((t) =>
       ALWAYS_LOAD.has(t.name)
         ? {
@@ -322,8 +273,6 @@ async function main() {
         return handleDisbandGroup(args as unknown as Parameters<typeof handleDisbandGroup>[0]);
       case 'list_active_chats':
         return handleListActiveChats();
-      case 'list_chat_tabs':
-        return handleListChatTabs(args as unknown as Parameters<typeof handleListChatTabs>[0]);
       case 'write_diary':
         return handleWriteDiary(args as unknown as Parameters<typeof handleWriteDiary>[0]);
       case 'write_weekly_recap':
@@ -336,20 +285,8 @@ async function main() {
         return handleMemoryAuditRead();
       case 'memory_rewrite':
         return handleMemoryRewrite(args as unknown as Parameters<typeof handleMemoryRewrite>[0]);
-      case 'create_cloud_doc':
-        return handleCreateCloudDoc(args as unknown as Parameters<typeof handleCreateCloudDoc>[0]);
       case 'read_attachment':
         return handleReadAttachment(args as unknown as Parameters<typeof handleReadAttachment>[0]);
-      case 'read_cloud_doc':
-        return handleReadCloudDoc(args as unknown as Parameters<typeof handleReadCloudDoc>[0]);
-      case 'edit_cloud_doc':
-        return handleEditCloudDoc(args as unknown as Parameters<typeof handleEditCloudDoc>[0]);
-      case 'delete_cloud_doc':
-        return handleDeleteCloudDoc(args as unknown as Parameters<typeof handleDeleteCloudDoc>[0]);
-      case 'read_doc_todos':
-        return handleReadDocTodos(args as unknown as Parameters<typeof handleReadDocTodos>[0]);
-      case 'set_doc_todo':
-        return handleSetDocTodo(args as unknown as Parameters<typeof handleSetDocTodo>[0]);
       case 'write_journey_log':
         return handleWriteJourneyLog(args as unknown as Parameters<typeof handleWriteJourneyLog>[0]);
       case 'trigger_free_activity':
@@ -381,23 +318,6 @@ async function main() {
       // 传话主动催
       case 'relay_message':
         return handleRelayMessage(args as unknown as Parameters<typeof handleRelayMessage>[0]);
-      // 2026-05-28 阶段补齐：飞书自带任务 6 tool
-      case 'feishu_authorize':
-        return handleFeishuAuthorize();
-      case 'feishu_submit_auth_code':
-        return handleFeishuSubmitAuthCode(args as unknown as Parameters<typeof handleFeishuSubmitAuthCode>[0]);
-      case 'feishu_task_create':
-        return handleFeishuTaskCreate(args as unknown as Parameters<typeof handleFeishuTaskCreate>[0]);
-      case 'feishu_task_done':
-        return handleFeishuTaskDone(args as unknown as Parameters<typeof handleFeishuTaskDone>[0]);
-      case 'feishu_task_delete':
-        return handleFeishuTaskDelete(args as unknown as Parameters<typeof handleFeishuTaskDelete>[0]);
-      case 'feishu_subtask_add':
-        return handleFeishuSubtaskAdd(args as unknown as Parameters<typeof handleFeishuSubtaskAdd>[0]);
-      case 'feishu_task_query':
-        return handleFeishuTaskQuery(args as unknown as Parameters<typeof handleFeishuTaskQuery>[0]);
-      case 'feishu_task_manage':
-        return handleFeishuTaskManage(args as unknown as Parameters<typeof handleFeishuTaskManage>[0]);
       // 2026-05-28 阶段补齐：OWNER 命令 3 tool
       case 'restart_self':
         return handleRestartSelf();
@@ -413,12 +333,6 @@ async function main() {
       // 2026-05-28 阶段补齐：卡片家族 4 tool
       case 'send_card':
         return handleSendCard(args as unknown as Parameters<typeof handleSendCard>[0]);
-      case 'write_sheet':
-        return handleWriteSheet(args as unknown as Parameters<typeof handleWriteSheet>[0]);
-      case 'write_bitable':
-        return handleWriteBitable(args as unknown as Parameters<typeof handleWriteBitable>[0]);
-      case 'list_wiki_spaces':
-        return handleListWikiSpaces();
       case 'send_poll_card':
         return handleSendPollCard(args as unknown as Parameters<typeof handleSendPollCard>[0]);
       case 'confirm_dangerous_action':
