@@ -93,8 +93,14 @@ function loadPersonaProfiles(vaultRoot: string, chatId: string): string {
     // 映射表缺失/坏 → 全注入兜底
   }
 
+  // 单份画像注入上限：超长的截断并提示 Read 全文（记忆自检会顺带把超长画像压回上限），防一份 100K 的画像吃掉整个开机预算
+  const PERSONA_MAX_CHARS = 12000;
   const blocks = names
-    .map((n) => readVaultFile(vaultRoot, path.join(dirRel, `${n}.md`)))
+    .map((n) => {
+      const b = readVaultFile(vaultRoot, path.join(dirRel, `${n}.md`));
+      if (b.length <= PERSONA_MAX_CHARS) return b;
+      return `${b.slice(0, PERSONA_MAX_CHARS)}\n…（${n} 的画像超 ${PERSONA_MAX_CHARS} 字符已截断，需要时 Read 记忆系统\\人物\\${n}.md 看全文）`;
+    })
     .filter((b) => b.trim().length > 0);
   if (blocks.length === 0) return "";
 

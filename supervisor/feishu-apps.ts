@@ -6,6 +6,7 @@
  * lark-cli bot 身份目录固定派生：应用 1 `<appRoot>/../lark-cli-pinpin`，应用 N `<appRoot>/../lark-cli-pinpin-N`。
  */
 
+import os from 'node:os';
 import path from 'node:path';
 
 export interface FeishuAppConfig {
@@ -44,6 +45,13 @@ function nonEmpty(v: string | undefined): string | undefined {
   return t ? t : undefined;
 }
 
+/** 路径值展开 `%VAR%` 与开头 `~`——.env 在两台电脑间同步共用，用户目录不能写死用户名。 */
+function expandPath(v: string | undefined): string | undefined {
+  return v
+    ?.replace(/%([^%]+)%/g, (m, k: string) => process.env[k] ?? m)
+    .replace(/^~(?=$|[\\/])/, os.homedir());
+}
+
 /** 读 .env 里的全部应用；应用 1 缺 ID/Secret → 返回空数组（调用方 FATAL）。 */
 export function loadFeishuApps(env: NodeJS.ProcessEnv, appRoot: string): FeishuAppConfig[] {
   const apps: FeishuAppConfig[] = [];
@@ -71,7 +79,7 @@ export function loadFeishuApps(env: NodeJS.ProcessEnv, appRoot: string): FeishuA
         : undefined,
       addDirs: addDirs ? addDirs.split(';').map((x) => x.trim()).filter(Boolean) : undefined,
       larkBotDir: path.join(appRoot, '..', i === 1 ? 'lark-cli-pinpin' : `lark-cli-pinpin-${i}`),
-      larkUserDir: nonEmpty(env[`LARK_USER_CONFIG_DIR${s}`]),
+      larkUserDir: expandPath(nonEmpty(env[`LARK_USER_CONFIG_DIR${s}`])),
     });
   }
   return apps;

@@ -5,6 +5,8 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Supervisor } from '../../supervisor/index.js';
 import { loadFeishuApps } from '../../supervisor/feishu-apps.js';
+import { ensureThisMachineIsHost } from './host-lock.js';
+import { getVaultRoot } from '../../src/mcp/utils/helper.js';
 import {
   resolveSenderNameSync,
   resolveMentions,
@@ -16,9 +18,9 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const APP_ROOT = app.getAppPath();
-const VAULT_CWD = process.env['PINPIN_VAULT_CWD'] ?? '/path/to/obsidian-vault';
 
 dotenv.config({ path: join(APP_ROOT, '.env') });
+const VAULT_CWD = process.env['PINPIN_VAULT_CWD'] ?? getVaultRoot();
 process.env['PINPIN_DB_PATH'] = join(APP_ROOT, 'data.db');
 // 多飞书应用：一个启动器同时挂 N 个自建应用（每个 chat 归属且只归属一个应用），见 supervisor/feishu-apps.ts。
 const feishuApps = loadFeishuApps(process.env, APP_ROOT);
@@ -216,6 +218,11 @@ app.whenReady().then(async () => {
     process.stderr.write(
       '[main] FATAL: 飞书应用配置缺失（.env FEISHU_APP_ID / FEISHU_APP_SECRET 未配置）\n',
     );
+    app.quit();
+    return;
+  }
+  // 多台电脑共享同步盘：同一时刻只允许一台跑品品（主机开关，见 host-lock.ts）
+  if (!(await ensureThisMachineIsHost(APP_ROOT, app.getPath('userData')))) {
     app.quit();
     return;
   }

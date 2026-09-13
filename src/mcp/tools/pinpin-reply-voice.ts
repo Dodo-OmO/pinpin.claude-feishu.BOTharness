@@ -8,13 +8,7 @@
 import { sendVoice } from "./send-voice.js";
 import { sendText, splitMessage } from "./feishu-send.js";
 import { appendBotReply } from "../utils/chat-log.js";
-import { pushChannelTrigger, MOOD_APPRAISE_TRIGGER_BODY, MEMORY_REMIND_BODY } from "../utils/push-channel.js";
-
-// 回完一轮（语音成功 / 降级文字都算回完）后推心境+记忆两段 trigger，与文字回复一致
-function pushPostReplyTriggers(chatId: string): void {
-  void pushChannelTrigger({ trigger: "mood-appraise", chat_id: chatId, body: MOOD_APPRAISE_TRIGGER_BODY });
-  void pushChannelTrigger({ trigger: "memory-remind", chat_id: chatId, body: MEMORY_REMIND_BODY });
-}
+import { POST_REPLY_HINT } from "../utils/push-channel.js";
 
 export const VOICE_EMOTIONS = ["excited", "sad", "sarcastic", "whisper", "angry", "laughing", "concerned"] as const;
 type VoiceEmotion = typeof VOICE_EMOTIONS[number];
@@ -72,12 +66,12 @@ export async function handlePinpinReplyVoice(
     const result = await sendVoice(chat_id, text, emotion ?? null, reply_to_message_id);
     if (result.delivered) {
       appendBotReply(chat_id, `[语音] ${text}`);
-      pushPostReplyTriggers(chat_id);
       return {
         content: [{
           type: "text",
           text: JSON.stringify({
             delivered: true,
+            hint: POST_REPLY_HINT,
             mode: "voice",
             message_id: result.message_id,
             ...(emotion ? { emotion } : {}),
@@ -115,13 +109,13 @@ export async function handlePinpinReplyVoice(
     }
   }
   appendBotReply(chat_id, text);
-  pushPostReplyTriggers(chat_id);
   return {
     content: [{
       type: "text",
       text: JSON.stringify({
         delivered: true,
         mode: "voice_degraded_to_text",
+        hint: POST_REPLY_HINT,
         message_ids: sentIds,
       }),
     }],

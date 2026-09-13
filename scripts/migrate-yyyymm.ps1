@@ -49,7 +49,7 @@ $script:Utf8NoBom = New-Object System.Text.UTF8Encoding($false)
 # 常量
 # ============================================================================
 
-$VaultRoot = '/path/to/obsidian-vault'
+$VaultRoot = Join-Path (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent (Split-Path -Parent $PSScriptRoot)))) 'Obsidian\品品'  # scripts → 代码包 → 品品 → Claude → 同步盘根
 
 # 允许动的 5 个根（相对 vault）。任何源文件不在这 5 个根之内 → 前置检查③ 失败
 $AllowedRoots = @(

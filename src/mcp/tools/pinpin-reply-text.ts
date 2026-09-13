@@ -7,7 +7,7 @@
 
 import { sendText, replyText, splitMessage } from "./feishu-send.js";
 import { appendBotReply } from "../utils/chat-log.js";
-import { pushChannelTrigger, MOOD_APPRAISE_TRIGGER_BODY, MEMORY_REMIND_BODY } from "../utils/push-channel.js";
+import { POST_REPLY_HINT } from "../utils/push-channel.js";
 
 export const PINPIN_REPLY_TEXT_TOOL = {
   name: "pinpin_reply_text",
@@ -76,16 +76,12 @@ export async function handlePinpinReplyText(
 
   process.stderr.write(`[pinpin_reply_text] 发送 OK chunks=${chunks.length} ids=${sentIds.join(",")}\n`);
 
-  // 阶段 4 批次 3：写本地对话日志 + 推 mood-appraise trigger（PoC-3 假设通过；备选见任务 MD）
   appendBotReply(args.chat_id, args.text);
-  void pushChannelTrigger({ trigger: "mood-appraise", chat_id: args.chat_id, body: MOOD_APPRAISE_TRIGGER_BODY });
-  // 主动记忆提醒（恢复 SDK 状态机"每轮问一嘴要不要记永存"的体感）——品品自决、静默不汇报
-  void pushChannelTrigger({ trigger: "memory-remind", chat_id: args.chat_id, body: MEMORY_REMIND_BODY });
 
   return {
     content: [{
       type: "text",
-      text: JSON.stringify({ delivered: true, message_ids: sentIds }),
+      text: JSON.stringify({ delivered: true, message_ids: sentIds, hint: POST_REPLY_HINT }),
     }],
   };
 }

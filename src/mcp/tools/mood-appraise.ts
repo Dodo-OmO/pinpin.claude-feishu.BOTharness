@@ -1,5 +1,5 @@
 // mood_appraise tool（MCP 版 v2 · 2026-05-29 入参 schema 跟随 早期版本数据模型）
-// 主 session 收到 mood-appraise trigger 后调本 tool 落盘心境变化。
+// mood_appraise tool——品品按回复工具返回值里的提示，在显著情绪变化时自评心境并落盘（v2 数据模型）。
 // 主 session 自己（Opus）做 OCC 评估，推理出新主导情绪 / 能量变化 / 独白 / 新 moodlet / bonds 变化，
 // 本 tool 仅做写盘 + 累加 + 流变 append-only（不调 LLM）。
 

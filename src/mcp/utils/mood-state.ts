@@ -225,7 +225,7 @@ export interface AppraiseInput {
   bonds_delta?: { name: string; delta: number };
 }
 
-/** 主 session 收到 mood-appraise trigger 后调本函数 */
+/** 品品按回复工具返回值里的提示自评时调本函数 */
 export function appraiseMood(input: AppraiseInput): MoodState {
   const state = readMoodCurrent();
   const now = Date.now();

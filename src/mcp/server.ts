@@ -70,9 +70,8 @@ import { memoryRewriteTool, handleMemoryRewrite } from './tools/memory-rewrite.j
 import { readAttachmentTool, handleReadAttachment } from './tools/read-attachment.js';
 import { writeJourneyLogTool, handleWriteJourneyLog } from './tools/write-journey-log.js';
 import { triggerFreeActivityTool, handleTriggerFreeActivity } from './tools/trigger-free-activity.js';
-// 阶段 4 批次 3 tools（6 个）
+// 阶段 4 批次 3 tools（4 个）
 import { moodAppraiseTool, handleMoodAppraise } from './tools/mood-appraise.js';
-import { moodGetCurrentTool, handleMoodGetCurrent } from './tools/mood-get-current.js';
 import { scheduleReminderTool, handleScheduleReminder } from './tools/schedule-reminder.js';
 import { cancelScheduledTool, handleCancelScheduled } from './tools/cancel-scheduled.js';
 import { notifyWhenSpeaksTool, handleNotifyWhenSpeaks } from './tools/notify-when-speaks.js';
@@ -193,9 +192,8 @@ async function main() {
       readAttachmentTool,
       writeJourneyLogTool,
       triggerFreeActivityTool,
-      // 阶段 4 批次 3（6 个）
+      // 阶段 4 批次 3（4 个）
       moodAppraiseTool,
-      moodGetCurrentTool,
       scheduleReminderTool,
       cancelScheduledTool,
       notifyWhenSpeaksTool,
@@ -293,8 +291,6 @@ async function main() {
       // 阶段 4 批次 3
       case 'mood_appraise':
         return handleMoodAppraise(args as unknown as Parameters<typeof handleMoodAppraise>[0]);
-      case 'mood_get_current':
-        return handleMoodGetCurrent();
       case 'schedule_reminder':
         return handleScheduleReminder(args as unknown as Parameters<typeof handleScheduleReminder>[0]);
       case 'cancel_scheduled':

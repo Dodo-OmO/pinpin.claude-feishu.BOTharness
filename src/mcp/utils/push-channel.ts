@@ -31,11 +31,9 @@ export function setServerInstance(server: Server): void {
   serverRef = server;
 }
 
-// 回复后两段共用 trigger body（精简——参数语义在对应 tool description 里，这里只提示去调哪个 tool）
-export const MOOD_APPRAISE_TRIGGER_BODY =
-  "🌸 回完这轮了，有显著情绪变化就自评下心境 → 调 mood_appraise tool（平淡轮跳过）。";
-export const MEMORY_REMIND_BODY =
-  "💭 这轮有值得长期记的吗（你不知道的个人信息 / 长期偏好 / 强烈情感 / 内梗）？有就调 pinpin_memorize 去记，没有跳过。";
+// 回复工具返回值里附带的一句提示（不再另推 trigger 多跑一轮）：心境 / 记忆两件事品品在同一轮顺手判断
+export const POST_REPLY_HINT =
+  "心境有显著变化→mood_appraise；这轮有值得长期记的（个人信息 / 长期偏好 / 强烈情感 / 内梗）→pinpin_memorize；都没有就不用。";
 
 export interface ChannelTriggerPayload {
   /** trigger 名称（早报/周回顾/记忆自检/心境衰减/重启失忆护理 等） */

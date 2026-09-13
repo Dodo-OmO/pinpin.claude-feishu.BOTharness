@@ -2,6 +2,8 @@
 // 从 早期版本 src/utils/helper.ts 整体搬迁，无改动
 
 import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 /** 确保目录存在（不存在则递归创建） */
 export function ensureDir(dir: string): void {
@@ -33,11 +35,30 @@ export function safeName(name: string): string {
   return Array.from(cleaned).slice(0, 80).join("") || "unnamed";
 }
 
-/** vault 根目录——优先 env（PINPIN_VAULT_DIR / BASE_PROJECT_DIR，子进程加载 .env 后有值），
- *  最终回退硬编码默认。**绝不抛异常**：Electron 主进程不加载 .env，env 皆空时若 throw 会崩启动器
- *  （事故：批F 改 throw 后主进程 getVaultRoot 崩、启动器打不开）。硬编码兜底保证任何进程上下文都能起。 */
+let vaultFromEnvFile: string | undefined;
+
+/** vault 根目录——优先 env（PINPIN_VAULT_DIR / BASE_PROJECT_DIR，子进程加载 .env 后有值）；
+ *  env 皆空（Electron 主进程 import 期 dotenv 还没跑）→ 从本文件往上找代码包 .env 直读 BASE_PROJECT_DIR。
+ *  不写死盘符（根目录会随 NAS 变）。**绝不抛异常**（事故：批F 改 throw 后主进程 getVaultRoot 崩、启动器打不开）。 */
 export function getVaultRoot(): string {
-  return process.env.PINPIN_VAULT_DIR ?? process.env.BASE_PROJECT_DIR ?? "/path/to/obsidian-vault";
+  const v = process.env.PINPIN_VAULT_DIR ?? process.env.BASE_PROJECT_DIR;
+  if (v) return v;
+  if (vaultFromEnvFile === undefined) {
+    vaultFromEnvFile = "";
+    for (let d = path.dirname(fileURLToPath(import.meta.url)); ; d = path.dirname(d)) {
+      try {
+        const m = fs.readFileSync(path.join(d, ".env"), "utf8").match(/^BASE_PROJECT_DIR=(.+)$/m);
+        if (m) {
+          vaultFromEnvFile = m[1].trim().replace(/^(["'])(.*)\1$/, "$2");
+          break;
+        }
+      } catch {
+        /* 本层没有 .env，继续往上 */
+      }
+      if (path.dirname(d) === d) break;
+    }
+  }
+  return vaultFromEnvFile || process.cwd();
 }
 
 /** ISO 8601 周数 + 年份——给永存记忆自检 / 周回顾文件命名用。
