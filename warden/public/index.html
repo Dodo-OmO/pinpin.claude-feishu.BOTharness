@@ -58,9 +58,6 @@
     .panel .row { display: flex; align-items: center; gap: 8px; font-size: 13px; margin-bottom: 8px; }
     .panel label { color: #9aa0a6; width: 64px; flex: none; }
     .panel select, .panel input { flex: 1; background: #0f1115; color: #e6e8eb; border: 1px solid #232833; border-radius: 8px; padding: 8px; font-size: 13px; }
-    .forgotten-row { display: flex; align-items: center; gap: 8px; padding: 8px 0; border-bottom: 1px solid #232833; font-size: 13px; }
-    .forgotten-row span { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-    .forgotten-row button { background: #1f6feb; color: #fff; border: none; border-radius: 8px; padding: 7px 12px; font-size: 13px; cursor: pointer; flex: none; }
     #logs { font-family: Consolas, monospace; font-size: 12px; line-height: 1.7; white-space: pre-wrap; word-break: break-all; }
     .log-line { padding: 2px 0; border-bottom: 1px solid #181c24; }
     .log-time { color: #6e7681; }
@@ -94,10 +91,8 @@
 
   <!-- 频道 -->
   <div class="view active" id="view-channels">
-    <button id="btn-start-all" class="btn primary">▶ 启动所有频道</button>
     <button id="btn-launch" class="btn primary" style="display:none">▶ 拉起启动器</button>
     <div id="content"><div class="empty">加载中…</div></div>
-    <div id="forgotten-wrap"></div>
   </div>
 
   <!-- Work 干活 session -->
@@ -157,7 +152,8 @@
   <script src="/vendor/xterm/xterm.js"></script>
   <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});</script>
   <script>
-    const MODEL_OPTIONS = ['claude-opus-4-8 [1m]', 'claude-opus-4-7 [1m]', 'claude-opus-4-6 [1m]', 'claude-sonnet-4-6'];
+    // ⚠️ launcher\renderer\main.ts 有同名常量的独立副本——加模型要两处一起改，否则启动器上看不到
+    const MODEL_OPTIONS = ['claude-opus-5 [1m]', 'claude-opus-4-8 [1m]', 'claude-opus-4-7 [1m]', 'claude-opus-4-6 [1m]', 'claude-sonnet-5', 'claude-sonnet-4-6'];
     const EFFORT_OPTIONS = ['low', 'medium', 'high', 'max'];
     const STATUS = {
       running:  { cls: 'ok',   label: '运行中' },
@@ -222,49 +218,24 @@
       catch { $('launcher').innerHTML = '<span class="dot bad"></span>管家离线'; return; }
       const L = $('launcher');
       const btnLaunch = $('btn-launch');
-      const btnStartAll = $('btn-start-all');
       if (!state.launcher_up) {
         L.innerHTML = '<span class="dot bad"></span>启动器未运行';
-        btnLaunch.style.display = ''; btnStartAll.style.display = 'none';
+        btnLaunch.style.display = '';
         $('content').innerHTML = '<div class="empty">启动器没在运行。<br>点上方"拉起启动器"开启。</div>';
         return;
       }
-      btnLaunch.style.display = 'none'; btnStartAll.style.display = '';
+      btnLaunch.style.display = 'none';
       L.innerHTML = '<span class="dot ok"></span>启动器在线';
       lastClis = state.clis || [];
       $('content').innerHTML = lastClis.length
         ? '<div class="grid">' + lastClis.map(cliCard).join('') + '</div>'
         : '<div class="empty">启动器在线，但暂无频道。</div>';
-      refreshForgotten();
     }
-
-    // ── 已删除频道（恢复）──
-    async function refreshForgotten() {
-      let r;
-      try { r = await (await fetch('/api/forgotten')).json(); } catch { return; }
-      const list = r.channels || [];
-      const wrap = $('forgotten-wrap');
-      if (!list.length) { wrap.innerHTML = ''; return; }
-      wrap.innerHTML = '<div class="section-title">已删除频道</div><div class="panel">' +
-        list.map((c) => `<div class="forgotten-row"><span>${esc(c.display_name || c.chat_id)}</span><button data-restore="${esc(c.chat_id)}">恢复</button></div>`).join('') +
-        '</div>';
-    }
-    $('forgotten-wrap').addEventListener('click', async (e) => {
-      const btn = e.target.closest('[data-restore]');
-      if (!btn) return;
-      if (!confirm('恢复这个频道并立即上线？')) return;
-      const r = await (await fetch('/api/cli/restore?chat=' + encodeURIComponent(btn.dataset.restore), { method: 'POST' })).json();
-      if (!r.ok) alert('恢复失败：' + r.error); else setTimeout(refresh, 1200);
-    });
 
     $('content').addEventListener('click', (e) => {
       const card = e.target.closest('.card[data-chat]');
       if (card) openConsole(card.dataset.chat, 'channel');
     });
-    $('btn-start-all').onclick = async () => {
-      const r = await (await fetch('/api/cli/start-all', { method: 'POST' })).json();
-      if (!r.ok) alert('启动失败：' + r.error); else setTimeout(refresh, 1500);
-    };
     async function doLaunch() {
       const r = await (await fetch('/api/system/launch-launcher', { method: 'POST' })).json();
       alert(r.ok ? '已拉起启动器，稍候自动刷新' : '拉起失败：' + r.error);
@@ -335,7 +306,7 @@
         <div class="row" style="color:#c9d1d9;font-weight:600">频道默认</div>
         <div class="row"><label>模型</label><select id="def-model">${mo(d.channel.model)}</select></div>
         <div class="row"><label>Effort</label><select id="def-effort">${eo(d.channel.effort)}</select></div>
-        <div class="row"><label>压缩%</label><input id="def-compact" type="number" min="20" max="50" value="${d.channel.autoCompactPct ?? 25}" /></div>
+        <div class="row"><label>压缩%</label><input id="def-compact" type="number" min="20" max="70" value="${d.channel.autoCompactPct ?? 25}" /></div>
         <div class="row"><label>Fast</label><input id="def-fast" type="checkbox" ${d.channel.fast ? 'checked' : ''} style="flex:none;width:auto" /></div>
         <button class="btn primary" style="margin:4px 0 14px" onclick="saveDefaults()">保存频道默认</button>
         <div class="row" style="color:#c9d1d9;font-weight:600">Work 默认</div>
@@ -417,10 +388,8 @@
         acts = running
           ? `<button onclick="cliAction('restart')">↻ 重启</button>
              <button onclick="cliAction('compact')">压缩</button>
-             <button class="danger" onclick="cliAction('stop')">✕ 杀掉</button>
-             <button class="danger" onclick="cliForget()">🗑 删除频道</button>`
-          : `<button onclick="cliAction('start')">▶ 启动</button>
-             <button class="danger" onclick="cliForget()">🗑 删除频道</button>`;
+             <button class="danger" onclick="cliAction('stop')">✕ 杀掉</button>`
+          : `<button onclick="cliAction('start')">▶ 启动</button>`;
         $('term-settings-toggle').style.display = '';
         renderSettings(item);
       }
@@ -452,7 +421,7 @@
         <div class="row"><label>名称</label><input id="cfg-name" value="${esc(c.chat_name || '')}" placeholder="自定义卡片名" /></div>
         <div class="row"><label>模型</label><select id="cfg-model">${modelOpts}</select></div>
         <div class="row"><label>Effort</label><select id="cfg-effort">${effortOpts}</select></div>
-        <div class="row"><label>压缩%</label><input id="cfg-compact" type="number" min="20" max="50" value="${c.autoCompactPct ?? 25}" /></div>
+        <div class="row"><label>压缩%</label><input id="cfg-compact" type="number" min="20" max="70" value="${c.autoCompactPct ?? 25}" /></div>
         <div class="row"><label>Fast</label><input id="cfg-fast" type="checkbox" ${c.fast ? 'checked' : ''} style="flex:none;width:auto" /></div>
         <button class="save" onclick="saveConfig()">保存（改配置需重启频道生效）</button>`;
     }
@@ -481,13 +450,6 @@
         const r = await (await fetch(`/api/cli/${path}?chat=${encodeURIComponent(currentKey)}`, { method: 'POST' })).json();
         if (term) term.write(`\r\n\x1b[36m[已${labels[action]}：${r.ok ? '成功' : (r.error || '失败')}]\x1b[0m\r\n`);
       } catch (e) { if (term) term.write(`\r\n\x1b[31m[${labels[action]}失败：${e}]\x1b[0m\r\n`); }
-    };
-
-    window.cliForget = async () => {
-      if (!confirm('删除这个频道？品品将停止并忘记它（可在"已删除频道"里恢复）。')) return;
-      if (!confirm('再确认一次：真的删除这个频道？')) return;
-      const r = await (await fetch('/api/cli/forget?chat=' + encodeURIComponent(currentKey), { method: 'POST' })).json();
-      if (r.ok) { closeConsole(); setTimeout(refresh, 1000); } else alert('删除失败：' + r.error);
     };
 
     window.workEnd = async () => {

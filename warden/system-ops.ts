@@ -8,7 +8,7 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { CODE_ROOT } from './config.js';
 
-const LOCAL_NET_PORT = 7897;
+const LOCAL_NET_PORT = 7890;
 
 /** TCP 探测某端口是否可连（端口在 = 服务在跑） */
 function tcpPing(port: number, host = '127.0.0.1', timeout = 1500): Promise<boolean> {
@@ -25,7 +25,7 @@ function tcpPing(port: number, host = '127.0.0.1', timeout = 1500): Promise<bool
   });
 }
 
-/** 经 网络 混合网络(7897)访问国外站(google generate_204)，测连通+延迟 */
+/** 经 网络 混合网络(7890)访问国外站(google generate_204)，测连通+延迟 */
 function netProbe(): Promise<{ ok: boolean; latency_ms: number | null }> {
   return new Promise((resolve) => {
     const start = Date.now();

@@ -28,6 +28,8 @@ export interface PollActionValue {
 export interface FeishuEventSubscriberOptions {
   appId: string;
   appSecret: string;
+  /** 无 → 全放行；有 → 只服务返回 true 的 chat（FEISHU_CHAT_ALLOWLIST，多应用隔离） */
+  isChatAllowed?: (chatId: string) => boolean;
   /** 收到 user 消息时调用——会走 supervisor.onFeishuMessage 同款路径 */
   onMessage: (msg: FeishuInboundMessage) => void | Promise<void>;
   /** 收到卡片投票点击时调用（supervisor 处理计票 + 刷卡片） */
@@ -44,6 +46,8 @@ export class FeishuEventSubscriber {
   private channel: Lark.LarkChannel | null = null;
   private opts: FeishuEventSubscriberOptions;
   private started = false;
+  /** 已记过"不在 allowlist"debug 日志的 chat（同一 chat 只记一次，防刷屏） */
+  private disallowedLogged = new Set<string>();
 
   constructor(opts: FeishuEventSubscriberOptions) {
     this.opts = opts;
@@ -78,6 +82,15 @@ export class FeishuEventSubscriber {
     this.channel.on('message', (msg: Lark.NormalizedMessage) => {
       setImmediate(() => {
         try {
+          if (this.opts.isChatAllowed && !this.opts.isChatAllowed(msg.chatId)) {
+            if (!this.disallowedLogged.has(msg.chatId)) {
+              this.disallowedLogged.add(msg.chatId);
+              process.stderr.write(
+                `[feishu-event] appId=${this.opts.appId.slice(0, 8)}… chat ${msg.chatId.slice(-8)} 不在 allowlist，丢弃\n`,
+              );
+            }
+            return;
+          }
           const inbound = this.normalize(msg);
           Promise.resolve(this.opts.onMessage(inbound)).catch((e) => {
             process.stderr.write(
@@ -226,6 +239,7 @@ export class FeishuEventSubscriber {
       create_time_ms: msg.createTime,
       is_p2p: msg.chatType === 'p2p', // WS 也会推群消息，按 SDK chatType 权威区分（非硬编码）
       raw,
+      app_id: this.opts.appId,
     };
   }
 }

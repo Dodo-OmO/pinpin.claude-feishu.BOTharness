@@ -44,6 +44,9 @@ export const IPC_METHODS = {
   GET_NAME_MAPPINGS: 'get-name-mappings',  // request → NameMap { humans, bots }
   GET_PENDING_NAMES: 'get-pending-names',  // request → PendingNameEntry[]（待命名 sender）
   SET_NAME_MAPPING: 'set-name-mapping',    // request {type,id,name} → WorkOkResult（写映射 + 清待命名）
+  // 多飞书应用：supervisor 持有全部应用 client，跨应用能力集中在此（子进程只有本 chat 所属应用的 client）
+  LIST_CHATS: 'list-chats',              // child → main request {} → ListChatsResult（全部应用的群，带 app 标签）
+  PEER_MESSAGE: 'peer-message',          // child → main request PeerMessageParams → PeerMessageResult（给另一频道的品品捎话，main 推 trigger=peer-message）
   // 方案A：投票点击 → supervisor 把记票请求路由到有 DB 的频道子进程执行（main → child request）
   POLL_VOTE: 'poll.vote',              // main → child request → returns PollVoteResult
   // ── 管家(warden)桥接：独立管家进程连 supervisor 固定端口，手机远程看/控 CLI ──
@@ -239,6 +242,30 @@ export interface SetNameMappingParams {
   type: 'human' | 'bot';
   id: string;
   name: string;
+}
+
+// ── 多飞书应用（LIST_CHATS / PEER_MESSAGE）──
+export interface ChatSummary {
+  chat_id: string;
+  name?: string;
+  app_id: string;
+  /** 应用标签（.env FEISHU_APP_LABEL[_N]），给品品看的可读归属 */
+  app_label: string;
+}
+export interface ListChatsResult {
+  chats: ChatSummary[];
+}
+export interface PeerMessageParams {
+  /** 目标频道 */
+  chat_id: string;
+  /** 捎的话：前因后果 + 请那边的品品做什么 */
+  text: string;
+}
+export interface PeerMessageResult {
+  ok: boolean;
+  /** 目标频道友好名（回给品品看） */
+  chat_name?: string;
+  error?: string;
 }
 
 // ── 账号级额度（来自 statusLine rate_limits）：每窗口 used_percentage(0-100) + resets_at(Unix 秒) ──

@@ -110,12 +110,6 @@ async function handleApi(
     catch (e) { sendJson(res, { ok: false, error: e instanceof Error ? e.message : String(e) }, 502); }
     return true;
   }
-  if (url.pathname === '/api/cli/start-all') {
-    if (req.method !== 'POST') { sendJson(res, { ok: false, error: 'POST only' }, 405); return true; }
-    try { sendJson(res, await bridge.request(IPC_METHODS.WARDEN_START_ALL)); }
-    catch (e) { sendJson(res, { ok: false, error: e instanceof Error ? e.message : String(e) }, 502); }
-    return true;
-  }
   if (url.pathname === '/api/cli/config') {
     if (req.method !== 'POST') { sendJson(res, { ok: false, error: 'POST only' }, 405); return true; }
     const chat = url.searchParams.get('chat');
@@ -152,22 +146,6 @@ async function handleApi(
     if (req.method !== 'POST') { sendJson(res, { ok: false, error: 'POST only' }, 405); return true; }
     try { sendJson(res, await bridge.request(IPC_METHODS.WARDEN_FETCH_QUOTA)); }
     catch (e) { sendJson(res, { ok: false, error: e instanceof Error ? e.message : String(e) }, 502); }
-    return true;
-  }
-
-  // ── 批2 频道删除 / 恢复 ──
-  if (url.pathname === '/api/cli/forget' || url.pathname === '/api/cli/restore') {
-    if (req.method !== 'POST') { sendJson(res, { ok: false, error: 'POST only' }, 405); return true; }
-    const chat = url.searchParams.get('chat');
-    if (!chat) { sendJson(res, { ok: false, error: 'no chat' }, 400); return true; }
-    const m = url.pathname.endsWith('forget') ? IPC_METHODS.WARDEN_FORGET_CHANNEL : IPC_METHODS.WARDEN_RESTORE_CHANNEL;
-    try { sendJson(res, await bridge.request(m, { chat_id: chat })); }
-    catch (e) { sendJson(res, { ok: false, error: e instanceof Error ? e.message : String(e) }, 502); }
-    return true;
-  }
-  if (url.pathname === '/api/forgotten') {
-    try { sendJson(res, await bridge.request(IPC_METHODS.WARDEN_LIST_FORGOTTEN)); }
-    catch (e) { sendJson(res, { channels: [], error: e instanceof Error ? e.message : String(e) }, 502); }
     return true;
   }
 

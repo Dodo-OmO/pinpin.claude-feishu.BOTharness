@@ -145,7 +145,7 @@ export async function parseImage(ctx: ParseCtx): Promise<string | null> {
     const imageKey = (JSON.parse(rawContent || "{}") as { image_key?: string }).image_key;
     if (!imageKey) return null;
     const localPath = await saveInboundImage(payload.message_id, imageKey);
-    return `[图片] 有人发了图片，已压缩存本地——**这轮先用 Read 工具读这张图、看清内容再回应**：${localPath}`;
+    return `[图片] 有人发了图片，原图已存本地——**这轮先用 Read 工具读这张图、看清内容再回应**：${localPath}`;
   } catch (e) {
     process.stderr.write(
       `[chat-message] 图片处理失败 msg_id=${payload.message_id}: ${e instanceof Error ? e.message : e}\n`,
@@ -289,7 +289,7 @@ export async function parsePost(ctx: ParseCtx): Promise<string | null> {
     }
     const parts = [...textParts];
     if (imagePaths.length > 0) {
-      parts.push(`[图片×${imagePaths.length}] 已存本地，用 Read 工具查看：${imagePaths.join(" | ")}`);
+      parts.push(`[图片×${imagePaths.length}] 原图已存本地，用 Read 工具查看：${imagePaths.join(" | ")}`);
     }
     parsed = parts.join("\n").trim();
   } catch (e) {

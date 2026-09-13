@@ -27,7 +27,7 @@ try {
   const sub = (name) => new RegExp(BIN + name + String.raw`\b`, 'i');
 
   if (sub('event').test(cmd)) {
-    deny('本机品品已用该飞书应用长连接收事件（集群模式只投一个客户端），`lark-cli event …` 会抢走品品的消息，任何会话都禁止。');
+    deny('本机品品已用它的各个飞书应用长连接收事件（集群模式只投一个客户端），`lark-cli event …` 会抢走品品的消息，任何会话都禁止。');
   }
   if (process.env.PINPIN_LARK_GUARD !== '1') process.exit(0);
 

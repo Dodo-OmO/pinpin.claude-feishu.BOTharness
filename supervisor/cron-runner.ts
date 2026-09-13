@@ -25,6 +25,7 @@ import { exec } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { getFeishuClient } from './feishu-client.js';
+import type { FeishuAppConfig } from './feishu-apps.js';
 import type { Supervisor } from './index.js';
 
 interface SupervisorCronJob {
@@ -88,10 +89,12 @@ export class SupervisorCronRunner {
     process.stderr.write('[supervisor-cron] stopped\n');
   }
 
-  /** 跑一条 lark-cli（Owner本人配置，user 身份），解析 JSON；非 JSON/失败 → null */
-  private larkCliJson(args: string[], timeoutMs: number): Promise<Record<string, unknown> | null> {
+  /** 跑一条 lark-cli（Owner用户身份），解析 JSON；非 JSON/失败 → null。
+   *  configDir 有值 → 用该目录（该应用租户的Owner用户身份）；无值 → 回落 lark-cli 默认 ~/.lark-cli。 */
+  private larkCliJson(args: string[], timeoutMs: number, configDir?: string): Promise<Record<string, unknown> | null> {
     const env = { ...process.env };
-    delete env.LARKSUITE_CLI_CONFIG_DIR;
+    if (configDir) env.LARKSUITE_CLI_CONFIG_DIR = configDir;
+    else delete env.LARKSUITE_CLI_CONFIG_DIR;
     return new Promise((resolve) => {
       exec(['lark-cli', ...args].join(' '), { env, windowsHide: true, timeout: timeoutMs }, (_err, stdout) => {
         try {
@@ -110,8 +113,9 @@ export class SupervisorCronRunner {
   }
 
   /** Owner用户身份失效 → 品品自己发起设备码授权，把链接私聊给Owner（她只需点一下「授权」），
-   *  后台轮询到她点完即登录完成。每天最多提醒一次（标记文件去重）。 */
-  private async alertOwnerReauth(): Promise<void> {
+   *  后台轮询到她点完即登录完成。每天最多提醒一次（标记文件去重）。
+   *  app = Owner DM 所属的飞书应用（多应用：文案带 label、设备码轮询用该应用的用户目录、发送用该应用 client）。 */
+  private async alertOwnerReauth(app: FeishuAppConfig): Promise<void> {
     const chatId = process.env.PINPIN_OWNER_CHAT_ID;
     if (!chatId) return;
     const today = new Date().toISOString().slice(0, 10);
@@ -122,30 +126,31 @@ export class SupervisorCronRunner {
     } catch {
       /* 标记读写失败不影响提醒 */
     }
-    const start = await this.larkCliJson(['auth', 'login', '--no-wait', '--json', '--recommend'], 60_000);
+    const start = await this.larkCliJson(['auth', 'login', '--no-wait', '--json', '--recommend'], 60_000, app.larkUserDir);
     const url = start?.verification_url;
     const code = start?.device_code;
     let text: string;
     if (typeof url === 'string' && typeof code === 'string' && /^[A-Za-z0-9._-]+$/.test(code)) {
       text =
-        '🔑 我的飞书「Owner本人身份」授权失效了（日历 / 邮件 / 任务这类要用你身份的功能会不好使）。' +
+        `🔑 我的飞书「${app.label}·你本人身份」授权失效了（日历 / 邮件 / 任务这类要用你身份的功能会不好使）。` +
         '点下面的链接、选你自己的账号、按一下「授权」就好，10 分钟内有效：\n' + url;
       // 后台轮询直到她点完授权（设备码 10 分钟有效，超时静默；明天 keepalive 会再提醒）
       const env = { ...process.env };
-      delete env.LARKSUITE_CLI_CONFIG_DIR;
+      if (app.larkUserDir) env.LARKSUITE_CLI_CONFIG_DIR = app.larkUserDir;
+      else delete env.LARKSUITE_CLI_CONFIG_DIR;
       exec(
         `lark-cli auth login --device-code ${code} --json`,
         { env, windowsHide: true, timeout: 11 * 60_000 },
         (_err, stdout) => {
           const done = /authorization_complete/.test(String(stdout));
-          process.stderr.write(`[supervisor-cron] Owner重新授权${done ? '完成' : '未完成（超时或未点）'}\n`);
+          process.stderr.write(`[supervisor-cron] Owner重新授权（app=${app.label}）${done ? '完成' : '未完成（超时或未点）'}\n`);
         },
       );
     } else {
-      text = '🔑 我的飞书「Owner本人身份」授权失效了，这次自动发起重新授权也没成功；明天凌晨我会再自动试一次，到时给你发链接。';
+      text = `🔑 我的飞书「${app.label}·你本人身份」授权失效了，这次自动发起重新授权也没成功；明天凌晨我会再自动试一次，到时给你发链接。`;
     }
     try {
-      await getFeishuClient().im.v1.message.create({
+      await getFeishuClient(app.appId).im.v1.message.create({
         data: { receive_id: chatId, msg_type: 'text', content: JSON.stringify({ text }) },
         params: { receive_id_type: 'chat_id' },
       });
@@ -169,17 +174,20 @@ export class SupervisorCronRunner {
       },
     });
 
-    // 2. feishu-token-keepalive：每天 04:00 → 以Owner本人配置（~/.lark-cli，user 身份）跑一次 lark-cli 用户接口。
+    // 2. feishu-token-keepalive：每天 04:00 → 以「Owner DM 所属应用」的用户身份配置跑一次 lark-cli 用户接口。
     //    lark-cli 的 refresh token 7 天滚动，每天用一次即自动续期；用户身份缺失/失效 → alertOwnerReauth：
     //    品品自己发起设备码授权、把链接私聊给Owner点一下、后台轮询完成登录（Owner不用跑任何命令）。
-    //    品品全家的 LARKSUITE_CLI_CONFIG_DIR 指向 bot 专用目录，这里要去掉才是Owner本人配置。
+    //    品品全家的 LARKSUITE_CLI_CONFIG_DIR 指向 bot 专用目录，这里要换成该应用的用户身份目录才是Owner本人配置。
     this.jobs.set('feishu-token-keepalive', {
       name: 'feishu-token-keepalive',
       schedule: { kind: 'daily', h: 4, m: 0 },
       handler: () =>
         new Promise<void>((resolve) => {
+          const chatId = process.env.PINPIN_OWNER_CHAT_ID;
+          const dmApp: FeishuAppConfig | undefined = chatId ? this.supervisor.appForChat(chatId) : undefined;
           const env = { ...process.env };
-          delete env.LARKSUITE_CLI_CONFIG_DIR;
+          if (dmApp?.larkUserDir) env.LARKSUITE_CLI_CONFIG_DIR = dmApp.larkUserDir;
+          else delete env.LARKSUITE_CLI_CONFIG_DIR;
           exec(
             'lark-cli contact +get-user --as user --json',
             { env, windowsHide: true, timeout: 60_000 },
@@ -191,9 +199,9 @@ export class SupervisorCronRunner {
                 /* 非 JSON 输出 = 失败 */
               }
               process.stderr.write(
-                `[supervisor-cron] feishu-token-keepalive ${ok ? '续期检查完成' : 'Owner用户身份不可用'}${err ? `（${err.message}）` : ''}\n`,
+                `[supervisor-cron] feishu-token-keepalive(app=${dmApp?.label ?? '?'}) ${ok ? '续期检查完成' : 'Owner用户身份不可用'}${err ? `（${err.message}）` : ''}\n`,
               );
-              if (!ok) this.alertOwnerReauth().catch(() => {});
+              if (!ok && dmApp) this.alertOwnerReauth(dmApp).catch(() => {});
               resolve();
             },
           );

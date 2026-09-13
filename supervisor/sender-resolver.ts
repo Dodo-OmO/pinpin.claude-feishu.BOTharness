@@ -2,28 +2,35 @@
  * 发送者昵称解析（supervisor 端）—— src/mcp/utils/sender-names.ts 的精简同款搬迁。
  *
  * 跟子 MCP server 端区别：
- *   - 不绑定 src/mcp/tools/feishu-send 的 client；用 supervisor/feishu-client 自己的
- *   - 同步 fallback 路径：先 env 命中（BOT_NAME_MAP / FEISHU_KNOWN_USERS / cache）→ 返真名
+ *   - 不绑定 src/mcp/tools/feishu-send 的 client；用 supervisor/feishu-client 自己的（多应用 Map）
+ *   - 同步 fallback 路径：先 env 命中（BOT_NAME_MAP / FEISHU_KNOWN_USERS，合并全部应用 / cache）→ 返真名
  *     未命中 → 返 fallback（slice -8）+ 异步预热缓存（下次同 sender 拿真名）
  *   - 异步预热不阻塞日志 push（main.ts pushLog 是同步路径）
+ *   - 多应用：预热逐个试各飞书应用的 client（appId 命中的优先），41050 只说明该 app 缺权限，换下一个再试
  *
  * env 协议同 src/mcp/utils/sender-names.ts，重启 launcher 即生效。
  */
 
-import { getFeishuClient } from './feishu-client.js';
+import { listFeishuClients } from './feishu-client.js';
+import { loadFeishuApps } from './feishu-apps.js';
 import { parseEnvMap, resolveMentions } from '../src/shared/sender-shared.js';
 import { getHumanNameMapping, getBotNameMapping } from '../src/shared/name-map-store.js';
 export type { FeishuMentionShared as FeishuMention } from '../src/shared/sender-shared.js';
 
-const BOT_NAME_MAP = parseEnvMap(process.env['FEISHU_BOT_ROSTER']);
-const ENV_KNOWN_USERS = parseEnvMap(process.env['FEISHU_KNOWN_USERS']);
+// 跨应用合并（appRoot 传空串——这里只取 knownUsers/botRoster 字段，larkBotDir 不用）
+const BOT_NAME_MAP: Record<string, string> = {};
+const ENV_KNOWN_USERS: Record<string, string> = {};
+for (const a of loadFeishuApps(process.env, '')) {
+  Object.assign(BOT_NAME_MAP, parseEnvMap(a.botRoster));
+  Object.assign(ENV_KNOWN_USERS, parseEnvMap(a.knownUsers));
+}
 
 /** 同步 user 缓存（首次返 fallback，async 预热后下次命中） */
 const userNameCache = new Map<string, string>();
 const inflightLookups = new Set<string>();
 
 /** 同步反查：name-map-store（Owner启动器改的实时映射，最高优先）→ bot/user env → cache → fallback（slice -8） */
-export function resolveSenderNameSync(senderOpenId: string, senderType: 'user' | 'app'): string {
+export function resolveSenderNameSync(senderOpenId: string, senderType: 'user' | 'app', appId?: string): string {
   if (!senderOpenId) return '?';
   if (senderType === 'app') {
     const mapped = getBotNameMapping(senderOpenId);
@@ -38,35 +45,50 @@ export function resolveSenderNameSync(senderOpenId: string, senderType: 'user' |
   const cached = userNameCache.get(senderOpenId);
   if (cached) return cached;
   // 触发异步预热（下次 hit）
-  void primeUserName(senderOpenId);
+  void primeUserName(senderOpenId, appId);
   return senderOpenId.slice(-8);
 }
 
-/** 异步预热 user name —— 不阻塞 caller，结果缓存供下次 sync 命中 */
-async function primeUserName(openId: string): Promise<void> {
+/** 异步预热 user name —— 不阻塞 caller，结果缓存供下次 sync 命中。
+ *  多应用：appId 命中的 client 优先试，其余全部应用逐个兜底试（41050 只代表该 app 无权限，换下一个）。
+ *  全部应用都试完且至少一个 41050 才缓存 fallback（slice -8）；全部因非 41050 错误失败则不缓存，允许下次重试。 */
+async function primeUserName(openId: string, appId?: string): Promise<void> {
   if (inflightLookups.has(openId) || userNameCache.has(openId)) return;
   inflightLookups.add(openId);
   try {
-    const res = await getFeishuClient().contact.v3.user.get({
-      path: { user_id: openId },
-      params: { user_id_type: 'open_id' },
-    });
-    const name = res.data?.user?.name?.trim() || res.data?.user?.nickname?.trim();
-    if (name) {
-      userNameCache.set(openId, name);
+    const all = listFeishuClients();
+    const ordered = appId
+      ? [...all.filter((c) => c.appId === appId), ...all.filter((c) => c.appId !== appId)]
+      : all;
+    let anyAuthDenied = false;
+    for (const { appId: candidateAppId, client } of ordered) {
+      try {
+        const res = await client.contact.v3.user.get({
+          path: { user_id: openId },
+          params: { user_id_type: 'open_id' },
+        });
+        const name = res.data?.user?.name?.trim() || res.data?.user?.nickname?.trim();
+        if (name) {
+          userNameCache.set(openId, name);
+          return;
+        }
+      } catch (e) {
+        const feishuCode = (e as { response?: { data?: { code?: number } } })?.response?.data?.code;
+        if (feishuCode === 41050) {
+          anyAuthDenied = true;
+          process.stderr.write(
+            `[sender-resolver] ${openId} app=${candidateAppId.slice(0, 8)}… 41050（该应用无权读用户名，试下一个应用）\n`,
+          );
+        } else {
+          process.stderr.write(
+            `[sender-resolver] getUserName 失败 ${openId} app=${candidateAppId.slice(0, 8)}…: ${e instanceof Error ? e.message : e}\n`,
+          );
+        }
+      }
     }
-  } catch (e) {
-    const feishuCode = (e as { response?: { data?: { code?: number } } })?.response?.data?.code;
-    if (feishuCode === 41050) {
-      // no user authority —— ENV_KNOWN_USERS 没配，缓存 fallback 避免反复请求
+    // 全部应用都试完仍未拿到名字：只有出现过 41050（明确无权限，非临时网络错误）才缓存 fallback 避免反复请求
+    if (anyAuthDenied) {
       userNameCache.set(openId, openId.slice(-8));
-      process.stderr.write(
-        `[sender-resolver] ${openId} 41050 (无权读用户名；可在 .env FEISHU_KNOWN_USERS 配 "${openId}:友好名" 显式映射)\n`,
-      );
-    } else {
-      process.stderr.write(
-        `[sender-resolver] getUserName 失败 ${openId}: ${e instanceof Error ? e.message : e}\n`,
-      );
     }
   } finally {
     inflightLookups.delete(openId);

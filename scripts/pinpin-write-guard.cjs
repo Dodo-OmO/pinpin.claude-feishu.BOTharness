@@ -1,12 +1,12 @@
-// PreToolUse 写保护（2026-08-24，三兄弟提示词工作频道配套）：
+// PreToolUse 写保护（2026-08-24，Project X提示词工作频道配套）：
 // 拦 Write/Edit/NotebookEdit 落向Owner业务目录（品品对这些目录只读不写——所有频道一律适用）。
 // 备胎机制：主闸是 vault settings.json 的 permissions.deny 路径规则；
 // 若实测 deny 在 bypassPermissions 下不生效，才把本脚本挂进 settings.json 的 PreToolUse。
 // exit 2 = 阻止该次工具调用（stderr 回喂模型）；任何解析异常 → exit 0 放行（fail-safe，不能瘫痪全部写入）。
 
 const FORBIDDEN_PREFIXES = [
-  "d:\\repo\\claude\\workspace\\code-base\\九州2608-三兄弟新娘",
-  "d:\\repo\\工作\\九州文化",
+  "d:\\repo\\claude\\workspace\\code-base\\client-project",
+  "d:\\repo\\工作\\Client Studio",
 ];
 
 let raw = "";

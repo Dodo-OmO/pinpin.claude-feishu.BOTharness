@@ -115,6 +115,18 @@ export function initDatabase(): void {
       // 列已存在时 SQLite 抛错——忽略（ALTER TABLE IF NOT EXISTS 列不被 SQLite 3.x 支持）
     }
   }
+
+  // 多飞书应用：known_users 加 app_id 列区分归属（同名 open_id 在不同应用下天然不同）
+  try {
+    db.exec(`ALTER TABLE known_users ADD COLUMN app_id TEXT`);
+  } catch {
+    // 列已存在时 SQLite 抛错——忽略
+  }
+  // 历史行（升级前写入、app_id 为 NULL）回填为当前主应用，回填后才对该应用可见
+  const primaryAppId = process.env.PINPIN_PRIMARY_APP_ID;
+  if (primaryAppId) {
+    db.prepare(`UPDATE known_users SET app_id = ? WHERE app_id IS NULL`).run(primaryAppId);
+  }
 }
 
 function getDb(): Database.Database {
@@ -371,21 +383,22 @@ export function bumpRelayNudge(jobId: number, newFireAtIso: string): number {
 export function upsertKnownUser(openId: string, name: string): void {
   getDb()
     .prepare(
-      `INSERT INTO known_users (open_id, name, updated_at)
-       VALUES (?, ?, datetime('now'))
+      `INSERT INTO known_users (open_id, name, app_id, updated_at)
+       VALUES (?, ?, ?, datetime('now'))
        ON CONFLICT(open_id) DO UPDATE SET name = excluded.name, updated_at = datetime('now')`
     )
-    .run(openId, name);
+    .run(openId, name, process.env.FEISHU_APP_ID ?? null);
 }
 
 export function resolveOpenId(nameOrAlias: string): string | undefined {
+  const appId = process.env.FEISHU_APP_ID;
   const exact = getDb()
-    .prepare(`SELECT open_id FROM known_users WHERE name = ?`)
-    .get(nameOrAlias) as { open_id: string } | undefined;
+    .prepare(`SELECT open_id FROM known_users WHERE name = ? AND app_id = ?`)
+    .get(nameOrAlias, appId) as { open_id: string } | undefined;
   if (exact) return exact.open_id;
   const fuzzy = getDb()
-    .prepare(`SELECT open_id FROM known_users WHERE name LIKE ? LIMIT 1`)
-    .get(`%${nameOrAlias}%`) as { open_id: string } | undefined;
+    .prepare(`SELECT open_id FROM known_users WHERE name LIKE ? AND app_id = ? LIMIT 1`)
+    .get(`%${nameOrAlias}%`, appId) as { open_id: string } | undefined;
   return fuzzy?.open_id;
 }
 
@@ -401,11 +414,12 @@ export function getKnownUserName(openId: string): string | undefined {
 }
 
 export function seedKnownUsers(entries: Array<{ openId: string; name: string }>): void {
+  const appId = process.env.FEISHU_APP_ID ?? null;
   const stmt = getDb().prepare(
-    `INSERT INTO known_users (open_id, name) VALUES (?, ?) ON CONFLICT(open_id) DO NOTHING`
+    `INSERT INTO known_users (open_id, name, app_id) VALUES (?, ?, ?) ON CONFLICT(open_id) DO NOTHING`
   );
   const tx = getDb().transaction((rows: typeof entries) => {
-    for (const e of rows) stmt.run(e.openId, e.name);
+    for (const e of rows) stmt.run(e.openId, e.name, appId);
   });
   tx(entries);
 }

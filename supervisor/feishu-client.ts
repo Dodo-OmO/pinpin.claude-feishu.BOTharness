@@ -1,22 +1,31 @@
 /**
- * 飞书 Client 单例 —— supervisor 集中持有，频道 stdio MCP server 子进程不直连飞书。
- * 实际 send 调用走 IPC RPC 到 supervisor（限速 + 撞锁兜底），保证全局只有 1 个 Lark.Client 实例。
+ * 飞书 Client 多应用 Map —— supervisor 集中持有每个飞书自建应用的 Lark.Client 实例。
+ * 频道 stdio MCP server 子进程不直连飞书，跨应用能力（LIST_CHATS / PEER_MESSAGE 频道间捎话）经 IPC 转发到 supervisor。
  */
 
 import * as Lark from '@larksuiteoapi/node-sdk';
 
-let _client: Lark.Client | null = null;
+const clients = new Map<string, Lark.Client>();
 
+/** 幂等：同 appId 二次调用返回已有实例 */
 export function initFeishuClient(appId: string, appSecret: string): Lark.Client {
-  if (_client) return _client;
-  _client = new Lark.Client({ appId, appSecret, disableTokenCache: false });
+  const existing = clients.get(appId);
+  if (existing) return existing;
+  const client = new Lark.Client({ appId, appSecret, disableTokenCache: false });
+  clients.set(appId, client);
   process.stderr.write(`[feishu-client] initialized (appId=${appId.slice(0, 8)}…)\n`);
-  return _client;
+  return client;
 }
 
-export function getFeishuClient(): Lark.Client {
-  if (!_client) {
-    throw new Error('飞书 Client 未初始化——先调 initFeishuClient(appId, appSecret)');
+export function getFeishuClient(appId: string): Lark.Client {
+  const client = clients.get(appId);
+  if (!client) {
+    throw new Error('未初始化的飞书应用 ' + appId.slice(0, 8));
   }
-  return _client;
+  return client;
+}
+
+/** 列出全部已初始化的应用 client（sender-resolver 跨应用逐个试用户接口时用） */
+export function listFeishuClients(): Array<{ appId: string; client: Lark.Client }> {
+  return [...clients.entries()].map(([appId, client]) => ({ appId, client }));
 }

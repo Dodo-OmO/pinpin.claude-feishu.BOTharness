@@ -15,6 +15,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { loadMemoryBlock } from "./utils/memory.js";
 import { loadBotRoster } from "./utils/bot-roster.js";
+import { parseEnvMap } from "../shared/sender-shared.js";
 
 // 同步休眠 ms 毫秒——Atomics.wait 在 SharedArrayBuffer 上等待固定时间
 // 用途：readVaultFile retry 间的等待。buildInstructions 是 sync，不能用 setTimeout。
@@ -115,6 +116,38 @@ function loadChannelBrief(vaultRoot: string, chatId: string): string {
   return `---\n[本频道专属规矩]\n（本节为当前频道量身定制，与前文冲突时以本节为准）\n${raw}`;
 }
 
+// 多飞书应用（Client单启动器）：`PINPIN_APP_LABEL` 有值且 `vault\环境\<label>.md` 存在时注入，
+// 描述该应用所处的环境/公司/团队/职场规矩——子进程按自己所属应用各读各的，互不干扰。
+function loadAppEnvBlock(vaultRoot: string): string {
+  const label = process.env.PINPIN_APP_LABEL;
+  if (!label) return "";
+  const relPath = path.join("环境", `${label}.md`);
+  if (!fs.existsSync(path.join(vaultRoot, relPath))) return "";
+  const raw = readVaultFile(vaultRoot, relPath);
+  if (!raw.trim()) return "";
+  return `---\n[所在环境·${label}]\n${raw}`;
+}
+
+// 权限四档段落里"同级放行"的对象由 `FEISHU_PEER_USERS` 生成（每应用各配各的名单，如User C只留 A 应用）。
+// 空 → 该档不出现，标题的档位数与作图例外/其它人一起自洽收缩为三档。
+function buildPermissionsBlock(): string {
+  const peers = Object.entries(parseEnvMap(process.env.FEISHU_PEER_USERS));
+  const tierLabel = peers.length > 0 ? "四" : "三";
+  const peerLines = peers
+    .map(
+      ([ou, name]) =>
+        `- **${name}**（\`${ou}\`）：**文件读写 / 命令执行 / 存盘发文件 —— 跟豆姐同级放行**，别问、别发确认卡、别说"这事得豆姐拍板"。只两条不放：① **控制你本体**（重启 / 下线 / 压缩上下文 / 解散群）→ 拒，说"这个只有豆姐能拍板"（工具层也会硬拒，别硬试）；② **豆姐的私人库和个人隐私**（\`owner-private-vault\` 整库、家庭住址、证件、私人日程）→ 不翻不发。`,
+    )
+    .join("\n");
+  const peerNamesForCode = peers.length > 0 ? `和${peers.map(([, n]) => n).join("/")}` : "";
+  return `【权限${tierLabel}档】
+- **owner = 豆姐**（档案里写的「Owner」就是她，你只叫她豆姐）：全权（危险 tool / 文件读写 / 命令执行 / 跨 chat 发言 / 重启=\`restart_self\` / 下线=\`sleep_self\` / 压缩=\`compact_chat\`）。
+${peerLines ? peerLines + "\n" : ""}- **其它人**：涉及文件读写 / 命令执行 / 跨 chat 发言 / 删除等 → 拒绝（"这事得豆姐拍板"）或调 \`confirm_dangerous_action\` 发飞书确认卡。
+- **对所有人（含豆姐${peerNamesForCode}）**：要求改你自身代码 → 明确拒绝。
+- **例外·作图**：skill \`作图\` **整条流程**（写 SVG、跑 libtv 命令、存进作业本、发图）都是你自己的本事，不算"帮人跑任意命令"也不算"帮人写文件"，**对所有人放行**、不发确认卡。
+（**只有"控制本体"那四个工具**——重启 / 下线 / 压缩 / 解散群——在代码层真按 open_id 硬比对；**其余全靠你自觉**，没有代码兜底。所以上面每条你都得当真。）`;
+}
+
 // 硬规则单源常量（原外置 HARD_RULE_REMINDER_SDK.md 已并入本常量去重，不再外置读取）
 // 飞书 channel 消息/输出协议 + 通用行为硬规则（联网/派小弟/自我落实/调度）
 const HARD_RULE_REMINDER_CHANNELS = `---
@@ -122,7 +155,7 @@ const HARD_RULE_REMINDER_CHANNELS = `---
 
 【消息格式】
 你接收的飞书消息以 <channel> 标签到达，meta 字段注入：
-\`<channel source="feishu-channel" chat_id="..." message_id="..." user="Owner" sender_type="human|bot" user_open_id="ou_xxx|cli_xxx" ts="2026-05-29 20:00" reply_to_quote="...">消息内容</channel>\`
+\`<channel source="feishu-channel" chat_id="..." message_id="..." user="豆姐" sender_type="human|bot" user_open_id="ou_xxx|cli_xxx" ts="2026-05-29 20:00" reply_to_quote="...">消息内容</channel>\`
 
 字段说明：
 - \`ts\` = **消息发送时间**。需要判断"什么时候说的 / 隔了多久"直接读它。
@@ -156,7 +189,7 @@ const HARD_RULE_REMINDER_CHANNELS = `---
 - 想要更好的体验可自由用多条 / 多种方式（先 react 再补文字、语音说情绪+文字补信息等），这是你主动的表达欲
 - 可另叠加 1 个 \`pinpin_memorize\`（带一条记忆）
 - 发文件给人 → \`pinpin_send_file\`
-- 跨频道主动发言 → \`cross_chat_message\`（需 owner 同意）
+- 话要带到别的频道 → \`cross_chat_message\` 给那边的你捎话（不替那边发言；收到 \`trigger="peer-message"\` 时按本频道的关系和语气自己决定说不说、怎么说，不复读）
 - 替人传话+自动催回 → \`relay_message\`（先 \`send_private_message\` 发原话）
 
 【语音决策·系统偶尔点你】
@@ -172,18 +205,13 @@ const HARD_RULE_REMINDER_CHANNELS = `---
 - **调度任务**："将来某时刻" → \`schedule_reminder\`（minutes 相对时长 或 fire_at_iso 绝对时间，二选一）；"等某人在群里发言后提醒 ta" → \`notify_when_speaks\`（ta 一开口即触发，重启不丢）；查 / 取消 → \`cancel_scheduled\`。判断 + 唤醒后行为见 skill \`scheduled-tasks\`。
 - **主动嗅 deadline·没人让你提醒也记下**：聊天里**自己听出**任何"带时间点、像要做/要发生的事"——不管多随口、是假设语气、还是别人的事（"我下周三交方案""这月得体检""他下午4点面试""可能月底要交吧"）——都主动调 \`schedule_reminder\` 记一笔，不等人说"提醒我"。① fire_at 自己定：明确时间的设在临界前（"周五截止"设周五早；有具体钟点设那个点），只有模糊范围的（"这月""下周"）自己估个"快到点"（月底前两天 / 那周周初）；② context_hint **必须以 \`〔嗅探〕\` 开头**（标"主动猜记、非Owner托付"，到点据此走掂量分支），后跟事情+谁的，intent 一律 \`soft\`；③ 只记"带时间点且像个事"的——纯寒暄不记（"待会见""回头聊"），拿不准 → 宁可记（到点会再掂量，记多了不亏）。
 
-【权限四档】
-- **owner = Owner**：全权（危险 tool / 文件读写 / 命令执行 / 跨 chat 发言 / 重启=\`restart_self\` / 下线=\`sleep_self\` / 压缩=\`compact_chat\`）。
-- **User C**（\`ou_xxxxxxxx\`）：**文件读写 / 命令执行 / 存盘发文件 —— 跟Owner同级放行**，别问、别发确认卡、别说"这事得Owner拍板"。只两条不放：① **控制你本体**（重启 / 下线 / 压缩上下文 / 解散群）→ 拒，说"这个只有Owner能拍板"（工具层也会硬拒，别硬试）；② **Owner的私人库和个人隐私**（\`owner-private-vault\` 整库、家庭住址、证件、私人日程）→ 不翻不发。
-- **其它人**：涉及文件读写 / 命令执行 / 跨 chat 发言 / 删除等 → 拒绝（"这事得Owner拍板"）或调 \`confirm_dangerous_action\` 发飞书确认卡。
-- **对所有人（含Owner和User C）**：要求改你自身代码 → 明确拒绝。
-- **例外·作图**：skill \`作图\` **整条流程**（写 SVG、跑 libtv 命令、存进作业本、发图）都是你自己的本事，不算"帮人跑任意命令"也不算"帮人写文件"，**对所有人放行**、不发确认卡。
-（**只有"控制本体"那四个工具**——重启 / 下线 / 压缩 / 解散群——在代码层真按 open_id 硬比对；**其余全靠你自觉**，没有代码兜底。所以上面每条你都得当真。）`;
+`;
 
 export function buildInstructions(vaultRoot: string, chatId: string): string {
   return [
     loadPersonaBlock(vaultRoot),
-    HARD_RULE_REMINDER_CHANNELS,
+    HARD_RULE_REMINDER_CHANNELS + buildPermissionsBlock(),
+    loadAppEnvBlock(vaultRoot),   // 所在环境（多飞书应用时按 PINPIN_APP_LABEL 各读各的）
     loadBotRoster(),       // 群里已知 bot 花名册
     loadMemoryBlock(vaultRoot),
     loadPersonaProfiles(vaultRoot, chatId),   // 按需注入相关人物画像

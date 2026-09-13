@@ -356,6 +356,9 @@ async function main() {
   }
   initFeishuClient(appId, appSecret);
   setBotAppId(appId);
+  process.stderr.write(
+    `[feishu-channel] app=${process.env.PINPIN_APP_LABEL ?? '?'} appId=${appId.slice(0, 8)}…\n`,
+  );
 
   // ── 阶段 4：DB 初始化 ──
   initDatabase();
@@ -511,7 +514,7 @@ async function main() {
 
     // ── 频道简报 warmup（2026-08-24）──
     // 简报（vault\频道简报\<chatId>.md）含「## 启动预读」节 → 冷启动就绪后推预读 trigger，
-    // 品品先读好知识库再等人提问（三兄弟提示词工作频道用）。once per 进程；每次重启（上下文清零）都重预读。
+    // 品品先读好知识库再等人提问（Project X提示词工作频道用）。once per 进程；每次重启（上下文清零）都重预读。
     // 安全网：借 lastToolCallAt 信号（与冷启动补发同款），20s 无任何工具调用 → 重推一次。
     let warmupFired = false;
     function scheduleChannelWarmup(): void {

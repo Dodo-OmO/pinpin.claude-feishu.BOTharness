@@ -17,6 +17,7 @@ import path from 'node:path';
 import { initFeishuClient, getFeishuClient } from './feishu-client.js';
 import { FeishuPoll, type ChatListDiff, type FeishuInboundMessage } from './feishu-poll.js';
 import { FeishuEventSubscriber, type PollActionValue } from './feishu-event-subscriber.js';
+import { type FeishuAppConfig, isChatAllowed } from './feishu-apps.js';
 import type { CardActionEvent, ReactionEvent, BotAddedEvent, CommentEvent } from '@larksuiteoapi/node-sdk';
 import { buildPollCard } from '../src/mcp/feishu/cards/diy-card.js';
 import { feishuEmojiTypeToUnicode } from '../src/mcp/utils/feishu-emoji-map.js';
@@ -52,6 +53,10 @@ import {
   type NameMappings,
   type PendingNameEntry,
   type SetNameMappingParams,
+  type ChatSummary,
+  type ListChatsResult,
+  type PeerMessageParams,
+  type PeerMessageResult,
 } from '../src/ipc/protocol.js';
 
 /** P1.3: per-CLI 上下文用量（从 statusLine sink 收，事件驱动） */
@@ -75,9 +80,8 @@ export interface SupervisorOptions {
   dataDir: string;
   /** vault cwd（频道 CLI spawn 时锁的目录） */
   vaultCwd: string;
-  /** 飞书 app credentials */
-  feishuAppId: string;
-  feishuAppSecret: string;
+  /** 全部飞书应用配置（loadFeishuApps() 结果，长度 ≥1；index 1 = primary，兜底 + 历史数据归属）。 */
+  apps: FeishuAppConfig[];
   /** 频道 CLI 默认 model + effort（任务 MD §决策 B 原定 medium，Owner 2026-05-28 实测后改 high） */
   defaultModel?: string;
   defaultEffort?: string;
@@ -90,9 +94,12 @@ export interface SupervisorOptions {
 
 export class Supervisor extends EventEmitter {
   readonly opts: Required<SupervisorOptions>;
-  private feishuPoll: FeishuPoll | null = null;
-  /** P4.Q3: 事件订阅长连接（接 user 消息含 P2P 单聊；跟 poll 双轨并存） */
-  private feishuEventSubscriber: FeishuEventSubscriber | null = null;
+  /** 多飞书应用：appId → { cfg, poll, subscriber }（一 app 一套 client/poll/事件订阅） */
+  private apps = new Map<string, { cfg: FeishuAppConfig; poll: FeishuPoll; subscriber: FeishuEventSubscriber }>();
+  /** primary 应用（index 1，.env 无后缀字段）：兜底 + 历史数据归属 */
+  private get primaryApp(): FeishuAppConfig {
+    return this.opts.apps[0];
+  }
   /** P4.Q3: supervisor 入口 message_id 去重（防 WSClient + poll 双源重复推） */
   private supervisorProcessedIds = new Set<string>();
   private ipcServer: IpcServer;
@@ -200,10 +207,16 @@ export class Supervisor extends EventEmitter {
     // 单一 name-mappings.json，supervisor 写、两进程读（子端靠 mtime 热重载=实时）。
     // 文件不存在时用 .env FEISHU_KNOWN_USERS / FEISHU_BOT_ROSTER 灌种子（已存在则不覆盖用户改的）。
     initNameMapStore(this.nameMapPath);
-    seedNameMapIfAbsent(
-      parseEnvMap(process.env.FEISHU_KNOWN_USERS),
-      parseEnvMap(process.env.FEISHU_BOT_ROSTER),
-    );
+    {
+      // 多飞书应用：合并全部应用的 knownUsers/botRoster 做首次种子（open_id 跨应用天然唯一，无需分桶）
+      const mergedKnownUsers: Record<string, string> = {};
+      const mergedBotRoster: Record<string, string> = {};
+      for (const cfg of this.opts.apps) {
+        Object.assign(mergedKnownUsers, parseEnvMap(cfg.knownUsers));
+        Object.assign(mergedBotRoster, parseEnvMap(cfg.botRoster));
+      }
+      seedNameMapIfAbsent(mergedKnownUsers, mergedBotRoster);
+    }
 
     // ── 1. DB ──
     // 方案A：supervisor 自身**不再**碰 DB（彻底卸 better-sqlite3，根治 Electron v130 vs 子进程 v137
@@ -279,13 +292,16 @@ export class Supervisor extends EventEmitter {
     // ── 2.5 注册 work session IPC request handlers ──
     this.ipcServer.setRequestHandler(IPC_METHODS.WORK_SPAWN, async (params, chatId) => {
       const p = params as WorkSpawnParams;
+      const originChatId = p.origin_chat_id || chatId;
       const session = new WorkSession({
-        originChatId: p.origin_chat_id || chatId,
+        originChatId,
         workDir: p.work_dir,
         goal: p.goal,
         model: p.model || this.workDefaultModel || this.opts.defaultModel,
         effort: p.effort || this.workDefaultEffort || 'high',
         fast: this.workDefaultFast ?? false,
+        // 多飞书应用：工人的 lark-cli 身份跟随发起频道所属应用
+        larkConfigDir: this.apps.get(this.resolveAppId(originChatId))?.cfg.larkBotDir,
       });
       this.workSessions.set(session.id, session);
       // headless：每轮 result 事件确定性 emit 一次 'stopped'，无需 idle 猜停/15s 去重——直接 push 给品品。
@@ -366,11 +382,46 @@ export class Supervisor extends EventEmitter {
     });
 
     // 品品主动单聊 / 建群后即时挂频道监听（spawnChannelCli 幂等，已存在直接返回）
-    this.ipcServer.setRequestHandler(IPC_METHODS.SPAWN_CHANNEL, async (params) => {
+    // 多飞书应用：新建的群/单聊归属"发起频道"所属的应用（requesterChatId 是调这个 IPC 的子进程注册 chat_id）
+    this.ipcServer.setRequestHandler(IPC_METHODS.SPAWN_CHANNEL, async (params, requesterChatId) => {
       const p = params as SpawnChannelParams;
       if (!p.chat_id) return { ok: false, error: 'missing chat_id' } as WorkOkResult;
-      this.spawnChannelCli(p.chat_id, p.chat_name);
+      this.spawnChannelCli(p.chat_id, p.chat_name, requesterChatId ? this.resolveAppId(requesterChatId) : undefined);
       return { ok: true } as WorkOkResult;
+    });
+
+    // 多飞书应用：跨应用能力集中在 supervisor（子进程只有本 chat 所属应用的 client）
+    this.ipcServer.setRequestHandler(IPC_METHODS.LIST_CHATS, async () => {
+      const result: ListChatsResult = { chats: this.allChats() };
+      return result;
+    });
+    // 频道间捎话：A 频道的品品不替 B 频道发言，把前因后果推给 B 频道的 CLI（trigger=peer-message），由那边的品品自己决定怎么说。
+    // B 离线（睡眠 / 已 evict）→ 先拉起等 hello；两个飞书应用的频道都可互捎。
+    this.ipcServer.setRequestHandler(IPC_METHODS.PEER_MESSAGE, async (params, fromChatId) => {
+      const p = params as PeerMessageParams;
+      if (!p.chat_id || !p.text) return { ok: false, error: 'missing chat_id/text' } as PeerMessageResult;
+      if (p.chat_id === fromChatId) return { ok: false, error: '目标就是本频道' } as PeerMessageResult;
+      const known = this.channelConfigStore.get(p.chat_id) || this.allChats().some((c) => c.chat_id === p.chat_id);
+      if (!known) return { ok: false, error: `未知频道 ${p.chat_id.slice(-8)}（用 list_active_chats 查）` } as PeerMessageResult;
+      const targetApp = this.apps.get(this.resolveAppId(p.chat_id));
+      if (!targetApp || !isChatAllowed(targetApp.cfg, p.chat_id)) {
+        return { ok: false, error: '目标频道已不在服务范围' } as PeerMessageResult; // allowlist 收紧后的旧群不再被捎话拉起
+      }
+      if (!(await this.ensureChannelReadyForEvent(p.chat_id))) {
+        return { ok: false, error: '目标频道拉不起来' } as PeerMessageResult;
+      }
+      const fromName = this.getChannelDisplayName(fromChatId);
+      const toName = this.getChannelDisplayName(p.chat_id);
+      const body = `【来自「${fromName}」频道的你捎的话】${p.text}\n（先弄清前因后果，按本频道的关系和语气决定说不说、怎么说，不要原样复读。）`;
+      const pushed = this.ipcServer.pushChatTrigger(p.chat_id, body, {
+        user: `品品（${fromName}）`,
+        sender_type: 'system',
+        message_id: `peer-${Date.now()}-${fromChatId.slice(-6)}`,
+        trigger: 'peer-message',
+        from_chat_id: fromChatId,
+      });
+      process.stderr.write(`[supervisor] peer-message ${fromChatId.slice(-8)} → ${p.chat_id.slice(-8)} ${pushed ? 'ok' : 'push 失败'}\n`);
+      return (pushed ? { ok: true, chat_name: toName } : { ok: false, error: 'IPC push 失败' }) as PeerMessageResult;
     });
 
     // 解散群后停该频道 CLI（stopChannel：stop CLI + 从 channels 删除 + 删配置，不再重 spawn）
@@ -408,34 +459,40 @@ export class Supervisor extends EventEmitter {
       return result;
     });
 
-    // ── 3. 飞书 Client init ──
-    initFeishuClient(this.opts.feishuAppId, this.opts.feishuAppSecret);
-
-    // ── 4. FeishuPoll 启动（onMessage → 按 chat_id 路由 → IPC push 给对应子 MCP server） ──
-    this.feishuPoll = new FeishuPoll(this.opts.feishuAppId, {
-      onMessage: (msg) => this.onFeishuMessage(msg),
-      onChatListDiff: (diff) => this.onChatListDiff(diff),
-    });
-    await this.feishuPoll.start();
-
-    // ── 4.5 P4.Q3: FeishuEventSubscriber 启动（接 user 消息含 P2P；跟 poll 双轨并存） ──
-    // poll 不能动：飞书 chat.list 不返 P2P + 事件订阅不推 bot 消息 = 双轨是平台约束必然
-    this.feishuEventSubscriber = new FeishuEventSubscriber({
-      appId: this.opts.feishuAppId,
-      appSecret: this.opts.feishuAppSecret,
-      onMessage: (msg) => this.onFeishuMessage(msg),
-      onPollAction: (evt, val) => this.onPollAction(evt, val),
-      onReaction: (evt) => this.onReaction(evt),
-      onBotAdded: (evt) => this.onBotAdded(evt),
-      onComment: (evt) => this.onComment(evt),
-    });
-    try {
-      await this.feishuEventSubscriber.start();
-    } catch (e) {
-      // 事件订阅启动失败不阻塞 supervisor 启动（poll 仍跑）—— 飞书后台未开权限时 graceful degradation
-      process.stderr.write(
-        `[supervisor] FeishuEventSubscriber 启动失败 (poll 继续工作): ${e instanceof Error ? e.message : e}\n`,
+    // ── 3+4+4.5 多飞书应用：每个 app 各自 init client + FeishuPoll + FeishuEventSubscriber ──
+    // poll 与 WS 双轨并存不能动：飞书 chat.list 不返 P2P + 事件订阅不推 bot 消息 = 平台约束必然
+    for (const cfg of this.opts.apps) {
+      const client = initFeishuClient(cfg.appId, cfg.appSecret);
+      const allowed = (chatId: string) => isChatAllowed(cfg, chatId);
+      const poll = new FeishuPoll(
+        { appId: cfg.appId, client, isChatAllowed: allowed },
+        {
+          onMessage: (msg) => this.onFeishuMessage(msg),
+          onChatListDiff: (diff) => this.onChatListDiff(diff, cfg.appId),
+        },
       );
+      await poll.start();
+
+      const subscriber = new FeishuEventSubscriber({
+        appId: cfg.appId,
+        appSecret: cfg.appSecret,
+        isChatAllowed: allowed,
+        onMessage: (msg) => this.onFeishuMessage(msg),
+        onPollAction: (evt, val) => this.onPollAction(evt, val),
+        onReaction: (evt) => this.onReaction(evt, cfg.appId),
+        onBotAdded: (evt) => this.onBotAdded(evt, cfg.appId),
+        onComment: (evt) => this.onComment(evt),
+      });
+      try {
+        await subscriber.start();
+      } catch (e) {
+        // 事件订阅启动失败不阻塞 supervisor 启动（poll 仍跑）—— 飞书后台未开权限时 graceful degradation
+        process.stderr.write(
+          `[supervisor] FeishuEventSubscriber(app=${cfg.label}) 启动失败 (poll 继续工作): ${e instanceof Error ? e.message : e}\n`,
+        );
+      }
+
+      this.apps.set(cfg.appId, { cfg, poll, subscriber });
     }
 
     // ── 5. 已识别的所有 chat 自动 spawn 频道 CLI（启动器一打开即全部上线）──
@@ -524,10 +581,11 @@ export class Supervisor extends EventEmitter {
     this.workSessions.clear();
     this.cronRunner.stop();
     await this.ccusagePoller.stop();
-    await this.feishuPoll?.stop();
-    this.feishuPoll = null;
-    await this.feishuEventSubscriber?.stop();
-    this.feishuEventSubscriber = null;
+    for (const { poll, subscriber } of this.apps.values()) {
+      await poll.stop();
+      await subscriber.stop();
+    }
+    this.apps.clear();
     await this.ipcServer.stop();
     await this.wardenBridge?.stop();
     this.wardenBridge = null;
@@ -590,7 +648,7 @@ export class Supervisor extends EventEmitter {
   /** 频道自愈耗尽时给该 chat 发飞书提示——不静默死。复用 supervisor 持有的 Lark 单例。 */
   private async notifyChannelDown(chatId: string): Promise<void> {
     try {
-      await getFeishuClient().im.v1.message.create({
+      await getFeishuClient(this.resolveAppId(chatId)).im.v1.message.create({
         data: {
           receive_id: chatId,
           msg_type: 'text',
@@ -723,7 +781,7 @@ export class Supervisor extends EventEmitter {
   /** D3 自愈重生后给该 chat 发一句飞书提示（Owner要"吭一声"）。延迟到新 CLI 大概率起来后发。 */
   private notifyAutoRecovered(chatId: string): void {
     setTimeout(() => {
-      void getFeishuClient()
+      void getFeishuClient(this.resolveAppId(chatId))
         .im.v1.message.create({
           data: {
             receive_id: chatId,
@@ -768,8 +826,37 @@ export class Supervisor extends EventEmitter {
     return this.ipcServer.getPort();
   }
 
-  getChats(): Array<{ chat_id: string; name?: string }> {
-    return this.feishuPoll?.getChats() ?? [];
+  /** 多飞书应用：合并全部应用当前已知的 chat（带 app_id/app_label），供 list_active_chats / 面板用。 */
+  allChats(): ChatSummary[] {
+    const out: ChatSummary[] = [];
+    for (const { cfg, poll } of this.apps.values()) {
+      for (const c of poll.getChats()) {
+        out.push({ chat_id: c.chat_id, name: c.name, app_id: cfg.appId, app_label: cfg.label });
+      }
+    }
+    return out;
+  }
+
+  /** 某 chat 归属哪个飞书应用：① channel-config.json 已钉死的 appId（仍在 apps 中）→
+   *  ② 遍历各 app 的 chat.list 命中即写回钉死 → ③ 都未命中 → primary + WARN（fail-open，不阻断投递）。 */
+  resolveAppId(chatId: string): string {
+    const persistedAppId = this.channelConfigStore.get(chatId)?.appId;
+    if (persistedAppId && this.apps.has(persistedAppId)) return persistedAppId;
+    for (const { cfg, poll } of this.apps.values()) {
+      if (poll.getChats().some((c) => c.chat_id === chatId)) {
+        this.channelConfigStore.markSeen(chatId, cfg.appId);
+        return cfg.appId;
+      }
+    }
+    process.stderr.write(
+      `[supervisor] resolveAppId(${chatId.slice(-8)}) 未命中任何应用的 chat.list，回落 primary（WARN）\n`,
+    );
+    return this.primaryApp.appId;
+  }
+
+  /** cron-runner 用：某 chat（如Owner DM）归属哪个应用的完整配置。 */
+  appForChat(chatId: string): FeishuAppConfig {
+    return this.apps.get(this.resolveAppId(chatId))?.cfg ?? this.primaryApp;
   }
 
   /**
@@ -782,7 +869,7 @@ export class Supervisor extends EventEmitter {
   getChannelDisplayName(chatId: string): string {
     const persisted = this.channelConfigStore.get(chatId);
     if (persisted?.display_name) return persisted.display_name;
-    const chat = this.feishuPoll?.getChats().find((c) => c.chat_id === chatId);
+    const chat = this.allChats().find((c) => c.chat_id === chatId);
     if (chat?.name) return chat.name;
     return chatId.slice(-8);
   }
@@ -802,7 +889,7 @@ export class Supervisor extends EventEmitter {
     const seen = new Set(spawned.map((c) => c.chat_id));
     const out = [...spawned];
     const knownIds: string[] = [];
-    for (const c of this.feishuPoll?.getChats() ?? []) knownIds.push(c.chat_id);
+    for (const c of this.allChats()) knownIds.push(c.chat_id);
     for (const id of this.channelConfigStore.listChatIds()) knownIds.push(id);
     for (const chatId of knownIds) {
       if (seen.has(chatId)) continue;
@@ -868,13 +955,13 @@ export class Supervisor extends EventEmitter {
     // 本轮已排队集合：5a 排入的多数是延迟执行（尚未进 channels Map），5b 靠 channels.has 查不到，
     // 用显式集合防同一 chatId 双占错峰槽位（活跃频道几乎必然同时在两份名单里）
     const queued = new Set<string>();
-    // 5a. 飞书 chat.list 拿到的群（含Owner已加入的群聊）
-    for (const c of this.feishuPoll?.getChats() ?? []) {
+    // 5a. 飞书 chat.list 拿到的群（各 app 已过滤 allowlist，含 app_id；含Owner已加入的群聊）
+    for (const c of this.allChats()) {
       if (this.channelConfigStore.isStandby(c.chat_id)) continue; // 待机频道不自动拉起（有人说话才唤醒）
       if (this.channels.has(c.chat_id)) continue; // 已在 Map（spawnChannelCli 本就幂等）→ 不占错峰槽位
       queued.add(c.chat_id);
       this.staggerChannelBoot(() => {
-        if (!this.channels.has(c.chat_id)) this.spawnChannelCli(c.chat_id, c.name);
+        if (!this.channels.has(c.chat_id)) this.spawnChannelCli(c.chat_id, c.name, c.app_id);
       });
     }
     // 5b. 频道常驻：channel-config.json 持久化但飞书 chat.list 没返的（P2P 单聊 / 历史已识别群）
@@ -884,8 +971,11 @@ export class Supervisor extends EventEmitter {
       if (this.channels.has(chatId)) continue; // 已在 Map 跳过
       if (this.channelConfigStore.isStandby(chatId)) continue; // 待机频道不自动拉起
       const persisted = this.channelConfigStore.get(chatId);
+      const appId = persisted?.appId ?? this.primaryApp.appId;
+      const appEntry = this.apps.get(appId);
+      if (!appEntry || !isChatAllowed(appEntry.cfg, chatId)) continue; // 应用已下线 / allowlist 已收紧 → 不拉起
       this.staggerChannelBoot(() => {
-        if (!this.channels.has(chatId)) this.spawnChannelCli(chatId, persisted?.display_name);
+        if (!this.channels.has(chatId)) this.spawnChannelCli(chatId, persisted?.display_name, appId);
       });
     }
   }
@@ -912,8 +1002,8 @@ export class Supervisor extends EventEmitter {
     if (standby) {
       this.pauseChannel(chatId);
     } else {
-      const chat = this.feishuPoll?.getChats().find((c) => c.chat_id === chatId);
-      this.spawnChannelCli(chatId, chat?.name ?? this.channelConfigStore.get(chatId)?.display_name);
+      const chat = this.allChats().find((c) => c.chat_id === chatId);
+      this.spawnChannelCli(chatId, chat?.name ?? this.channelConfigStore.get(chatId)?.display_name, chat?.app_id);
       process.stderr.write(`[supervisor] channel ${chatId.slice(-8)} → 取消睡眠（已恢复常驻）\n`);
     }
     this.emit('channel-state-changed');
@@ -982,12 +1072,14 @@ export class Supervisor extends EventEmitter {
     fs.renameSync(tmp, file);
   }
 
-  spawnChannelCli(chatId: string, chatName?: string): ChannelCli {
+  spawnChannelCli(chatId: string, chatName?: string, appId?: string): ChannelCli {
     let cli = this.channels.get(chatId);
     if (cli) return cli;
-    // 频道常驻持久化：首次见到该 chat_id 就在 channel-config.json 落 seen=true 标记，
+    // 多飞书应用：该 chat 归属哪个应用（未显式传入则 resolveAppId 反查/回落 primary）
+    const app = this.apps.get(appId ?? this.resolveAppId(chatId))?.cfg ?? this.primaryApp;
+    // 频道常驻持久化：首次见到该 chat_id 就在 channel-config.json 落 seen=true 标记 + 钉死 appId 归属，
     // 下次重启 start() step 5b 会遍历持久列表自动恢复（含 P2P 单聊）
-    this.channelConfigStore.markSeen(chatId);
+    this.channelConfigStore.markSeen(chatId, app.appId);
     // P1.2: 优先 persisted config，fallback defaults
     const persisted = this.channelConfigStore.get(chatId);
     // P4.Q3 续：display_name 优先级 = 用户自定义 > 飞书自动反查 > undefined（renderer fallback chat_id 末 12 位）
@@ -1000,13 +1092,16 @@ export class Supervisor extends EventEmitter {
       effort: persisted?.effort ?? this.opts.defaultEffort,
       autoCompactPct: persisted?.autoCompactPct ?? this.opts.defaultAutoCompactPct,
       fast: persisted?.fast ?? this.opts.defaultFast ?? false,
-      addDirs: persisted?.addDirs,
+      addDirs: persisted?.addDirs ?? app.addDirs,
       voiceDice: persisted?.voiceDice,
       supervisorPort: this.ipcServer.getPort(),
       dbPath: this.dbPath,
       nameMapPath: this.nameMapPath,
       // P1.3: statusLine sink 绝对路径
       statusLineSinkPath: path.join(this.opts.appRoot, 'scripts', 'statusline-sink.cjs'),
+      app,
+      isDm: chatId === process.env.PINPIN_OWNER_CHAT_ID,
+      primaryAppId: this.primaryApp.appId,
     });
     // P1.2: 事件驱动 state push（替代 1Hz 心跳 race）—— 状态变即向 main 推
     cli.on('started', () => {
@@ -1248,7 +1343,7 @@ export class Supervisor extends EventEmitter {
       process.stderr.write(
         `[supervisor] WSClient 发现未监听 chat_id=${msg.chat_id} (sender=${msg.sender_open_id.slice(0, 8)}…) → 动态 spawn channel CLI\n`,
       );
-      this.spawnChannelCli(msg.chat_id, guessName);
+      this.spawnChannelCli(msg.chat_id, guessName, msg.app_id);
     }
 
     // 累计今日消息数（修内审 Optional #8）
@@ -1266,7 +1361,7 @@ export class Supervisor extends EventEmitter {
     // 供启动器"待命名"面板拉。已在 name-map/env 命中的不记（解析值 ≠ slice -8）。
     {
       const isBot = msg.sender_type === 'app';
-      const resolved = resolveSenderNameSync(msg.sender_open_id, msg.sender_type);
+      const resolved = resolveSenderNameSync(msg.sender_open_id, msg.sender_type, msg.app_id);
       if (resolved === msg.sender_open_id.slice(-8)) {
         this.pendingNames.set(msg.sender_open_id, {
           id: msg.sender_open_id,
@@ -1285,7 +1380,7 @@ export class Supervisor extends EventEmitter {
     // 优先级：channel-config.json display_name > feishu chat.list name（chat.list 不含 P2P 单聊）
     const chatName =
       this.channelConfigStore.get(msg.chat_id)?.display_name ??
-      this.feishuPoll?.getChats().find((c) => c.chat_id === msg.chat_id)?.name;
+      this.allChats().find((c) => c.chat_id === msg.chat_id)?.name;
     // 单点提取 content/mentions/parent_id（子端不再钻 raw 取这三字段）
     // poll 形态：raw 即 API list item，字段在顶层（raw.body.content / raw.mentions / raw.parent_id）
     // WS 形态：raw = SDK EventDispatcher 摊平体，内容在 raw.message.*
@@ -1373,7 +1468,7 @@ export class Supervisor extends EventEmitter {
       }
 
       const newCard = buildPollCard(poll_id, res.question, res.options, res.votes);
-      await this.feishuEventSubscriber!.updateCard(messageId, newCard);
+      await this.apps.get(this.resolveAppId(chatId))!.subscriber.updateCard(messageId, newCard);
       process.stderr.write(
         `[supervisor] poll ${poll_id} updated: ${JSON.stringify(res.votes)}\n`,
       );
@@ -1425,6 +1520,7 @@ export class Supervisor extends EventEmitter {
    *  （一次拿 chat_id + 发送者 + 内容摘要；in-flight 去重防风暴） */
   private async resolveReactedMsg(
     messageId: string,
+    appId: string,
   ): Promise<{ chatId: string; senderId: string; senderType: 'user' | 'app'; snippet: string } | null> {
     const cached = this.msgIdToInfo.get(messageId);
     if (cached) return cached;
@@ -1432,7 +1528,7 @@ export class Supervisor extends EventEmitter {
     if (inflight) return inflight;
     const p = (async () => {
       try {
-        const res = await getFeishuClient().im.v1.message.get({ path: { message_id: messageId } });
+        const res = await getFeishuClient(appId).im.v1.message.get({ path: { message_id: messageId } });
         const item = res.data?.items?.[0] as
           | { chat_id?: string; msg_type?: string; sender?: { id?: string; sender_type?: string }; body?: { content?: string } }
           | undefined;
@@ -1468,36 +1564,37 @@ export class Supervisor extends EventEmitter {
   }
 
   /** 事件投递前确保目标频道 CLI 就绪（find-or-spawn + 等 hello，仿 onPollAction 离线兜底） */
-  private async ensureChannelReadyForEvent(chatId: string): Promise<boolean> {
-    if (!this.channels.has(chatId)) this.spawnChannelCli(chatId);
+  private async ensureChannelReadyForEvent(chatId: string, appId?: string): Promise<boolean> {
+    if (!this.channels.has(chatId)) this.spawnChannelCli(chatId, undefined, appId);
     return this.waitForChannelReady(chatId, 15000);
   }
 
-  /** 别人加表情回复 → 唤醒该频道品品（供参考、不强制回复）。撤表情(removed)不通知。 */
-  private async onReaction(evt: ReactionEvent): Promise<void> {
+  /** 别人加表情回复 → 唤醒该频道品品（供参考、不强制回复）。撤表情(removed)不通知。
+   *  appId = 该表情所属的飞书应用（多应用：反查被点消息用哪个应用的 client）。 */
+  private async onReaction(evt: ReactionEvent, appId: string): Promise<void> {
     if (evt.action === 'removed') return; // Not-Doing：撤回表情不算"发来的 react"，不打扰
-    const info = await this.resolveReactedMsg(evt.messageId);
+    const info = await this.resolveReactedMsg(evt.messageId, appId);
     if (!info) {
       process.stderr.write(`[supervisor] onReaction: 反查被点消息失败 (msg ${evt.messageId})，丢弃\n`);
       return;
     }
     const chatId = info.chatId;
-    if (!(await this.ensureChannelReadyForEvent(chatId))) {
+    if (!(await this.ensureChannelReadyForEvent(chatId, appId))) {
       process.stderr.write(`[supervisor] onReaction: chat ${chatId.slice(-8)} CLI 未就绪，放弃\n`);
       return;
     }
-    const reactor = resolveSenderNameSync(evt.operator.openId, 'user');
+    const reactor = resolveSenderNameSync(evt.operator.openId, 'user', appId);
     const uni = feishuEmojiTypeToUnicode(evt.emojiType);
     const emojiShow = uni ? `${uni}（${evt.emojiType}）` : evt.emojiType;
-    // 被点的消息是不是品品自己发的（app 类型 + sender.id 是本 bot 的 app_id，同 feishu-poll 自环判定）
-    const isPinpinOwn = info.senderType === 'app' && info.senderId === this.opts.feishuAppId;
+    // 被点的消息是不是品品自己发的（app 类型 + sender.id 是我们任一飞书应用的 bot app_id，同 feishu-poll 自环判定）
+    const isPinpinOwn = info.senderType === 'app' && this.apps.has(info.senderId);
     let body: string;
     if (isPinpinOwn) {
       body = `【表情信号·供参考】${reactor} 给你这条消息「${info.snippet}」点了 ${emojiShow}。这通常表示认可/回应——你看情况决定要不要继续推进，不必专门回复。`;
     } else {
       const whose = info.senderId === evt.operator.openId
         ? '自己'
-        : resolveSenderNameSync(info.senderId, info.senderType);
+        : resolveSenderNameSync(info.senderId, info.senderType, appId);
       body = `【表情信号·供参考】${reactor} 给${whose}的这条消息「${info.snippet}」点了 ${emojiShow}。群里的小互动，供你了解，一般不用回应。`;
     }
     this.ipcServer.pushChatTrigger(chatId, body, {
@@ -1508,16 +1605,16 @@ export class Supervisor extends EventEmitter {
     });
   }
 
-  /** 品品被拉进新群 → spawn 该群 CLI + 提示品品可打招呼。 */
-  private async onBotAdded(evt: BotAddedEvent): Promise<void> {
+  /** 品品被拉进新群 → spawn 该群 CLI + 提示品品可打招呼。appId = 拉群事件所属的飞书应用。 */
+  private async onBotAdded(evt: BotAddedEvent, appId: string): Promise<void> {
     const chatId = evt.chatId;
-    if (!(await this.ensureChannelReadyForEvent(chatId))) {
+    if (!(await this.ensureChannelReadyForEvent(chatId, appId))) {
       process.stderr.write(`[supervisor] onBotAdded: chat ${chatId.slice(-8)} CLI 未就绪，放弃\n`);
       return;
     }
     let chatName: string | undefined;
     try {
-      const res = await getFeishuClient().im.v1.chat.get({ path: { chat_id: chatId } });
+      const res = await getFeishuClient(appId).im.v1.chat.get({ path: { chat_id: chatId } });
       chatName = res.data?.name;
     } catch { /* 拿不到群名不影响打招呼 */ }
     const body = `【系统】我刚被拉进这个群${chatName ? `「${chatName}」` : ''}。要不要打个招呼 / 做个自我介绍，你看情况决定。`;
@@ -1550,10 +1647,10 @@ export class Supervisor extends EventEmitter {
     });
   }
 
-  private onChatListDiff(diff: ChatListDiff): void {
+  private onChatListDiff(diff: ChatListDiff, appId: string): void {
     for (const added of diff.added) {
       process.stderr.write(`[supervisor] 新群发现，自动 spawn: ${added.name ?? added.chat_id}\n`);
-      this.spawnChannelCli(added.chat_id, added.name);
+      this.spawnChannelCli(added.chat_id, added.name, appId);
     }
     // 频道常驻语义（2026-05-28）：飞书 chat.list 返回 removed 不再主动 stop CLI——
     // 被踢/解散事件靠飞书 SDK 可能短时抖动（chat.list 拉空），误判 stop 会导致 CLI 反复重启。

@@ -18,6 +18,7 @@ import { PtyManager } from './pty-manager.js';
 import { buildInstructions } from '../src/mcp/instructions.js';
 import { DEFAULT_AUTOCOMPACT_PCT } from './channel-config-store.js';
 import { resolveClaudePath, stripAnsi, claudeApiNetEnv } from './utils.js';
+import type { FeishuAppConfig } from './feishu-apps.js';
 
 
 export interface ChannelCliOptions {
@@ -45,6 +46,12 @@ export interface ChannelCliOptions {
   addDirs?: string[];
   /** 语音骰子开关（缺省 true）。false → 注入 PINPIN_VOICE_DICE=off，子 MCP 掷骰短路（chat-message.ts）。 */
   voiceDice?: boolean;
+  /** 本 chat 归属的飞书应用（多应用：子进程 env 按此应用注入 FEISHU_APP_ID/SECRET/OWNER_OPEN_ID/... + lark-cli 目录）。 */
+  app: FeishuAppConfig;
+  /** 该 chat 是否是Owner DM 频道（= PINPIN_OWNER_CHAT_ID）。true 时 lark-cli 身份用 app.larkUserDir（无则回落 ~/.lark-cli）。 */
+  isDm?: boolean;
+  /** primary 应用（index 1）的 appId：子端 known_users.app_id 历史行回填基准，与本 chat 自身归属应用无关。 */
+  primaryAppId: string;
 }
 
 export type ChannelCliStatus = 'starting' | 'running' | 'stopped' | 'failed';
@@ -134,7 +141,7 @@ export class ChannelCli extends EventEmitter {
       '--settings',
       statusLineCfg,
       ...(sysPromptOk ? ['--append-system-prompt-file', sysPromptFile] : []),
-      // 外挂知识目录（如三兄弟提示词工作频道绑九州目录）：skills/CLAUDE.md 原生加载 + 文件访问放行
+      // 外挂知识目录（如Project X提示词工作频道绑Client目录）：skills/CLAUDE.md 原生加载 + 文件访问放行
       ...(this.opts.addDirs ?? []).flatMap((d) => ['--add-dir', d]),
       '--permission-mode',
       'bypassPermissions',
@@ -181,10 +188,29 @@ export class ChannelCli extends EventEmitter {
       ...(this.opts.addDirs?.length ? { CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD: '1' } : {}),
       // 语音骰子关闭（工作频道用；chat-message.ts 掷骰处读此 env 短路）
       ...(this.opts.voiceDice === false ? { PINPIN_VOICE_DICE: 'off' } : {}),
+      // 多飞书应用：本 chat 归属应用的凭据/标签原样注入（env 名不变，子端零改动）
+      FEISHU_APP_ID: this.opts.app.appId,
+      FEISHU_APP_SECRET: this.opts.app.appSecret,
+      PINPIN_APP_LABEL: this.opts.app.label,
+      PINPIN_PRIMARY_APP_ID: this.opts.primaryAppId,
     };
-    // lark-cli 身份：Owner DM 频道回落到她本人配置（~/.lark-cli，user 身份，日历/邮件/任务可用）；
-    // 其余频道继承启动器注入的品品专用目录（bot 身份）。见 launcher/main/main.ts。
-    if (this.opts.chatId === process.env.PINPIN_OWNER_CHAT_ID) delete childEnv.LARKSUITE_CLI_CONFIG_DIR;
+    // 无值的按 app 配置严格 delete——不留启动器全局 process.env 里应用 1 的旧值给应用 2 的频道
+    if (this.opts.app.ownerOpenId) childEnv.FEISHU_OWNER_OPEN_ID = this.opts.app.ownerOpenId;
+    else delete childEnv.FEISHU_OWNER_OPEN_ID;
+    if (this.opts.app.knownUsers) childEnv.FEISHU_KNOWN_USERS = this.opts.app.knownUsers;
+    else delete childEnv.FEISHU_KNOWN_USERS;
+    if (this.opts.app.botRoster) childEnv.FEISHU_BOT_ROSTER = this.opts.app.botRoster;
+    else delete childEnv.FEISHU_BOT_ROSTER;
+    if (this.opts.app.peerUsers) childEnv.FEISHU_PEER_USERS = this.opts.app.peerUsers;
+    else delete childEnv.FEISHU_PEER_USERS;
+    // lark-cli 身份：Owner DM 频道用该应用的用户身份目录（未配回落 ~/.lark-cli，lark-cli 默认）；
+    // 其余频道用该应用的 bot 身份目录（strict-mode bot）。
+    if (this.opts.isDm) {
+      if (this.opts.app.larkUserDir) childEnv.LARKSUITE_CLI_CONFIG_DIR = this.opts.app.larkUserDir;
+      else delete childEnv.LARKSUITE_CLI_CONFIG_DIR;
+    } else {
+      childEnv.LARKSUITE_CLI_CONFIG_DIR = this.opts.app.larkBotDir;
+    }
 
     const claudePath = resolveClaudePath();
     try {

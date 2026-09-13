@@ -45,6 +45,8 @@ export interface KnownUser {
   open_id: string;
   name: string;
   updated_at: string;
+  /** 该 open_id 所属飞书应用（open_id 按应用生成，按名反查须同应用） */
+  app_id: string | null;
 }
 
 export interface DiyPollDef {

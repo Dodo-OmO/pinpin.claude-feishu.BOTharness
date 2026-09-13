@@ -14,6 +14,7 @@ export const sendPrivateMessageTool: Tool = {
   name: "send_private_message",
   description:
     "私聊某个认识的人。person_name 经 known_users 反查 open_id；或直接传 open_id。" +
+    "只能私聊当前频道所属飞书应用/租户里的人；别的租户的人不在名单里。" +
     "用于：传话 / 报告周回顾 / 告警 / 主动联系。content 是纯文本（飞书 text 消息）。",
   inputSchema: {
     type: "object",

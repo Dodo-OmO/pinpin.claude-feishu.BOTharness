@@ -8,7 +8,7 @@
  * chat.list 5min 重拉 → 发现新群自动通知 supervisor.spawnChannelCli（步骤 3 实装）。
  */
 
-import { getFeishuClient } from './feishu-client.js';
+import type * as Lark from '@larksuiteoapi/node-sdk';
 
 const POLL_INTERVAL_MS = Number(process.env.PINPIN_POLL_INTERVAL_MS ?? 8000);
 const CHAT_LIST_REFRESH_MS = Number(process.env.PINPIN_CHAT_LIST_REFRESH_MS ?? 5 * 60 * 1000);
@@ -25,6 +25,8 @@ export interface FeishuInboundMessage {
   /** P2P 单聊 = true（WSClient 路径），群聊 = false（poll 路径）。供子端对话记录命名区分单聊/群。 */
   is_p2p: boolean;
   raw: unknown;
+  /** 该消息所属飞书应用 id（多应用：poll/WS 都填，supervisor 据此路由/自环判定/跨应用能力）。 */
+  app_id: string;
 }
 
 export interface ChatListDiff {
@@ -39,6 +41,14 @@ export interface FeishuPollCallbacks {
   onChatListDiff?: (diff: ChatListDiff) => void | Promise<void>;
 }
 
+/** 本 poll 实例归属的飞书应用（多应用：一 app 一个 FeishuPoll 实例） */
+export interface FeishuPollApp {
+  appId: string;
+  client: Lark.Client;
+  /** 无 → 全放行；有 → 只服务返回 true 的 chat（FEISHU_CHAT_ALLOWLIST） */
+  isChatAllowed?: (chatId: string) => boolean;
+}
+
 export class FeishuPoll {
   private chats = new Map<string, { name?: string }>();
   private lastCreateTimeMs = new Map<string, number>();
@@ -48,10 +58,14 @@ export class FeishuPoll {
   private readonly startupMs = Date.now();
   private callbacks: FeishuPollCallbacks;
   private running = false;
-  private botAppId: string;
+  private readonly appId: string;
+  private readonly client: Lark.Client;
+  private readonly isChatAllowed: (chatId: string) => boolean;
 
-  constructor(botAppId: string, callbacks: FeishuPollCallbacks = {}) {
-    this.botAppId = botAppId;
+  constructor(app: FeishuPollApp, callbacks: FeishuPollCallbacks = {}) {
+    this.appId = app.appId;
+    this.client = app.client;
+    this.isChatAllowed = app.isChatAllowed ?? (() => true);
     this.callbacks = callbacks;
   }
 
@@ -76,8 +90,8 @@ export class FeishuPoll {
     process.stderr.write('[feishu-poll] stopped\n');
   }
 
-  getChats(): Array<{ chat_id: string; name?: string }> {
-    return [...this.chats.entries()].map(([chat_id, info]) => ({ chat_id, name: info.name }));
+  getChats(): Array<{ chat_id: string; name?: string; app_id: string }> {
+    return [...this.chats.entries()].map(([chat_id, info]) => ({ chat_id, name: info.name, app_id: this.appId }));
   }
 
   private async refreshChatList(isInitial: boolean): Promise<void> {
@@ -87,7 +101,7 @@ export class FeishuPoll {
     const MAX_PAGES = 20; // 100×20 = 2000 群上限；Owner几十群足够
     try {
       for (let page = 0; page < MAX_PAGES; page++) {
-        const res = await getFeishuClient().im.v1.chat.list({
+        const res = await this.client.im.v1.chat.list({
           params: {
             page_size: 100,
             sort_type: 'ByCreateTimeAsc',
@@ -105,9 +119,10 @@ export class FeishuPoll {
       return;
     }
 
+    // 多应用：该应用只服务 allowlist 内的 chat（无 allowlist 全放行）；被丢弃的 chat 不会被 spawn/poll。
     const incoming = new Map<string, { name?: string }>();
     for (const c of items) {
-      if (c.chat_id) incoming.set(c.chat_id, { name: c.name });
+      if (c.chat_id && this.isChatAllowed(c.chat_id)) incoming.set(c.chat_id, { name: c.name });
     }
 
     if (isInitial) {
@@ -166,7 +181,7 @@ export class FeishuPoll {
   }
 
   private async pollChat(chatId: string): Promise<void> {
-    const client = getFeishuClient();
+    const client = this.client;
     const cursorMs = this.lastCreateTimeMs.get(chatId) ?? this.startupMs;
     const startTimeSec = Math.floor(cursorMs / 1000);
 
@@ -209,7 +224,7 @@ export class FeishuPoll {
     if (m.deleted) return;
     if (m.msg_type === 'system') return;
     // 防自环：bot 自己发的消息（app 类型 + sender.id 是本 bot 的 app_id）
-    if (m.sender.sender_type === 'app' && m.sender.id === this.botAppId) return;
+    if (m.sender.sender_type === 'app' && m.sender.id === this.appId) return;
 
     this.processedIds.add(m.message_id);
     const ct = Number(m.create_time);
@@ -237,6 +252,7 @@ export class FeishuPoll {
       create_time_ms: Number.isFinite(ct) ? ct : Date.now(),
       is_p2p: false, // poll 只拉群消息
       raw: m,
+      app_id: this.appId,
     };
 
     if (this.callbacks.onMessage) {

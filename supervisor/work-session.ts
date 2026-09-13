@@ -42,6 +42,8 @@ export interface WorkSessionOptions {
   effort: string;
   /** fast 模式（Opus 加速输出）。true 时把 fastMode:true 合并进 work CLI 的 --settings JSON。 */
   fast?: boolean;
+  /** 发起频道所属飞书应用的 lark-cli bot 目录（多应用：工人 lark-cli 身份跟随发起频道，未传则继承启动器全局默认）。 */
+  larkConfigDir?: string;
 }
 
 export type WorkSessionStatus = 'starting' | 'running' | 'stopped' | 'failed';
@@ -246,6 +248,8 @@ export class WorkSession extends EventEmitter {
           ...(process.env as Record<string, string>),
           // 同 channel-cli 走对华网络，否则一发 API 即 403
           ...claudeApiNetEnv(),
+          // 多飞书应用：工人 lark-cli 身份跟随发起频道所属应用（未传则继承启动器全局默认目录）
+          ...(this.opts.larkConfigDir ? { LARKSUITE_CLI_CONFIG_DIR: this.opts.larkConfigDir } : {}),
         },
         stdio: ['pipe', 'pipe', 'pipe'],
         windowsHide: true,

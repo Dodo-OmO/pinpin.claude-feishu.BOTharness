@@ -4,6 +4,7 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Supervisor } from '../../supervisor/index.js';
+import { loadFeishuApps } from '../../supervisor/feishu-apps.js';
 import {
   resolveSenderNameSync,
   resolveMentions,
@@ -26,10 +27,13 @@ const VAULT_CWD = process.env['PINPIN_VAULT_CWD'] ?? '/path/to/obsidian-vault';
 
 dotenv.config({ path: join(APP_ROOT, '.env') });
 process.env['PINPIN_DB_PATH'] = join(APP_ROOT, 'data.db');
+// 多飞书应用：一个启动器同时挂 N 个自建应用（每个 chat 归属且只归属一个应用），见 supervisor/feishu-apps.ts。
+const feishuApps = loadFeishuApps(process.env, APP_ROOT);
 // lark-cli 身份隔离：品品全家（supervisor / 频道 CLI / MCP 子进程 / 工人 CLI）走独立配置目录（同一飞书应用，
 // strict-mode bot = 只能机器人身份、永不持有Owner的用户 token）；Owner本人的 ~/.lark-cli 只给她自己的窗口 +
 // 品品 DM 频道（channel-cli 对 DM 删掉此 env 回落）。PINPIN_LARK_GUARD 供全局 hook scripts/lark-guard.cjs 识别品品进程。
-process.env['LARKSUITE_CLI_CONFIG_DIR'] = join(APP_ROOT, '..', 'lark-cli-pinpin');
+// 全局默认值 = primary 应用（apps[0]）的 bot 目录；其余应用的频道 spawn 时由 channel-cli 按自身 app 覆盖。
+process.env['LARKSUITE_CLI_CONFIG_DIR'] = feishuApps[0]?.larkBotDir ?? join(APP_ROOT, '..', 'lark-cli-pinpin');
 process.env['PINPIN_LARK_GUARD'] = '1';
 
 // 全局兜底网：任何未捕获异常 / Promise 拒绝（尤其 node-pty、setTimeout 回调里的抛错）只记全栈日志，
@@ -162,7 +166,7 @@ function snapshotState(): SupervisorStateSnapshot {
   const sv = supervisor;
   return {
     ipc_port: sv.getIpcPort(),
-    chats: sv.getChats(),
+    chats: sv.allChats(),
     // P1.3: 拼装 per-CLI usage（statusLine sink 推过来的，事件驱动）
     // 批3 Bug 修复：用 getDisplayChannels（含 paused 时未 spawn 的已知频道合成停止卡），
     // 让启动前能看到所有频道卡、预配 model/effort 再开启所有。
@@ -215,11 +219,9 @@ function getChatDisplayName(chatId: string): string {
 let stateTickTimer: NodeJS.Timeout | null = null;
 
 app.whenReady().then(async () => {
-  const feishuAppId = process.env['FEISHU_APP_ID'];
-  const feishuAppSecret = process.env['FEISHU_APP_SECRET'];
-  if (!feishuAppId || !feishuAppSecret) {
+  if (!feishuApps.length) {
     process.stderr.write(
-      '[main] FATAL: FEISHU_APP_ID / FEISHU_APP_SECRET 缺失（.env 未配置）\n',
+      '[main] FATAL: 飞书应用配置缺失（.env FEISHU_APP_ID / FEISHU_APP_SECRET 未配置）\n',
     );
     app.quit();
     return;
@@ -230,13 +232,12 @@ app.whenReady().then(async () => {
     // P1.2: channel-config.json 等 runtime 配置落 userData（app.getAppPath() 打包后是 asar 只读）
     dataDir: app.getPath('userData'),
     vaultCwd: VAULT_CWD,
-    feishuAppId,
-    feishuAppSecret,
+    apps: feishuApps,
   });
   // 把 supervisor 关键事件转日志推 renderer
   supervisor.on('feishu-message', (msg) => {
     // Owner P3 反馈：日志流 sender 显真名 + @人占位符替换为 @真名（不显 user_X 编号）
-    const senderName = resolveSenderNameSync(msg.sender_open_id, msg.sender_type);
+    const senderName = resolveSenderNameSync(msg.sender_open_id, msg.sender_type, msg.app_id);
     const raw = msg.raw as { mentions?: FeishuMention[] } | undefined;
     const txt = resolveMentions(msg.text ?? `(${msg.msg_type})`, raw?.mentions);
     pushLog({
@@ -303,8 +304,8 @@ app.whenReady().then(async () => {
       c.start();
     } else {
       // 没在 pool 里 → spawn
-      const chat = supervisor?.getChats().find((x) => x.chat_id === chatId);
-      supervisor?.spawnChannelCli(chatId, chat?.name);
+      const chat = supervisor?.allChats().find((x) => x.chat_id === chatId);
+      supervisor?.spawnChannelCli(chatId, chat?.name, chat?.app_id);
     }
     pushState();
   });
@@ -598,7 +599,7 @@ app.whenReady().then(async () => {
     const ws = supervisor?.getWorkSession(sessionId);
     if (!ws) return null;
     const stats = ws.getStats();
-    const originChat = supervisor?.getChats().find((c) => c.chat_id === stats.origin_chat_id);
+    const originChat = supervisor?.allChats().find((c) => c.chat_id === stats.origin_chat_id);
     return {
       work_dir: stats.work_dir,
       model: stats.model,

@@ -43,7 +43,7 @@
 诚实地说：**这个仓克隆下来跑不起来**，因为它强耦合于我本机的运行环境：
 
 - 依赖本机安装的 **Claude Code CLI**（品品的每个频道都 spawn 一个交互式 `claude` 进程）；
-- 需要一套**飞书企业自建应用**凭据 + 本机装好官方 **lark-cli** 并登录（机器人身份 / 我本人身份两套配置目录）；
+- 需要一套（或多套）**飞书企业自建应用**凭据 + 本机装好官方 **lark-cli** 并登录（机器人身份 / 我本人身份两套配置目录）；
 - 人格 / 记忆 / 日记 / 心境的**真实内容全部在一个 Obsidian vault 里**（不在本仓，且永不公开）——代码只是读写它的机制；
 - Windows + Electron + `node-pty` 原生模块 + ElevenLabs（语音）key 等。
 
@@ -52,7 +52,7 @@
 > *Honestly: **you can't just clone this and run it** — it's tightly coupled to my local setup:*
 >
 > - *needs **Claude Code CLI** installed locally (each channel spawns its own interactive `claude` process);*
-> - *needs a set of **Feishu custom-app** credentials + the official **lark-cli** installed and logged in (two config dirs: bot identity / my own identity);*
+> - *needs one (or more) sets of **Feishu custom-app** credentials + the official **lark-cli** installed and logged in (two config dirs: bot identity / my own identity);*
 > - *the **real content** of personality / memory / diary / mood all lives in an Obsidian vault (not in this repo, and never public) — the code only reads and writes it;*
 > - *Windows + Electron + the `node-pty` native module + an ElevenLabs (voice) key, and so on.*
 >
@@ -69,8 +69,8 @@
 ```
 Electron 启动器 / Electron launcher
    └─ Supervisor（主进程 / main process）
-        ├─ 飞书 poll 单点 + 事件订阅长连接（拉所有消息，按 chat_id 分发）
-        │   Single Feishu poll + event-subscription socket → route every message by chat_id
+        ├─ 飞书 poll + 事件订阅长连接（每个飞书应用一套；拉所有消息，按 chat_id 分发）
+        │   One Feishu poll + event-subscription socket per app → route every message by chat_id
         ├─ ChannelCli 池 / pool：每个飞书频道 = 一个独立的交互式 claude CLI 子进程
         │     └─ 子进程通过 .mcp.json 自启 stdio MCP server（飞书工具 / 心境 / 记忆 / 任务…）
         ├─ IPC 服务器 / server（本机 TCP，子进程回连）
@@ -81,6 +81,7 @@ Electron 启动器 / Electron launcher
 
 - **多频道 CLI 隔离**——一聊一进程，互不串扰，各自独立的上下文与人格注入。
 - **Supervisor 多进程编排**——单点拉消息、分发、生命周期管理、崩溃熔断退避。
+- **多应用单启动器**——一个启动器同时挂 N 个飞书自建应用；每个聊天只归属一个应用，子进程按所属应用注入凭据与 lark-cli 身份，跨应用的群列表 / 频道间捎话集中在 Supervisor 层。
 - **MCP 工具层**——飞书收发 / 表情回应 / 建群 / 心境评估 / 记忆读写 / 后台 work session 等几十个工具；云文档 / 任务 / 日历 / 邮件等飞书业务能力交给官方 **lark-cli**（内嵌 28 个 skill，`scripts/lark-skills-sync.cjs` 同步到本机）。
 - **双鉴权**——lark-cli 两配置目录身份隔离（群里 = 机器人身份、我的私聊 = 我本人身份；`scripts/lark-guard.cjs` 全局守门 hook 拦切身份 / 改配置 / 登录登出）+ OWNER open_id 硬比对（危险操作仅本人可触发）。
 - **后台任务**——日记 / 早报 / 周回顾 / 记忆自检 / 自由活动等定时触发，按 chat_id 归属分发。
@@ -90,6 +91,7 @@ Electron 启动器 / Electron launcher
 >
 > - ***Multi-channel CLI isolation*** *— one process per chat, fully isolated, each with its own context and personality injection.*
 > - ***Supervisor multi-process orchestration*** *— single point to poll, route, manage lifecycle, and back off via a crash circuit-breaker.*
+> - ***Multi-app, single launcher*** *— one launcher hosts N Feishu custom apps; each chat belongs to exactly one app, child processes get that app's credentials and lark-cli identity injected, and cross-app abilities (chat listing / peer relay between channels) live only in the Supervisor.*
 > - ***MCP tool layer*** *— dozens of tools: Feishu send/receive, emoji reactions, group creation, mood appraisal, memory read/write, background work sessions, and more; cloud docs / tasks / calendar / mail are delegated to the official **lark-cli** (28 embedded skills, synced locally by `scripts/lark-skills-sync.cjs`).*
 > - ***Dual auth*** *— lark-cli identity isolation via two config dirs (bot identity in groups, my own identity in my DM; the global guard hook `scripts/lark-guard.cjs` blocks identity / config switching and login/logout) + a hard OWNER open_id check (dangerous actions only the owner can trigger).*
 > - ***Background jobs*** *— diary / briefings / weekly recap / memory audit / free activity, scheduled and routed by chat_id ownership.*

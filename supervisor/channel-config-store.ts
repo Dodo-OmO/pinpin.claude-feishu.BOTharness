@@ -29,6 +29,8 @@ import path from 'node:path';
 export interface ChannelConfig {
   model?: string;
   effort?: string;
+  /** 该 chat 归属的飞书应用 id（多应用：resolveAppId 首命中落盘，之后钉死归属不再改判）。 */
+  appId?: string;
   /** P4.Q3 续: 用户自定义卡片显示名（飞书 P2P 无 chat.name + 群聊用户想改名时用）
    *  渲染 fallback 链：display_name > 飞书 chat_name > chat_id.slice(-12) */
   display_name?: string;
@@ -136,12 +138,13 @@ export class ChannelConfigStore {
     );
   }
 
-  /** 标 seen=true。spawnChannelCli 首次 spawn 时调，让该 chat 进入"常驻"持久列表 */
-  markSeen(chatId: string): void {
+  /** 标 seen=true（+ 可选钉死 appId 归属）。spawnChannelCli 首次 spawn 时调，让该 chat 进入"常驻"持久列表。
+   *  已 seen 且已有 appId → 归属早钉死，直接 return（防重复 flush）；否则合并写。 */
+  markSeen(chatId: string, appId?: string): void {
     if (chatId === DEFAULTS_KEY || chatId === WORK_DEFAULTS_KEY) return;
     const existing = this.cache[chatId] ?? {};
-    if (existing.seen === true) return;
-    this.cache[chatId] = { ...existing, seen: true };
+    if (existing.seen === true && existing.appId !== undefined) return;
+    this.cache[chatId] = { ...existing, seen: true, ...(appId !== undefined ? { appId } : {}) };
     this.flush();
   }
 
