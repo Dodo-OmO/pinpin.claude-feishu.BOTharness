@@ -143,11 +143,15 @@ export class ChannelCli extends EventEmitter {
       ...(sysPromptOk ? ['--append-system-prompt-file', sysPromptFile] : []),
       // 外挂知识目录（如Project X提示词工作频道绑Client目录）：skills/CLAUDE.md 原生加载 + 文件访问放行
       ...(this.opts.addDirs ?? []).flatMap((d) => ['--add-dir', d]),
+      // 会话显示名：本机其它 Claude 窗口用 ListAgents/SendMessage 直连品品时按这个名字找
+      '--name',
+      `品品·${this.opts.chatName ?? this.opts.chatId.slice(-8)}`,
       '--permission-mode',
       'bypassPermissions',
       '--tools',
       // 禁 AskUserQuestion：频道 CLI 跑后台 PTY、无人能应答 ask，模型一调即卡死前台，故白名单不含它
-      'Bash,Edit,Read,Write,Glob,Grep,Task,WebFetch,WebSearch,TodoWrite,Skill,NotebookEdit,ToolSearch',
+      // ListAgents/SendMessage：品品各频道直接跟本机其它 Claude 窗口（工人 / 工作站 / 顺子）说话
+      'Bash,Edit,Read,Write,Glob,Grep,Task,WebFetch,WebSearch,TodoWrite,Skill,NotebookEdit,ToolSearch,ListAgents,SendMessage',
     ];
     for (const a of args) {
       if (a === '-p' || a === '--print') {
