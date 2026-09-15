@@ -27,14 +27,24 @@ import {
 export type RequestHandler = (
   params: unknown,
   chatId: string,
+  conn: IpcConn,
 ) => Promise<unknown>;
 
-interface ClientEntry {
+/** 单条连接（handler 第三参；state 供固定端口桥接挂连接级身份） */
+export interface IpcConn {
+  readonly socket: net.Socket;
+  state: Record<string, unknown>;
+}
+
+interface ClientEntry extends IpcConn {
   chatId: string;
   pid: number;
-  socket: net.Socket;
   buffer: string;
+  authed: boolean;
 }
+
+/** 未通过鉴权闸的错误码 */
+export const IPC_UNAUTHORIZED = -32001;
 
 export interface IpcServerOptions {
   port?: number;
@@ -56,9 +66,26 @@ export class IpcServer extends EventEmitter {
   >();
   private nextRequestId = 1;
 
+  /** 连接级鉴权闸（固定端口桥接用）：每条连接首帧必须是 method 且 verify 通过，否则回 -32001 并断开 */
+  private authGate: { method: string; verify: (params: unknown) => boolean } | null = null;
+
   /** 注册 request handler（supervisor 启动时调） */
   setRequestHandler(method: string, handler: RequestHandler): void {
     this.requestHandlers.set(method, handler);
+  }
+
+  setAuthGate(method: string, verify: (params: unknown) => boolean): void {
+    this.authGate = { method, verify };
+  }
+
+  /** 往某条连接推 notification（不要求 hello 注册） */
+  notify(conn: IpcConn, method: string, params: unknown): boolean {
+    try {
+      conn.socket.write(encodeFrame({ method, params }));
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   async start(opts: IpcServerOptions = {}): Promise<number> {
@@ -213,7 +240,7 @@ export class IpcServer extends EventEmitter {
 
   private onConnection(socket: net.Socket): void {
     // entry 占位——hello 来了再填 chatId / pid
-    const entry: ClientEntry = { chatId: '', pid: 0, socket, buffer: '' };
+    const entry: ClientEntry = { chatId: '', pid: 0, socket, buffer: '', authed: false, state: {} };
     this.sockets.add(socket);
 
     socket.on('data', (chunk) => {
@@ -221,6 +248,7 @@ export class IpcServer extends EventEmitter {
       const lines = entry.buffer.split('\n');
       entry.buffer = lines.pop() ?? '';
       for (const line of lines) {
+        if (socket.writableEnded) return; // 已被鉴权闸拒绝，同包后续帧丢弃
         if (!line.trim()) continue;
         this.onLine(entry, line);
       }
@@ -228,6 +256,7 @@ export class IpcServer extends EventEmitter {
 
     socket.on('close', () => {
       this.sockets.delete(socket);
+      if (entry.authed) this.emit('connection-closed', entry as IpcConn);
       if (entry.chatId) {
         // 只清掉 map 中 socket 是同一个的——避免 stale close 删掉重连后的新 entry
         const current = this.clients.get(entry.chatId);
@@ -240,7 +269,9 @@ export class IpcServer extends EventEmitter {
       // 短连接 sink（statusline / work-stop notification）正常断开，无 hello 注册，静默不刷日志
     });
 
-    socket.on('error', (err) => {
+    socket.on('error', (err: NodeJS.ErrnoException) => {
+      // 桥接 / sink 等非频道连接对端直接断开（未 hello 注册）属正常，不刷日志
+      if (err.code === 'ECONNRESET' && !entry.chatId) return;
       process.stderr.write(
         `[ipc-server] socket error (chat=${entry.chatId || '?'}): ${err.message}\n`,
       );
@@ -256,6 +287,18 @@ export class IpcServer extends EventEmitter {
         `[ipc-server] parse failed: ${e instanceof Error ? e.message : e} line=${line.slice(0, 100)}\n`,
       );
       return;
+    }
+
+    if (this.authGate && !entry.authed) {
+      if (env.method === this.authGate.method && this.authGate.verify(env.params)) {
+        entry.authed = true;
+      } else {
+        process.stderr.write(`[ipc-server] :${this.port} 拒绝未鉴权连接（method=${env.method ?? '-'}）\n`);
+        if (env.id) entry.socket.end(encodeFrame({ id: env.id, error: { code: IPC_UNAUTHORIZED, message: 'unauthorized' } }));
+        else entry.socket.end();
+        setTimeout(() => entry.socket.destroy(), 1000).unref();
+        return;
+      }
     }
 
     // 方案A：子端对"主→子 request"的响应帧（带 id + result/error、**无 method**）。
@@ -322,7 +365,7 @@ export class IpcServer extends EventEmitter {
       return;
     }
     try {
-      const result = await handler(env.params, entry.chatId);
+      const result = await handler(env.params, entry.chatId, entry);
       const resp: IpcEnvelope = { id: env.id, result };
       entry.socket.write(encodeFrame(resp));
     } catch (e) {

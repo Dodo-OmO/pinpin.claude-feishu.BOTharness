@@ -74,7 +74,94 @@ export const IPC_METHODS = {
   WARDEN_RESTART_SUPERVISOR: 'warden.restart-supervisor', // request → WorkOkResult（重启品品 supervisor）
   WARDEN_QUIT_APP: 'warden.quit-app',             // request → WorkOkResult（关闭品品，经 main.ts isQuiting）
   WARDEN_RECENT_LOGS: 'warden.recent-logs',       // request {limit?} → {logs: WardenLogEntry[]}
+  // ── 传话口(47901)：本机 Claude 窗口 ⇄ 品品（协议文档 docs/relay-protocol.md）──
+  RELAY_HELLO: 'relay.hello',               // request RelayHelloParams → {ok, client_id}（首帧，验口令）
+  RELAY_SUBMIT: 'relay.submit',             // request RelayNote 提交字段 → RelaySubmitResult
+  RELAY_STATUS: 'relay.status',             // request {id} → RelayReceipt
+  RELAY_RECEIPT: 'relay.receipt',           // notification → 提交方 session + relay 角色
+  RELAY_LETTER: 'relay.letter',             // notification → relay 角色（hello 后补推未取走的）
+  RELAY_LETTER_ACK: 'relay.letter-ack',     // request {id, result, note?} → {ok}
+  RELAY_LETTER_TAKEN: 'relay.letter-taken', // notification {id} → 其余 relay 角色
+  // 频道子进程 → supervisor
+  RELAY_ACK: 'relay.ack',                   // request RelayAckParams → WorkOkResult
+  RELAY_LETTER_CREATE: 'relay.letter-create', // request RelayLetterCreateParams → RelayLetterCreateResult
 } as const;
+
+export const RELAY_BRIDGE_PORT = 47901;
+
+export type RelayAction = 'dm' | 'group' | 'group_at' | 'tell_pinpin';
+export type RelayNoteStatus =
+  | 'queued' | 'scheduled' | 'delivered' | 'sent' | 'deferred' | 'skipped' | 'failed' | 'no_ack';
+
+export interface RelayHelloParams {
+  token: string;
+  role: 'submitter' | 'relay';
+  session_title?: string;
+  session_id?: string;
+}
+
+/** relay.submit params */
+export interface RelaySubmitParams {
+  id: string;
+  from: { session_title: string; session_id?: string; project?: string };
+  action: RelayAction;
+  target?: { person?: string; chat?: string; at?: string[] };
+  situation: string;
+  request: string;
+  urgency?: 'normal' | 'urgent';
+  need_reply?: boolean;
+  /** 回复来信时填来信 id（L-…） */
+  reply_to?: string;
+  attachments?: string[];
+}
+
+export type RelaySubmitResult =
+  | { ok: true; id: string; status: RelayNoteStatus; deliver_after?: string }
+  | { ok: false; id?: string; error: string; message?: string; candidates?: string[] };
+
+/** relay.status 结果 / relay.receipt 推送 */
+export interface RelayReceipt {
+  id: string;
+  /** 条子状态；查来信 id 时为来信状态 pending/taken/replied/expired */
+  status: RelayNoteStatus | 'pending' | 'taken' | 'replied' | 'expired' | 'not_found';
+  sent_text?: string;
+  reason?: string;
+  /** 对象回话（品品二次 ack 带上） */
+  reply?: string;
+  deliver_after?: string;
+  updated_at?: string;
+}
+
+export interface RelayLetterPush {
+  id: string;
+  time: string;
+  from: { chat_id: string; requester: string };
+  target: string;
+  content: string;
+  need_reply: boolean;
+  reply_chat_id: string;
+}
+
+export interface RelayAckParams {
+  note_id: string;
+  status: 'sent' | 'deferred' | 'skipped' | 'failed';
+  sent_text?: string;
+  reason?: string;
+  reply?: string;
+}
+
+export interface RelayLetterCreateParams {
+  target: string;
+  content: string;
+  need_reply: boolean;
+}
+export interface RelayLetterCreateResult {
+  ok: boolean;
+  id?: string;
+  /** 当前在线传话员数（0 = 暂存待取） */
+  relay_online?: number;
+  error?: string;
+}
 
 
 // ── 管家桥接固定端口（区别于子进程动态端口；管家与 supervisor 两端共享此单源）──
@@ -110,6 +197,8 @@ export interface WardenSystemInfo {
 export interface HelloParams {
   chat_id: string;
   pid: number;
+  /** 管家桥接 hello 必带（bridge-token 文件内容）；频道子进程动态端口不校验 */
+  token?: string;
 }
 
 export interface ByeParams {

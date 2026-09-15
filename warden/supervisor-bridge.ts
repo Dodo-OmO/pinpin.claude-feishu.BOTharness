@@ -6,6 +6,7 @@
  * 终端数据由 server 经 TERMINAL_DATA notification 推来 → onTerminalData 回调（步骤 3 用）。
  */
 import net from 'node:net';
+import { readBridgeToken } from '../src/ipc/bridge-token.js';
 import {
   IPC_METHODS,
   WARDEN_BRIDGE_PORT,
@@ -67,7 +68,8 @@ export class SupervisorBridge {
     socket.on('connect', () => {
       this.connected = true;
       // 注册为 __warden__，使 supervisor 能 push TERMINAL_DATA 回来
-      this.sendNotification(IPC_METHODS.HELLO, { chat_id: WARDEN_CLIENT_ID, pid: process.pid });
+      // 口令每次重连现读：supervisor 首启才生成文件，可能晚于管家启动
+      this.sendNotification(IPC_METHODS.HELLO, { chat_id: WARDEN_CLIENT_ID, pid: process.pid, token: readBridgeToken() });
       console.log('[warden] 已连上启动器桥接');
       this.onReconnect?.();
     });

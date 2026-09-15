@@ -1,4 +1,4 @@
-<#
+﻿<#
 .SYNOPSIS
     品品 vault 沉淀目录 → YYYY-MM 平铺一层子目录 迁移脚本。
 
@@ -165,7 +165,7 @@ function Get-MonthForISOWeek {
 }
 
 <#
- ⚠️ 关键坑：/path/to 是repo同步盘，**盘上每一个文件和目录**都带
+ ⚠️ 关键坑：vault 在同步盘上（群晖 Drive 等），**盘上每一个文件和目录**都可能带
  ReparsePoint 属性（云端占位符 reparse tag）。若照搬
  `$_.Attributes -band [IO.FileAttributes]::ReparsePoint` 去跳过，会把 100% 的文件全跳掉，
  脚本静默迁 0 个。

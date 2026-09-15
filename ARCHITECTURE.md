@@ -75,11 +75,21 @@
 - **跨应用能力只在 Supervisor**：子进程只持有本 chat 所属应用的 client。要看全部应用的群列表（IPC `LIST_CHATS`，带应用标签）或给另一个频道的品品捎话（IPC `PEER_MESSAGE` → 目标频道收到 `trigger=peer-message`，由那边的品品自己决定说什么、不替它发言；目标已不在 allowlist 内则拒绝）都经 IPC 由 Supervisor 代办。
 - **环境档案按应用注入**：vault 里每个应用一份 `环境/<FEISHU_APP_LABEL>.md`（描述该应用所处的组织 / 团队 / 规矩），子进程 spawn 时按自己所属应用读取注入 prompt，各读各的互不干扰。
 
+### 3.2 本机 Claude 会话传话口
+
+`supervisor/relay-bridge.ts` + `relay-queue.ts` 在固定端口 `127.0.0.1:47901` 开一个只做传话的 NDJSON 口，给同机的其它 Claude Code 会话用：
+
+- **递条子**（`relay.submit`）：会话说明"什么情况、请品品私聊谁 / 发哪个群 / @谁 / 只告诉品品"，Supervisor 确定性路由到对应频道（`trigger=desktop-note`），品品用自己的话办完调 `desktop_note_ack` 回执（已发原文 / 推迟 / 不发 + 原因），回执推回提交方。给 OWNER 本人 24h 投递，给其他人只在 9–22 点；30 分钟无回执重投一次。
+- **来信**（`desktop_session_message`，仅 OWNER）：广播给常驻"传话员"会话，第一个取走算数；回话以 `reply_to` 条子送回来源频道；2 小时没人取则带通道自诊断事实告诉来源频道。
+- 条子 / 来信落 `userData/relay-queue.json`（原子写、终态留 7 天），重启不丢。与管家口分端口 = 信任域隔离。
+
 ## 4. IPC 协议
 
 `src/ipc/protocol.ts` 定义 Supervisor ↔ 频道子进程的消息格式（如 `client-hello` / `work.send` / `work.end` / inbound 推送 / work 状态回报 / 账号用量额度等）。传输是本机 TCP。
 
 ## 5. 鉴权
+
+- **本机桥接口令**（`src/ipc/bridge-token.ts`）：管家口与传话口两个固定端口共用 `~/.pinpin/bridge-token`（Supervisor 首启生成），连接首帧必须带口令（`IpcServer.setAuthGate`），否则 `-32001` 断开。频道子进程的动态端口不受影响。
 
 - **lark-cli 身份隔离**（`launcher/main/main.ts` + `supervisor/channel-cli.ts`）：云文档 / 任务 / 日历 / 邮件等飞书业务能力走官方 lark-cli（内嵌的 AI skills 由 `scripts/lark-skills-sync.cjs` 同步到本机 Claude Code 的 skills 目录）。品品全家（Supervisor / 频道 CLI / MCP 子进程 / 工人 CLI）通过 `LARKSUITE_CLI_CONFIG_DIR` 指向品品专用配置目录（每个飞书应用一个，`lark-cli-pinpin[-N]`）——strict-mode 机器人身份、永不持有 OWNER 的用户 token；只有 OWNER 私聊频道改指向该应用的 `LARK_USER_CONFIG_DIR[_N]`（未配则回落 OWNER 本人的 `~/.lark-cli`，用户身份）。`scripts/lark-guard.cjs` 是注册在全局的 PreToolUse 守门 hook：全机禁止 `lark-cli event`（同一应用的长连接是集群模式，再起一个会抢走 Supervisor 的消息）；品品进程（env `PINPIN_LARK_GUARD=1`）再禁切 profile / 覆盖 `LARKSUITE_CLI_*` / 改配置 / 登录登出 / 自升级。
 - **OWNER 硬鉴权**（`src/mcp/owner-auth.ts`）：危险工具（重启 / 下线 / 跨频道发言等）校验"本频道最近 inbound 发送者是否为 OWNER"，fail-closed（识别不到就拒绝，引导去单聊触发）。

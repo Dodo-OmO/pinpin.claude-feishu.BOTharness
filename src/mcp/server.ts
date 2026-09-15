@@ -79,6 +79,8 @@ import { notifyWhenSpeaksTool, handleNotifyWhenSpeaks } from './tools/notify-whe
 import { CROSS_CHAT_MESSAGE_TOOL, handleCrossChatMessage } from './tools/cross-chat-message.js';
 // 传话主动催 relay tool
 import { relayMessageTool, handleRelayMessage } from './tools/relay-message.js';
+// 传话口：本机 Claude 窗口 ⇄ 品品
+import { DESKTOP_NOTE_ACK_TOOL, DESKTOP_SESSION_MESSAGE_TOOL, handleDesktopNoteAck, handleDesktopSessionMessage } from './tools/desktop-relay.js';
 // 2026-05-28 阶段补齐：OWNER 命令 3 tool
 import {
   RESTART_SELF_TOOL,
@@ -209,6 +211,8 @@ async function main() {
       disbandGroupTool,
       // 传话主动催
       relayMessageTool,
+      DESKTOP_NOTE_ACK_TOOL,
+      DESKTOP_SESSION_MESSAGE_TOOL,
       // 2026-05-28 阶段补齐：OWNER 命令 3 tool
       RESTART_SELF_TOOL,
       SLEEP_SELF_TOOL,
@@ -313,6 +317,10 @@ async function main() {
       // 传话主动催
       case 'relay_message':
         return handleRelayMessage(args as unknown as Parameters<typeof handleRelayMessage>[0]);
+      case 'desktop_note_ack':
+        return handleDesktopNoteAck(args as unknown as Parameters<typeof handleDesktopNoteAck>[0]);
+      case 'desktop_session_message':
+        return handleDesktopSessionMessage(args as unknown as Parameters<typeof handleDesktopSessionMessage>[0]);
       // 2026-05-28 阶段补齐：OWNER 命令 3 tool
       case 'restart_self':
         return handleRestartSelf();

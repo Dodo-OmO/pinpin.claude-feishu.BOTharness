@@ -11,10 +11,12 @@
 import { IpcServer } from './ipc-server.js';
 import type { ChannelCli } from './channel-cli.js';
 import type { WorkSession } from './work-session.js';
+import { tokenMatches } from '../src/ipc/bridge-token.js';
 import {
   IPC_METHODS,
   WARDEN_BRIDGE_PORT,
   WARDEN_CLIENT_ID,
+  type HelloParams,
   type WorkOkResult,
   type WardenSystemInfo,
   type WardenTerminalDataParams,
@@ -55,8 +57,10 @@ export interface WardenBridgeDeps {
   getRecentLogs: (limit: number) => WardenLogEntry[];
 }
 
-export async function createWardenBridge(deps: WardenBridgeDeps): Promise<IpcServer> {
+export async function createWardenBridge(deps: WardenBridgeDeps, token: string): Promise<IpcServer> {
   const bridge = new IpcServer();
+  // 本端口能关品品 / 写 CLI 输入：首帧必须是带口令的 hello
+  bridge.setAuthGate(IPC_METHODS.HELLO, (p) => tokenMatches((p as HelloParams | undefined)?.token, token));
 
   bridge.setRequestHandler(IPC_METHODS.WARDEN_LIST_CLIS, async () => {
     return {

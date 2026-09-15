@@ -31,6 +31,8 @@ import { WorkSession, type WorkSessionStopInfo } from './work-session.js';
 import { CcusagePoller, type QuotaSnapshot } from './ccusage-poller.js';
 import { SupervisorCronRunner } from './cron-runner.js';
 import { createWardenBridge } from './warden-bridge.js';
+import { RelayBridge } from './relay-bridge.js';
+import { ensureBridgeToken } from '../src/ipc/bridge-token.js';
 import {
   IPC_METHODS,
   type WorkSpawnParams,
@@ -104,6 +106,8 @@ export class Supervisor extends EventEmitter {
   private ipcServer: IpcServer;
   /** 管家桥接 server（固定端口，供独立管家进程远程看/控 CLI；旁路，失败不影响品品主功能） */
   private wardenBridge: IpcServer | null = null;
+  /** 传话口（固定端口 47901，本机 Claude 窗口 ⇄ 品品；旁路，失败不影响品品主功能） */
+  private relayBridge: RelayBridge | null = null;
   private ccusagePoller: CcusagePoller;
   private channelConfigStore: ChannelConfigStore;
   private cronRunner: SupervisorCronRunner;
@@ -240,6 +244,7 @@ export class Supervisor extends EventEmitter {
       // D2: CLI 已就绪 → flush 该 chat 在未就绪期间缓冲的入站消息
       this.flushPendingInbound(info.chat_id);
       this.emit('channel-mcp-ready', info);
+      void this.relayBridge?.deliverDue();
     });
     this.ipcServer.on('client-disconnected', (info: { chat_id: string; pid: number }) => {
       process.stderr.write(`[supervisor] IPC client down: chat=${info.chat_id} pid=${info.pid}\n`);
@@ -489,8 +494,15 @@ export class Supervisor extends EventEmitter {
     //         这 3 个不依赖 CLI 在线，统一在 main process 跑（避免 N 个 CLI 重复触发） ──
     this.cronRunner.start();
 
-    // ── 5.6 管家桥接 server（固定端口，供独立管家进程手机远程看/控 CLI；旁路，失败不崩品品）──
+    // ── 5.6 管家口 47900 + 传话口 47901（固定端口、共用本机口令；旁路，失败不崩品品）──
+    let bridgeToken = '';
     try {
+      bridgeToken = ensureBridgeToken();
+    } catch (e) {
+      process.stderr.write(`[supervisor] 桥接口令生成失败，管家口 / 传话口不开: ${e instanceof Error ? e.message : e}\n`);
+    }
+    try {
+      if (!bridgeToken) throw new Error('无口令');
       this.wardenBridge = await createWardenBridge({
         getChannels: () => this.channels,
         getSystemInfo: (): WardenSystemInfo => ({
@@ -532,11 +544,34 @@ export class Supervisor extends EventEmitter {
         restartSupervisor: () => this.restart(),
         quitApp: () => this.emit('warden-request-quit'),
         getRecentLogs: (limit) => this.recentLogs.slice(-limit),
-      });
+      }, bridgeToken);
     } catch (e) {
       process.stderr.write(
         `[supervisor] warden-bridge 启动失败（不影响品品主功能）: ${e instanceof Error ? e.message : e}\n`,
       );
+    }
+    if (bridgeToken) {
+      const relay = new RelayBridge({
+        dataDir: this.opts.dataDir,
+        token: bridgeToken,
+        pushTrigger: async (chatId, body, meta) =>
+          (await this.ensureChannelReadyForEvent(chatId)) && this.ipcServer.pushChatTrigger(chatId, body, meta),
+        listChats: () => [
+          ...this.allChats().map((c) => ({ chat_id: c.chat_id, name: c.name ?? c.chat_id })),
+          ...this.channelConfigStore.listChatIds().map((id) => ({ chat_id: id, name: this.getChannelDisplayName(id) })),
+        ],
+        humans: () => getAllMappings().humans,
+        ownerOpenIds: () => this.opts.apps.map((a) => a.ownerOpenId).filter((id): id is string => !!id),
+        ownerChatId: () => process.env.PINPIN_OWNER_CHAT_ID,
+      });
+      try {
+        await relay.start();
+        relay.attachChannelIpc(this.ipcServer);
+        this.relayBridge = relay;
+      } catch (e) {
+        await relay.stop().catch(() => {});
+        process.stderr.write(`[supervisor] relay-bridge 启动失败（不影响品品主功能）: ${e instanceof Error ? e.message : e}\n`);
+      }
     }
 
     // ── 6. ccusage poller (P1.3 改：Owner要求不轮询，删 5min interval；改按需 fetchQuotaNow 触发) ──
@@ -575,6 +610,8 @@ export class Supervisor extends EventEmitter {
     await this.ipcServer.stop();
     await this.wardenBridge?.stop();
     this.wardenBridge = null;
+    await this.relayBridge?.stop();
+    this.relayBridge = null;
     process.stderr.write('[supervisor] stopped\n');
   }
 
