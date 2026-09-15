@@ -1,4 +1,4 @@
-// supervisor 共用小工具（供 channel-cli.ts / work-session.ts 共享）
+// supervisor 共用小工具（供 channel-cli.ts 共享）
 
 import { execSync } from 'node:child_process';
 
@@ -23,7 +23,9 @@ export const stripAnsi = (s: string): string =>
 /** 单轮 API 失败重试次数加固（CLI 原生默认 10，env override）。调高 = 多扛网络瞬时抖动、抖动过去自动接上。 */
 const PINPIN_API_MAX_RETRIES = process.env['PINPIN_API_MAX_RETRIES'] ?? '20';
 
-/** Claude CLI 联网 env（API 失败重试加固）——channel-cli 与 work-session 两处 spawn 共用。 */
+/** Claude CLI 联网 env（网络 + 重试）单源——channel-cli spawn 共用。
+ *  缺则该 CLI 一发 API 请求即被对华封锁返 403。大小写各注入一份（Node 认大写、部分依赖只认小写）。
+ *  须铺在 `...process.env` 之后注入，覆盖宿主可能残留的空/错网络。 */
 export function claudeApiNetEnv(): Record<string, string> {
   return {
     CLAUDE_CODE_MAX_RETRIES: PINPIN_API_MAX_RETRIES,

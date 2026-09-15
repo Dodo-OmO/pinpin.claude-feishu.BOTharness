@@ -129,8 +129,6 @@ body {
 .btn-danger { color: #c0392b; }
 .btn-danger:hover { background: rgba(192, 57, 43, 0.1); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.work-card { background: linear-gradient(135deg, rgba(168,216,232,0.12), rgba(200,182,226,0.12)); border: 1px solid rgba(168,216,232,0.4); }
-.work-card .card-tag { background: linear-gradient(135deg, var(--skyblue), var(--purple)); color: white; }
 
 .log-region { flex: 1; background: white; border: 1px solid var(--line); border-radius: var(--radius-md); padding: 12px 14px; box-shadow: var(--shadow-sm); display: flex; flex-direction: column; min-height: 130px; max-height: 360px; overflow: hidden; }
 /* P3 bug 2: log-list 容器固定高度（Owner要求 ~20 行可视区，旧版无 max-height 致 main 整体滚动）。

@@ -40,7 +40,7 @@ export async function handleDesktopNoteAck(args: RelayAckParams): Promise<ToolRe
 
 export const DESKTOP_SESSION_MESSAGE_TOOL = {
   name: "desktop_session_message",
-  description: "仅Owner可用：替她给本机某个 Claude 窗口（Desktop session）带话，由那边常驻传话员按标题转交；回话会以 trigger=desktop-reply 回到本频道。",
+  description: "仅Owner可用：替她给本机某个 Claude 窗口（Desktop session）带话，或把活派给常驻「工人」会话（target=工人，content=任务书），由那边常驻传话员按标题转交；回话 / 工人汇报会以 trigger=desktop-reply 回到本频道。",
   inputSchema: {
     type: "object" as const,
     properties: {

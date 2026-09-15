@@ -95,11 +95,6 @@
     <div id="content"><div class="empty">加载中…</div></div>
   </div>
 
-  <!-- Work 干活 session -->
-  <div class="view" id="view-work">
-    <div id="work-content"><div class="empty">加载中…</div></div>
-  </div>
-
   <!-- 系统 -->
   <div class="view" id="view-system">
     <div class="sys-card">
@@ -112,7 +107,7 @@
     </div>
     <button id="btn-quota" class="btn">↻ 刷新额度（约 5 秒）</button>
 
-    <div class="section-title">全局默认设置（仅影响之后新建的频道 / work）</div>
+    <div class="section-title">全局默认设置（仅影响之后新建的频道）</div>
     <div class="panel" id="defaults-panel"><div class="empty" style="padding:14px">加载中…</div></div>
 
     <div class="section-title">系统操作</div>
@@ -129,7 +124,6 @@
 
   <nav>
     <button class="nav-btn active" data-tab="channels"><span class="ic">📡</span>频道</button>
-    <button class="nav-btn" data-tab="work"><span class="ic">🛠</span>Work</button>
     <button class="nav-btn" data-tab="system"><span class="ic">⚙</span>系统</button>
     <button class="nav-btn" data-tab="logs"><span class="ic">📜</span>日志</button>
   </nav>
@@ -162,7 +156,6 @@
       failed:   { cls: 'bad',  label: '已崩溃' },
     };
     let lastClis = [];
-    let lastWork = [];
     let currentTab = 'channels';
 
     function $(id) { return document.getElementById(id); }
@@ -181,7 +174,6 @@
         currentTab = b.dataset.tab;
         document.querySelectorAll('.nav-btn').forEach((x) => x.classList.toggle('active', x === b));
         document.querySelectorAll('.view').forEach((v) => v.classList.toggle('active', v.id === 'view-' + currentTab));
-        if (currentTab === 'work') refreshWork();
         if (currentTab === 'system') { refreshNet(); refreshDefaults(); }
         if (currentTab === 'logs') refreshLogs();
       };
@@ -234,7 +226,7 @@
 
     $('content').addEventListener('click', (e) => {
       const card = e.target.closest('.card[data-chat]');
-      if (card) openConsole(card.dataset.chat, 'channel');
+      if (card) openConsole(card.dataset.chat);
     });
     async function doLaunch() {
       const r = await (await fetch('/api/system/launch-launcher', { method: 'POST' })).json();
@@ -242,45 +234,6 @@
     }
     $('btn-launch').onclick = doLaunch;
     $('btn-launch2').onclick = doLaunch;
-
-    // ── Work session ──
-    function workCard(w) {
-      const st = STATUS[w.status] || { cls: 'gray', label: w.status };
-      const dir = (w.work_dir || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || w.work_dir || '—';
-      const pct = typeof w.context_pct === 'number' ? w.context_pct : null;
-      return `
-        <div class="card" data-work="${esc(w.session_id)}">
-          <div class="card-top">
-            <span class="dot ${st.cls}"></span>
-            <span class="card-name">${esc(dir)}</span>
-            <span class="card-status">${esc(st.label)}</span>
-          </div>
-          <div class="meta">
-            <span title="${esc(w.work_dir)}">${esc(w.work_dir || '')}</span>
-          </div>
-          <div class="meta">
-            <span><b>${esc(w.model || '—')}</b></span>
-            <span>${esc(w.effort || '—')}${w.fast ? ' ⚡' : ''}</span>
-            <span>运行 <b>${fmtUptime(w.uptime_ms)}</b></span>
-            ${pct !== null ? `<span>上下文 <b>${pct.toFixed(0)}%</b></span>` : ''}
-          </div>
-          ${pct !== null ? `<div class="bar ${pct >= 80 ? 'hot' : ''}"><div style="width:${Math.min(pct,100)}%"></div></div>` : ''}
-        </div>`;
-    }
-    async function refreshWork() {
-      if ($('term-overlay').style.display === 'flex') return;
-      let r;
-      try { r = await (await fetch('/api/work')).json(); }
-      catch { return; }
-      lastWork = r.sessions || [];
-      $('work-content').innerHTML = lastWork.length
-        ? '<div class="grid">' + lastWork.map(workCard).join('') + '</div>'
-        : '<div class="empty">当前没有 work 干活 session。<br>Owner在飞书让品品起活儿时会出现在这。</div>';
-    }
-    $('work-content').addEventListener('click', (e) => {
-      const card = e.target.closest('.card[data-work]');
-      if (card) openConsole(card.dataset.work, 'work');
-    });
 
     // ── 额度 ──
     $('btn-quota').onclick = async () => {
@@ -308,12 +261,7 @@
         <div class="row"><label>Effort</label><select id="def-effort">${eo(d.channel.effort)}</select></div>
         <div class="row"><label>压缩%</label><input id="def-compact" type="number" min="20" max="70" value="${d.channel.autoCompactPct ?? 25}" /></div>
         <div class="row"><label>Fast</label><input id="def-fast" type="checkbox" ${d.channel.fast ? 'checked' : ''} style="flex:none;width:auto" /></div>
-        <button class="btn primary" style="margin:4px 0 14px" onclick="saveDefaults()">保存频道默认</button>
-        <div class="row" style="color:#c9d1d9;font-weight:600">Work 默认</div>
-        <div class="row"><label>模型</label><select id="wdef-model">${mo(d.work.model)}</select></div>
-        <div class="row"><label>Effort</label><select id="wdef-effort">${eo(d.work.effort)}</select></div>
-        <div class="row"><label>Fast</label><input id="wdef-fast" type="checkbox" ${d.work.fast ? 'checked' : ''} style="flex:none;width:auto" /></div>
-        <button class="btn primary" style="margin:4px 0 0" onclick="saveWorkDefaults()">保存 Work 默认</button>`;
+        <button class="btn primary" style="margin:4px 0 0" onclick="saveDefaults()">保存频道默认</button>`;
     }
     window.saveDefaults = async () => {
       const qs = new URLSearchParams({
@@ -322,11 +270,6 @@
       });
       const r = await (await fetch('/api/defaults?' + qs, { method: 'POST' })).json();
       alert(r.ok ? '已保存（影响之后新建频道）' : '保存失败：' + r.error);
-    };
-    window.saveWorkDefaults = async () => {
-      const qs = new URLSearchParams({ model: $('wdef-model').value, effort: $('wdef-effort').value, fast: $('wdef-fast').checked });
-      const r = await (await fetch('/api/defaults/work?' + qs, { method: 'POST' })).json();
-      alert(r.ok ? '已保存（影响之后新建 work）' : '保存失败：' + r.error);
     };
 
     // ── 系统：重启 / 关闭品品 ──
@@ -357,8 +300,8 @@
     }
     $('btn-logs-refresh').onclick = refreshLogs;
 
-    // ── 控制台（频道 + work 共用；kind='channel'|'work'）──
-    let term = null, ws = null, fitTimer = null, currentKey = null, currentKind = null;
+    // ── 控制台（频道）──
+    let term = null, ws = null, fitTimer = null, currentKey = null;
 
     function fit() {
       if (!term) return;
@@ -368,31 +311,20 @@
       try { term.resize(cols, rows); } catch {}
     }
 
-    function openConsole(key, kind) {
-      currentKey = key; currentKind = kind;
-      const isWork = kind === 'work';
-      const item = isWork
-        ? (lastWork.find((x) => x.session_id === key) || { session_id: key, status: 'stopped' })
-        : (lastClis.find((x) => x.chat_id === key) || { chat_id: key, status: 'stopped' });
+    function openConsole(key) {
+      currentKey = key;
+      const item = lastClis.find((x) => x.chat_id === key) || { chat_id: key, status: 'stopped' };
       const running = item.status === 'running';
-      $('term-title').textContent = isWork
-        ? ('Work · ' + ((item.work_dir || '').replace(/\\/g, '/').split('/').filter(Boolean).pop() || key))
-        : (item.chat_name || ('频道 ' + key.slice(-6)));
+      $('term-title').textContent = item.chat_name || ('频道 ' + key.slice(-6));
 
       // 操作按钮
-      let acts;
-      if (isWork) {
-        acts = `<button class="danger" onclick="workEnd()">✕ 结束 work</button>`;
-        $('term-settings-toggle').style.display = 'none';
-      } else {
-        acts = running
-          ? `<button onclick="cliAction('restart')">↻ 重启</button>
-             <button onclick="cliAction('compact')">压缩</button>
-             <button class="danger" onclick="cliAction('stop')">✕ 杀掉</button>`
-          : `<button onclick="cliAction('start')">▶ 启动</button>`;
-        $('term-settings-toggle').style.display = '';
-        renderSettings(item);
-      }
+      const acts = running
+        ? `<button onclick="cliAction('restart')">↻ 重启</button>
+           <button onclick="cliAction('compact')">压缩</button>
+           <button class="danger" onclick="cliAction('stop')">✕ 杀掉</button>`
+        : `<button onclick="cliAction('start')">▶ 启动</button>`;
+      $('term-settings-toggle').style.display = '';
+      renderSettings(item);
       $('term-actions').innerHTML = acts;
       $('term-settings').style.display = 'none';
       $('term-overlay').style.display = 'flex';
@@ -403,14 +335,14 @@
       fit();
       if (running) {
         inputBar.style.display = 'flex';
-        $('term-input').placeholder = isWork ? '输入发给 work CLI 的指令…' : '输入发给品品的话…';
+        $('term-input').placeholder = '输入发给品品的话…';
         const proto = location.protocol === 'https:' ? 'wss' : 'ws';
         ws = new WebSocket(`${proto}://${location.host}/ws?chat=${encodeURIComponent(key)}`);
         ws.onmessage = (e) => term && term.write(e.data);
         ws.onclose = () => { if (term) term.write('\r\n\x1b[33m[终端连接已断开]\x1b[0m\r\n'); };
       } else {
         inputBar.style.display = 'none';
-        term.write(isWork ? '\x1b[90m[work 已停止]\x1b[0m\r\n' : '\x1b[90m[频道已停止，点上方"启动"开启]\x1b[0m\r\n');
+        term.write('\x1b[90m[频道已停止，点上方"启动"开启]\x1b[0m\r\n');
       }
     }
 
@@ -452,29 +384,19 @@
       } catch (e) { if (term) term.write(`\r\n\x1b[31m[${labels[action]}失败：${e}]\x1b[0m\r\n`); }
     };
 
-    window.workEnd = async () => {
-      if (!confirm('结束这个 work 干活 session？')) return;
-      if (!confirm('再确认一次：真的结束？')) return;
-      const r = await (await fetch('/api/work/end?id=' + encodeURIComponent(currentKey), { method: 'POST' })).json();
-      if (r.ok) { closeConsole(); setTimeout(refreshWork, 1000); } else alert('结束失败：' + r.error);
-    };
-
     function sendInput() {
       const inp = $('term-input');
       const text = inp.value;
       if (!text || !ws || ws.readyState !== WebSocket.OPEN) return;
-      const url = currentKind === 'work'
-        ? `/api/work/send?id=${encodeURIComponent(currentKey)}`
-        : `/api/cli/input?chat=${encodeURIComponent(currentKey)}`;
-      // 频道走 PTY 写入（带 \r）；work 走 sendMessage（后端自管提交，不加 \r）
-      fetch(url, { method: 'POST', body: currentKind === 'work' ? text : text + '\r' });
+      // 频道走 PTY 写入（带 \r）
+      fetch(`/api/cli/input?chat=${encodeURIComponent(currentKey)}`, { method: 'POST', body: text + '\r' });
       inp.value = '';
     }
     $('term-send').onclick = sendInput;
     $('term-input').addEventListener('keydown', (e) => { if (e.key === 'Enter') sendInput(); });
 
     function closeConsole() {
-      currentKey = null; currentKind = null;
+      currentKey = null;
       if (ws) { ws.onclose = null; ws.close(); ws = null; }
       if (term) { term.dispose(); term = null; }
       $('term-overlay').style.display = 'none';
@@ -495,7 +417,6 @@
     refresh();
     setInterval(() => {
       refresh();
-      if (currentTab === 'work') refreshWork();
       if (currentTab === 'logs') refreshLogs();
     }, 3000);
   </script>

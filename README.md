@@ -85,7 +85,7 @@ Electron 启动器 / Electron launcher
 - **MCP 工具层**——飞书收发 / 表情回应 / 建群 / 审批卡（真按钮回调）/ 限时问话 / 记忆读写 / 后台 work session 等几十个工具；云文档 / 任务 / 日历 / 邮件等飞书业务能力交给官方 **lark-cli**（内嵌 28 个 skill，`scripts/lark-skills-sync.cjs` 同步到本机）。
 - **双鉴权**——lark-cli 两配置目录身份隔离（群里 = 机器人身份、我的私聊 = 我本人身份；`scripts/lark-guard.cjs` 全局守门 hook 拦切身份 / 改配置 / 登录登出）+ OWNER open_id 硬比对（危险操作仅本人可触发）。
 - **后台任务**——日记 / 早报 / 记忆自检 / 文档探针等定时触发，按 chat_id 归属分发；**固定任务引擎**——启动器读一份登记表，到点把 SOP 推给对应频道执行（漏跑补跑、推不动告警），bot 自己用工具登记新任务，加固定任务不改代码。
-- **传话筒**——品品能 spawn 一个独立的后台 claude code session 去干活，完工后自动回报到原频道。
+- **常驻工人**——Owner 开一个常驻 Claude Code 会话当"工人"，品品经本机传话口把任务书派过去、结果回到原频道。
 
 > *Highlights:*
 >
@@ -95,7 +95,7 @@ Electron 启动器 / Electron launcher
 > - ***MCP tool layer*** *— dozens of tools: Feishu send/receive, emoji reactions, group creation, approval cards (real button callbacks), timed ask-a-person, memory read/write, background work sessions, and more; cloud docs / tasks / calendar / mail are delegated to the official **lark-cli** (28 embedded skills, synced locally by `scripts/lark-skills-sync.cjs`).*
 > - ***Dual auth*** *— lark-cli identity isolation via two config dirs (bot identity in groups, my own identity in my DM; the global guard hook `scripts/lark-guard.cjs` blocks identity / config switching and login/logout) + a hard OWNER open_id check (dangerous actions only the owner can trigger).*
 > - ***Background jobs*** *— diary / briefings / memory audit / doc probe, scheduled and routed by chat_id ownership; a **recurring-task engine** in the launcher reads a registry and pushes each task's SOP to its channel on time (catch-up on missed runs, alert when delivery fails) — the bot registers new tasks itself, no code change needed.*
-> - ***"Relay" work sessions*** *— Pinpin can spawn an independent background Claude Code session to do work, then auto-report back to the original chat.*
+> - ***Resident worker*** *— the owner keeps a resident Claude Code session as a "worker"; Pinpin dispatches a task brief through the local relay port and the result comes back to the original chat.*
 
 ---
 

@@ -20,7 +20,6 @@ import {
   type HelloParams,
   type ByeParams,
   type FeishuInboundMessagePayload,
-  type WorkStoppedPush,
   type StatuslineUpdateParams,
 } from '../src/ipc/protocol.js';
 
@@ -159,25 +158,6 @@ export class IpcServer extends EventEmitter {
     }
   }
 
-  /** 推 work session stop 给对应 chat_id 的子进程 */
-  pushWorkStopped(chatId: string, payload: WorkStoppedPush): boolean {
-    const c = this.clients.get(chatId);
-    if (!c) return false;
-    const env: IpcEnvelope = {
-      method: IPC_METHODS.WORK_STOPPED,
-      params: payload,
-    };
-    try {
-      c.socket.write(encodeFrame(env));
-      return true;
-    } catch (e) {
-      process.stderr.write(
-        `[ipc-server] pushWorkStopped(${chatId}) write 失败: ${e instanceof Error ? e.message : e}\n`,
-      );
-      return false;
-    }
-  }
-
   /** 推 chat-trigger（cron / 手动）给对应 chat_id 的子进程 */
   pushChatTrigger(chatId: string, body: string, meta?: Record<string, string>): boolean {
     const c = this.clients.get(chatId);
@@ -266,7 +246,7 @@ export class IpcServer extends EventEmitter {
           this.emit('client-disconnected', { chat_id: entry.chatId, pid: entry.pid });
         }
       }
-      // 短连接 sink（statusline / work-stop notification）正常断开，无 hello 注册，静默不刷日志
+      // 短连接 sink（statusline notification）正常断开，无 hello 注册，静默不刷日志
     });
 
     socket.on('error', (err: NodeJS.ErrnoException) => {

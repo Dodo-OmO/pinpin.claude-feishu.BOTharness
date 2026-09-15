@@ -149,28 +149,7 @@ async function handleApi(
     return true;
   }
 
-  // ── 批3 work session（列表 + 发消息 + 结束；终端走 /ws?chat=<session_id>）──
-  if (url.pathname === '/api/work') {
-    try { sendJson(res, await bridge.request(IPC_METHODS.WARDEN_LIST_WORK)); }
-    catch (e) { sendJson(res, { sessions: [], error: e instanceof Error ? e.message : String(e) }, 502); }
-    return true;
-  }
-  if (url.pathname === '/api/work/send' || url.pathname === '/api/work/end') {
-    if (req.method !== 'POST') { sendJson(res, { ok: false, error: 'POST only' }, 405); return true; }
-    const id = url.searchParams.get('id');
-    if (!id) { sendJson(res, { ok: false, error: 'no id' }, 400); return true; }
-    if (url.pathname.endsWith('send')) {
-      const text = await readBody(req);
-      try { sendJson(res, await bridge.request(IPC_METHODS.WARDEN_WORK_SEND, { session_id: id, text })); }
-      catch (e) { sendJson(res, { ok: false, error: e instanceof Error ? e.message : String(e) }, 502); }
-    } else {
-      try { sendJson(res, await bridge.request(IPC_METHODS.WARDEN_WORK_END, { session_id: id })); }
-      catch (e) { sendJson(res, { ok: false, error: e instanceof Error ? e.message : String(e) }, 502); }
-    }
-    return true;
-  }
-
-  // ── 批4 全局默认设置（GET 读 channel+work；POST 写）──
+  // ── 批4 全局默认设置（GET 读 channel；POST 写）──
   if (url.pathname === '/api/defaults') {
     if (req.method === 'POST') {
       const patch: Record<string, unknown> = {};
@@ -186,17 +165,6 @@ async function handleApi(
     catch (e) { sendJson(res, { error: e instanceof Error ? e.message : String(e) }, 502); }
     return true;
   }
-  if (url.pathname === '/api/defaults/work') {
-    if (req.method !== 'POST') { sendJson(res, { ok: false, error: 'POST only' }, 405); return true; }
-    const patch: Record<string, unknown> = {};
-    if (url.searchParams.has('model')) patch.model = url.searchParams.get('model');
-    if (url.searchParams.has('effort')) patch.effort = url.searchParams.get('effort');
-    if (url.searchParams.has('fast')) patch.fast = url.searchParams.get('fast') === 'true';
-    try { sendJson(res, await bridge.request(IPC_METHODS.WARDEN_SET_WORK_DEFAULTS, patch)); }
-    catch (e) { sendJson(res, { ok: false, error: e instanceof Error ? e.message : String(e) }, 502); }
-    return true;
-  }
-
   // ── 批4 系统：重启品品 / 关闭品品（POST，强二次确认在前端）──
   if (url.pathname === '/api/system/restart' || url.pathname === '/api/system/quit') {
     if (req.method !== 'POST') { sendJson(res, { ok: false, error: 'POST only' }, 405); return true; }
@@ -290,17 +258,12 @@ const server = http.createServer((req, res) => {
 // 同一 chat 多个前端 ws 在管家层 fan-out（突破 supervisor 单 consumer，支持多页签看同一终端）。
 const chatSubs = new Map<string, Set<WebSocket>>();
 
-// 终端订阅路由：work session（ws_ 前缀）走 work 方法，频道走 chat 方法。
-// 两者 push 都复用 TERMINAL_DATA、以 key（session_id / chat_id）路由，前端 ws 同一套机制。
+// 终端订阅路由：频道 chat_id 走 subscribeTerminal，push 复用 TERMINAL_DATA 以 chat_id 路由。
 function subTerminal(key: string): Promise<unknown> {
-  return key.startsWith('ws_')
-    ? bridge.request(IPC_METHODS.WARDEN_WORK_SUB_TERMINAL, { session_id: key })
-    : bridge.subscribeTerminal(key);
+  return bridge.subscribeTerminal(key);
 }
 function unsubTerminal(key: string): Promise<unknown> {
-  return key.startsWith('ws_')
-    ? bridge.request(IPC_METHODS.WARDEN_WORK_UNSUB_TERMINAL, { session_id: key })
-    : bridge.unsubscribeTerminal(key);
+  return bridge.unsubscribeTerminal(key);
 }
 
 bridge.onTerminalData = (chatId, data) => {

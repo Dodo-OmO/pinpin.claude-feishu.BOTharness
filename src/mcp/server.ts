@@ -15,24 +15,6 @@ import { IPC_METHODS, type PollVoteParams, type PollVoteResult } from '../ipc/pr
 import { getDiyPoll, upsertPollVote, countPollVotes } from './db/database.js';
 import { initFeishuClient } from './tools/feishu-send.js';
 import { sanitizeToolResult, sanitizeChannelParams } from './utils/sanitize-surrogates.js';
-// 阶段 5 步骤 4：诉求 B 传话筒 3 tools
-import {
-  pinpinSpawnWorkSessionTool,
-  handlePinpinSpawnWorkSession,
-} from './tools/pinpin-spawn-work-session.js';
-import {
-  pinpinSendToWorkSessionTool,
-  handlePinpinSendToWorkSession,
-} from './tools/pinpin-send-to-work-session.js';
-import {
-  pinpinEndWorkSessionTool,
-  handlePinpinEndWorkSession,
-} from './tools/pinpin-end-work-session.js';
-// P3.Q7：peek work session（品品主动观察后台 work 跑到哪一步）
-import {
-  pinpinPeekWorkSessionTool,
-  handlePinpinPeekWorkSession,
-} from './tools/pinpin-peek-work-session.js';
 // 阶段 3 批 2：4 tool 拆分作废 zzzpin 字符串协议
 import { PINPIN_REPLY_TEXT_TOOL, handlePinpinReplyText } from './tools/pinpin-reply-text.js';
 import { PINPIN_REPLY_VOICE_TOOL, handlePinpinReplyVoice } from './tools/pinpin-reply-voice.js';
@@ -163,7 +145,7 @@ async function main() {
   // 仅本名单内 tool 注入 _meta['app/alwaysLoad'] 豁免常驻。
   // 划分依据：① 每轮回话必调 ② 每轮 reply 后 trigger 自动触发（记忆）③ 高频 cron 产出工具。
   // 其余折叠按需——被 cron 提示词 / sub-agent frontmatter 按名点到的折叠工具（
-  // memory_rewrite / read_chat_log / pinpin_peek_work_session 等）实测都能按名 ToolSearch 到，不必常驻。
+  // memory_rewrite / read_chat_log 等）实测都能按名 ToolSearch 到，不必常驻。
   // 飞书云文档/任务等走 lark-cli，不在 MCP。
   const ALWAYS_LOAD = new Set<string>([
     'pinpin_reply_text', 'pinpin_reply_voice', 'pinpin_react', 'pinpin_no_reply',
@@ -196,11 +178,6 @@ async function main() {
       recurringTaskTool,
       askPersonTool,
       notifyWhenSpeaksTool,
-      // 阶段 5 步骤 4：诉求 B 传话筒 work session 3 tools + P3.Q7 peek
-      pinpinSpawnWorkSessionTool,
-      pinpinSendToWorkSessionTool,
-      pinpinEndWorkSessionTool,
-      pinpinPeekWorkSessionTool,
       // 2026-05-28 多 CLI 跨频道发言
       CROSS_CHAT_MESSAGE_TOOL,
       // 2026-05-29 建群 / 解散群
@@ -295,16 +272,6 @@ async function main() {
         return handleAskPerson(args as unknown as Parameters<typeof handleAskPerson>[0]);
       case 'notify_when_speaks':
         return handleNotifyWhenSpeaks(args as unknown as Parameters<typeof handleNotifyWhenSpeaks>[0]);
-      // 阶段 5 步骤 4：诉求 B 传话筒 work session 3 tools
-      case 'pinpin_spawn_work_session':
-        return handlePinpinSpawnWorkSession(args as unknown as Parameters<typeof handlePinpinSpawnWorkSession>[0]);
-      case 'pinpin_send_to_work_session':
-        return handlePinpinSendToWorkSession(args as unknown as Parameters<typeof handlePinpinSendToWorkSession>[0]);
-      case 'pinpin_end_work_session':
-        return handlePinpinEndWorkSession(args as unknown as Parameters<typeof handlePinpinEndWorkSession>[0]);
-      // P3.Q7: peek work session（品品主动观察）
-      case 'pinpin_peek_work_session':
-        return handlePinpinPeekWorkSession(args as unknown as Parameters<typeof handlePinpinPeekWorkSession>[0]);
       // 2026-05-28 多 CLI 跨频道发言
       case 'cross_chat_message':
         return handleCrossChatMessage(args as unknown as Parameters<typeof handleCrossChatMessage>[0]);
@@ -404,19 +371,14 @@ async function main() {
     // ── MCP 就绪门（冷启动竞态修复）──
     // server.connect() 只是 transport 就绪；MCP initialize 握手（claude→server）完成后
     // channel 才真正注册。在 oninitialized 之前发 notification 会被 claude 静默丢弃。
-    // 解法：缓冲冷启动期的 feishu-message / chat-trigger / work-stopped，
+    // 解法：缓冲冷启动期的 feishu-message / chat-trigger，
     // oninitialized 触发时按序 flush（不丢不重不乱序）。
     let mcpInitialized = false;
     type PendingFeishuMessage = Parameters<typeof handleInboundMessage>[1];
     type PendingChatTrigger = { body: string; meta?: Record<string, string> };
-    type PendingWorkStopped = {
-      session_id: string; is_error: boolean; stop_reason?: string;
-      duration_ms?: number; total_cost_usd?: number;
-    };
     type PendingItem =
       | { kind: 'feishu-message'; payload: PendingFeishuMessage }
-      | { kind: 'chat-trigger'; payload: PendingChatTrigger }
-      | { kind: 'work-stopped'; payload: PendingWorkStopped };
+      | { kind: 'chat-trigger'; payload: PendingChatTrigger };
     const pendingQueue: PendingItem[] = [];
 
     const dispatchChatTrigger = async (p: PendingChatTrigger) => {
@@ -427,43 +389,6 @@ async function main() {
         });
       } catch (e) {
         process.stderr.write(`[feishu-channel] chat-trigger notification 失败: ${e instanceof Error ? e.message : e}\n`);
-      }
-    };
-
-    const dispatchWorkStopped = async (p: PendingWorkStopped) => {
-      try {
-        // 自动司机已把工人推到终态才触发本通知（非每轮）：done=真完工 / need_human=卡住需Owner /
-        // capped|stuck=没自动做完 / error=出错。按 reason 给品品不同处置指引。
-        const r = p.stop_reason;
-        const head =
-          r === 'done' ? '✅ 完工'
-          : r === 'need_human' ? '🙋 卡住·需你拍板'
-          : r === 'capped' || r === 'stuck' ? '⚠️ 未做完·已自动停'
-          : r === 'error' ? '❌ 出错'
-          : '停下';
-        const advice =
-          r === 'need_human'
-            ? '它需要Owner补充信息/拍板才能继续——转达后可用 pinpin_send_to_work_session 把Owner的答复发回去让它接着干。'
-            : r === 'capped' || r === 'stuck'
-            ? '它没能自动做完，看 peek 里卡在哪，再决定 pinpin_send_to_work_session 指点继续 还是 pinpin_end_work_session 收掉。'
-            : '满意就 pinpin_end_work_session 收掉；想让它再做点别的就 pinpin_send_to_work_session。';
-        const summary =
-          `【工作 CLI ${head}｜${p.session_id}】` +
-          (p.duration_ms ? `共跑 ${(p.duration_ms / 1000).toFixed(0)}s。` : '') +
-          `用 pinpin_peek_work_session 查看全程，用你自己的话把结果汇报给Owner。${advice}不必深度思考。`;
-        await server.notification({
-          method: 'notifications/claude/channel',
-          params: sanitizeChannelParams(summary, {
-            source: 'feishu-channel',
-            chat_id: chatId,
-            trigger: 'work-stopped',
-            session_id: p.session_id,
-            is_error: String(p.is_error),
-            stop_reason: r ?? '',
-          }),
-        });
-      } catch (e) {
-        process.stderr.write(`[feishu-channel] work-stopped notification 失败: ${e instanceof Error ? e.message : e}\n`);
       }
     };
 
@@ -561,8 +486,6 @@ async function main() {
               }
             } else if (item.kind === 'chat-trigger') {
               await dispatchChatTrigger(item.payload);
-            } else {
-              await dispatchWorkStopped(item.payload);
             }
           }
         })();
@@ -621,25 +544,6 @@ async function main() {
         return;
       }
       void dispatchChatTrigger(p);
-    });
-    // work session stop signal：supervisor push WORK_STOPPED → channel notification 给本 CLI
-    ipcClient.on('work-stopped', (p: {
-      session_id: string;
-      is_error: boolean;
-      stop_reason?: string;
-      duration_ms?: number;
-      total_cost_usd?: number;
-    }) => {
-      // 完工通知保持轻 + 封闭单步（防 high-effort thinking 螺旋：开放指令是螺旋燃料）。
-      // 一句封闭指令——调 peek 看本 turn 全程 → 用自己的话把最新进展汇报Owner → 不必深度思考。
-      // 不带摘要（让品品自己 peek 看全程；旧版 800 字大段 + 多分支强制指令曾致品品 high 螺旋、
-      // tool call malformed、卡死 10min）。
-      if (!mcpInitialized) {
-        pendingQueue.push({ kind: 'work-stopped', payload: p });
-        process.stderr.write(`[feishu-channel] MCP 未就绪，work-stopped 缓冲（queue=${pendingQueue.length}）\n`);
-        return;
-      }
-      void dispatchWorkStopped(p);
     });
     await ipcClient.connect();
     process.stderr.write(`[feishu-channel] IPC connected to supervisor (chat=${chatId}, port=${supervisorPort})\n`);

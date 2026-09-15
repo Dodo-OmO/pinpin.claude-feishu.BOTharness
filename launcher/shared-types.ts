@@ -26,27 +26,10 @@ export interface ChannelStatusInfo {
   usage_updated_at?: number;
 }
 
-export interface WorkSessionInfo {
-  session_id: string;
-  origin_chat_id: string;
-  work_dir: string;
-  fast?: boolean;
-  status: 'starting' | 'running' | 'stopped' | 'failed';
-  pid?: number;
-  uptime_ms: number;
-  model: string;
-  effort: string;
-  /** Q4 续: work session 上下文用量（jsonl assistant.usage 实时解析） */
-  context_tokens?: number;
-  context_window_size?: number | null;
-  context_pct?: number | null;
-}
-
 export interface SupervisorStateSnapshot {
   ipc_port: number;
   chats: Array<{ chat_id: string; name?: string }>;
   channels: ChannelStatusInfo[];
-  work_sessions: WorkSessionInfo[];
   today_messages: number;
 }
 
@@ -60,9 +43,6 @@ export interface LogEntry {
 export interface AppSettings {
   default_model: string;
   default_effort: string;
-  work_default_model: string;
-  work_default_effort: string;
-  work_default_fast: boolean;
   default_fast: boolean;
   default_compact_pct: number;
 }

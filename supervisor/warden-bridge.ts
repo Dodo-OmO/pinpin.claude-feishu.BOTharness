@@ -10,7 +10,6 @@
  */
 import { IpcServer } from './ipc-server.js';
 import type { ChannelCli } from './channel-cli.js';
-import type { WorkSession } from './work-session.js';
 import { tokenMatches } from '../src/ipc/bridge-token.js';
 import {
   IPC_METHODS,
@@ -23,10 +22,9 @@ import {
   type WardenLogEntry,
 } from '../src/ipc/protocol.js';
 
-/** 全局默认设置快照（频道默认 + work 默认） */
+/** 全局默认设置快照（频道默认） */
 export interface WardenDefaults {
   channel: { model: string; effort: string; fast: boolean; autoCompactPct: number };
-  work: { model: string; effort: string; fast: boolean };
 }
 
 export interface WardenBridgeDeps {
@@ -45,13 +43,9 @@ export interface WardenBridgeDeps {
   setDisplayName: (chatId: string, name: string) => void;
   // 批2 额度
   fetchQuota: () => Promise<{ quota: unknown; today_messages: number; rate_limits: unknown }>;
-  // 批3 work session
-  getWorkSessions: () => Map<string, WorkSession>;
-  getWorkSession: (sessionId: string) => WorkSession | undefined;
   // 批4 全局设置 + 系统 + 日志
   getDefaults: () => WardenDefaults;
   setDefaults: (patch: { model?: string; effort?: string; fast?: boolean; autoCompactPct?: number }) => void;
-  setWorkDefaults: (patch: { model?: string; effort?: string; fast?: boolean }) => void;
   restartSupervisor: () => Promise<void>;
   quitApp: () => void;
   getRecentLogs: (limit: number) => WardenLogEntry[];
@@ -159,46 +153,6 @@ export async function createWardenBridge(deps: WardenBridgeDeps, token: string):
     return deps.fetchQuota();
   });
 
-  // ── 批3 work session（列表 + 终端看/写/结束）──
-  bridge.setRequestHandler(IPC_METHODS.WARDEN_LIST_WORK, async () => {
-    return { sessions: [...deps.getWorkSessions().values()].map((ws) => ws.getStats()) };
-  });
-
-  // work 终端复用 TERMINAL_DATA 推送，以 session_id 作路由 key（与频道 chat_id 不冲突，ws_ 前缀）
-  bridge.setRequestHandler(IPC_METHODS.WARDEN_WORK_SUB_TERMINAL, async (params): Promise<WorkOkResult> => {
-    const { session_id } = (params ?? {}) as { session_id?: string };
-    const ws = session_id ? deps.getWorkSession(session_id) : undefined;
-    if (!ws || !session_id) return { ok: false, error: `no work session ${session_id}` };
-    ws.attachTerminal((data) => {
-      const payload: WardenTerminalDataParams = { chat_id: session_id, data };
-      bridge.pushNotification(WARDEN_CLIENT_ID, IPC_METHODS.WARDEN_TERMINAL_DATA, payload);
-    });
-    return { ok: true };
-  });
-
-  bridge.setRequestHandler(IPC_METHODS.WARDEN_WORK_UNSUB_TERMINAL, async (params): Promise<WorkOkResult> => {
-    const { session_id } = (params ?? {}) as { session_id?: string };
-    const ws = session_id ? deps.getWorkSession(session_id) : undefined;
-    ws?.detachTerminal();
-    return { ok: true };
-  });
-
-  bridge.setRequestHandler(IPC_METHODS.WARDEN_WORK_SEND, async (params): Promise<WorkOkResult> => {
-    const { session_id, text } = (params ?? {}) as { session_id?: string; text?: string };
-    const ws = session_id ? deps.getWorkSession(session_id) : undefined;
-    if (!ws) return { ok: false, error: `no work session ${session_id}` };
-    const sent = ws.sendMessage(text ?? '');
-    return sent ? { ok: true } : { ok: false, error: 'work CLI not running' };
-  });
-
-  bridge.setRequestHandler(IPC_METHODS.WARDEN_WORK_END, async (params): Promise<WorkOkResult> => {
-    const { session_id } = (params ?? {}) as { session_id?: string };
-    const ws = session_id ? deps.getWorkSession(session_id) : undefined;
-    if (!ws) return { ok: false, error: `no work session ${session_id}` };
-    ws.end();
-    return { ok: true };
-  });
-
   // ── 批4 全局设置 + 系统 + 日志 ──
   bridge.setRequestHandler(IPC_METHODS.WARDEN_GET_DEFAULTS, async () => {
     return deps.getDefaults();
@@ -207,12 +161,6 @@ export async function createWardenBridge(deps: WardenBridgeDeps, token: string):
   bridge.setRequestHandler(IPC_METHODS.WARDEN_SET_DEFAULTS, async (params): Promise<WorkOkResult> => {
     const p = (params ?? {}) as { model?: string; effort?: string; fast?: boolean; autoCompactPct?: number };
     deps.setDefaults(p);
-    return { ok: true };
-  });
-
-  bridge.setRequestHandler(IPC_METHODS.WARDEN_SET_WORK_DEFAULTS, async (params): Promise<WorkOkResult> => {
-    const p = (params ?? {}) as { model?: string; effort?: string; fast?: boolean };
-    deps.setWorkDefaults(p);
     return { ok: true };
   });
 

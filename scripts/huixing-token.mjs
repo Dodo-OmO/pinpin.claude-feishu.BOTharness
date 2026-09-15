@@ -106,7 +106,13 @@ async function main() {
       return out({ ok: false, need_scan: true, qr_png: QR_FILE, note: '把二维码发给豆姐用飞书扫，10 分钟内有效；扫完 token 自动写盘、图自动删' });
     }
     // --wait-bg：最长 10 分钟轮询
-    for (let i = 0; i < 300; i++) { await sleep(2000); const tok = await tryFinish(cdp); if (tok) { cleanup(pid); return; } }
+    for (let i = 0; i < 300; i++) {
+      await sleep(2000);
+      const tok = await tryFinish(cdp);
+      if (tok) { cleanup(pid); return; }
+      // 飞书二维码约 1 分钟过期、页面会自动换新码：每 40s 重截一次，保证盘上那张扫得了
+      if (i % 20 === 19) { try { const shot = await cdp.send('Page.captureScreenshot', { format: 'png' }); fs.writeFileSync(QR_FILE, Buffer.from(shot.data, 'base64')); } catch { /* 下轮再试 */ } }
+    }
     cleanup(pid);
   } catch (e) {
     cleanup(pid);

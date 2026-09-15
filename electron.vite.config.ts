@@ -36,7 +36,6 @@ export default defineConfig({
         input: {
           index: resolve(__dirname, 'launcher/renderer/index.html'),
           terminal: resolve(__dirname, 'launcher/renderer/terminal.html'),
-          workTerminal: resolve(__dirname, 'launcher/renderer/work-terminal.html'),
         },
       },
     },

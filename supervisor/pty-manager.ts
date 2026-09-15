@@ -1,7 +1,7 @@
 /**
  * PTY 管理器 —— 包装 node-pty + ring buffer + attach/detach 抽象
  *
- * 用于诉求 A "启动器终端窗口可见/隐藏切换" 和 诉求 B "传话筒遥控开关终端窗口"。
+ * 用于诉求 A "启动器终端窗口可见/隐藏切换"。
  * 核心机制：
  *   - PTY 进程的 stdout 由 manager 持续吸收（无论有无消费者）
  *   - ring buffer 累积输出（detach 期间不丢）
@@ -15,7 +15,7 @@
 import * as pty from 'node-pty';
 import { execSync } from 'node:child_process';
 
-// === 向 Claude TUI 提交一行的"双段静默门"参数（频道终端 + work 终端共用，真机验证过）===
+// === 向 Claude TUI 提交一行的"双段静默门"参数（真机验证过）===
 /** 写完文本后多久首次检查能否发 \r。Claude Ink TUI 把"文本+回车"一坨到达当输入内容不提交，
  *  必须文本与 \r 分两次写、中间留间隔，让 \r 作为独立"按键"触发提交。 */
 const SUBMIT_DELAY_MS = 120;

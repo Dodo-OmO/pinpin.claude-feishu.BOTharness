@@ -1,7 +1,6 @@
 import { contextBridge, ipcRenderer } from 'electron';
 import type {
   ChannelStatusInfo,
-  WorkSessionInfo,
   SupervisorStateSnapshot,
   LogEntry,
   AppSettings,
@@ -13,7 +12,7 @@ import type {
 
 const api = {
   ping: (): Promise<string> => ipcRenderer.invoke('ping'),
-  /** 拉一次完整 supervisor 状态（频道 + work session + chats） */
+  /** 拉一次完整 supervisor 状态（频道 + chats） */
   getState: (): Promise<SupervisorStateSnapshot> => ipcRenderer.invoke('get-state'),
   /** 订阅状态变更（每次 supervisor 内部事件触发时 push） */
   onState: (cb: (state: SupervisorStateSnapshot) => void): (() => void) => {
@@ -53,12 +52,6 @@ const api = {
     setDisplayName: (chatId: string, name: string): Promise<void> =>
       ipcRenderer.invoke('channel.set-display-name', chatId, name),
   },
-  /** work session 动作 */
-  work: {
-    end: (sessionId: string): Promise<void> => ipcRenderer.invoke('work.end', sessionId),
-    /** Q5: 打开 work session 终端子窗口（不在则创建，已在则前置） */
-    openTerminal: (sessionId: string): Promise<void> => ipcRenderer.invoke('work-terminal.open', sessionId),
-  },
   /** App 控制 */
   app: {
     restartBot: (): Promise<void> => ipcRenderer.invoke('app.restart-bot'),
@@ -91,7 +84,6 @@ const api = {
 
 export type {
   ChannelStatusInfo,
-  WorkSessionInfo,
   SupervisorStateSnapshot,
   LogEntry,
   AppSettings,
@@ -134,38 +126,6 @@ const terminalApi = {
 
 contextBridge.exposeInMainWorld('terminal', terminalApi);
 
-// ── work session 终端子窗口 API（work-terminal.html 用）──
-const workTerminalApi = {
-  /** 订阅 work session PTY 原始数据流（同 channel terminal 的 attachPty 同款，xterm 渲染） */
-  attachPty: (sessionId: string, cb: (data: string) => void): (() => void) => {
-    const channel = `work-pty-data:${sessionId}`;
-    const listener = (_: unknown, chunk: string): void => cb(chunk);
-    ipcRenderer.on(channel, listener);
-    ipcRenderer.send('work-terminal.subscribe-pty', sessionId);
-    return () => {
-      ipcRenderer.removeListener(channel, listener);
-      ipcRenderer.send('work-terminal.unsubscribe-pty', sessionId);
-    };
-  },
-  /** 把 xterm FitAddon fit 后的实际尺寸同步回 work PTY（修复 ANSI 排版错位） */
-  resizePty: (sessionId: string, cols: number, rows: number): Promise<void> =>
-    ipcRenderer.invoke('work-terminal.resize-pty', sessionId, cols, rows),
-  /** PTY write 新指令到 work session stdin */
-  sendInput: (sessionId: string, text: string): Promise<void> =>
-    ipcRenderer.invoke('work-terminal.send-input', sessionId, text),
-  /** 真结束 work session（杀 PTY） */
-  endSession: (sessionId: string): Promise<boolean> =>
-    ipcRenderer.invoke('work-terminal.end', sessionId),
-  /** 取 work session header meta */
-  getMeta: (
-    sessionId: string,
-  ): Promise<{ work_dir: string; model: string; effort: string; status: string; origin_chat_name?: string } | null> =>
-    ipcRenderer.invoke('work-terminal.get-meta', sessionId),
-};
-
-contextBridge.exposeInMainWorld('workTerminal', workTerminalApi);
-
 export type PinpinApi = typeof api;
 export type TerminalApi = typeof terminalApi;
-export type WorkTerminalApi = typeof workTerminalApi;
 

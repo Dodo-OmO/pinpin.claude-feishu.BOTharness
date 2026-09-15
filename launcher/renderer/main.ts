@@ -3,7 +3,7 @@
  *
  * 数据流：
  *   main.ts (electron main, 持 supervisor) ──IPC 'state'/'log'──▶ renderer
- *   renderer 收 state → 重渲染 channels / work sessions / counts
+ *   renderer 收 state → 重渲染 channels / counts
  *   renderer 收 log → 推 logs[] 数组，按 nav 当前页面/filter 渲染
  *
  * 用户交互：
@@ -15,7 +15,6 @@
 
 import type {
   ChannelStatusInfo,
-  WorkSessionInfo,
   SupervisorStateSnapshot,
   LogEntry,
   AppSettings,
@@ -45,7 +44,6 @@ declare global {
         setStandby: (id: string, standby: boolean) => Promise<void>;
         setDisplayName: (id: string, name: string) => Promise<void>;
       };
-      work: { end: (id: string) => Promise<void>; openTerminal: (id: string) => Promise<void> };
       app: { restartBot: () => Promise<void>; quit: () => Promise<void> };
       settings: { get: () => Promise<AppSettings>; set: (s: Partial<AppSettings>) => Promise<void> };
       quota: { fetchNow: () => Promise<{ ok: true } | null> };
@@ -64,7 +62,7 @@ declare global {
 }
 
 // ── 状态 ──
-let lastState: SupervisorStateSnapshot = { ipc_port: 0, chats: [], channels: [], work_sessions: [], today_messages: 0 };
+let lastState: SupervisorStateSnapshot = { ipc_port: 0, chats: [], channels: [], today_messages: 0 };
 const logs: LogEntry[] = [];
 const errors: LogEntry[] = [];
 const MAX_LOGS = 500;
@@ -517,61 +515,6 @@ function wireNameSaves(root: HTMLElement): void {
   });
 }
 
-function renderWorkSessions(): void {
-  const row = document.getElementById('work-row');
-  if (!row) return;
-  const ws = lastState.work_sessions;
-  if (ws.length === 0) {
-    row.innerHTML = `<div class="empty-hint">无进行中的 work session</div>`;
-  } else {
-    row.innerHTML = ws.map((w) => {
-      const originName = lastState.chats.find((c) => c.chat_id === w.origin_chat_id)?.name ?? w.origin_chat_id.slice(-12);
-      const ctxText = w.context_pct != null
-        ? `${w.context_pct}% (${fmtTokens(w.context_tokens)})`
-        : w.context_tokens != null
-          ? fmtTokens(w.context_tokens)
-          : '—';
-      const ctxClass = w.context_pct == null ? '' :
-        w.context_pct > 80 ? 'ctx-high' :
-        w.context_pct > 50 ? 'ctx-mid' : 'ctx-low';
-      return `
-      <div class="card work-card">
-        <div class="card-head">
-          <div class="health-dot ${healthDot(w.status)}"></div>
-          <div class="card-title" title="${escapeHtml(w.work_dir)}">${escapeHtml(w.work_dir.split(/[\\/]/).pop() ?? w.work_dir)}</div>
-          <span class="card-tag" title="哪个频道的品品启动的（${escapeHtml(w.origin_chat_id)}）">⎇ ${escapeHtml(originName)}</span>
-        </div>
-        <div class="card-meta-line">
-          <span title="状态">${w.status}</span><span class="sep">·</span>
-          <span title="模型">${escapeHtml(shortModel(w.model))}</span><span class="sep">·</span>
-          <span class="${effortClass(w.effort)}" title="effort">${w.effort}</span><span class="sep">·</span>
-          <span class="${ctxClass}" title="上下文用量">${ctxText}</span><span class="sep">·</span>
-          <span class="mi-label" title="启动时间">${fmtUptime(w.uptime_ms)} 前</span>
-        </div>
-        <div class="card-actions">
-          <button class="btn primary" data-work-open-terminal="${w.session_id}" title="打开 work 终端：关窗不杀进程，真结束点 ✕">终端</button>
-          <button class="btn btn-more" data-work-end="${w.session_id}" title="结束">✕</button>
-        </div>
-      </div>
-    `;
-    }).join('');
-    row.querySelectorAll<HTMLButtonElement>('button[data-work-end]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const id = btn.getAttribute('data-work-end');
-        if (id) void window.pinpin.work.end(id);
-      });
-    });
-    row.querySelectorAll<HTMLButtonElement>('button[data-work-open-terminal]').forEach((btn) => {
-      btn.addEventListener('click', () => {
-        const id = btn.getAttribute('data-work-open-terminal');
-        if (id) void window.pinpin.work.openTerminal(id);
-      });
-    });
-  }
-  const count = document.getElementById('work-count');
-  if (count) count.textContent = `${ws.filter((w) => w.status === 'running').length} 进行中`;
-}
-
 // ── 日志渲染 ──
 let currentLogFilter: 'all' | 'warn' | 'error' = 'all';
 /** 2026-05-28：按 source（频道 / 系统）过滤；'all' = 不过滤 / '__system__' = 非频道 source / 否则 source 名匹配 */
@@ -709,14 +652,11 @@ async function init(): Promise<void> {
   document.getElementById('save-settings')?.addEventListener('click', async () => {
     const m = (document.getElementById('default-model') as HTMLSelectElement).value;
     const e = (document.getElementById('default-effort') as HTMLSelectElement).value;
-    const wm = (document.getElementById('work-default-model') as HTMLSelectElement).value;
-    const we = (document.getElementById('work-default-effort') as HTMLSelectElement).value;
-    const wf = (document.getElementById('work-default-fast') as HTMLInputElement | null)?.checked ?? false;
     const df = (document.getElementById('default-fast') as HTMLInputElement | null)?.checked ?? false;
     let dc = Math.round(Number((document.getElementById('default-compact') as HTMLInputElement).value));
     if (!Number.isFinite(dc)) dc = 25;
     dc = Math.max(20, Math.min(70, dc));
-    await window.pinpin.settings.set({ default_model: m, default_effort: e, work_default_model: wm, work_default_effort: we, work_default_fast: wf, default_fast: df, default_compact_pct: dc });
+    await window.pinpin.settings.set({ default_model: m, default_effort: e, default_fast: df, default_compact_pct: dc });
   });
   // footer btn
   // 确认对话框已移到 main process 的 ipcMain.handle('app.restart-bot') 里（dialog.showMessageBox），
@@ -770,11 +710,6 @@ async function init(): Promise<void> {
     const dm = document.getElementById('default-model') as HTMLSelectElement;
     dm.innerHTML = buildModelOptions(s.default_model);
     (document.getElementById('default-effort') as HTMLSelectElement).value = s.default_effort;
-    const wdm = document.getElementById('work-default-model') as HTMLSelectElement;
-    wdm.innerHTML = buildModelOptions(s.work_default_model);
-    (document.getElementById('work-default-effort') as HTMLSelectElement).value = s.work_default_effort;
-    const wdf = document.getElementById('work-default-fast') as HTMLInputElement | null;
-    if (wdf) wdf.checked = !!s.work_default_fast;
     const ndf = document.getElementById('default-fast') as HTMLInputElement | null;
     if (ndf) ndf.checked = !!s.default_fast;
     (document.getElementById('default-compact') as HTMLInputElement).value = String(s.default_compact_pct ?? 25);
@@ -809,7 +744,6 @@ async function init(): Promise<void> {
 
 function renderAll(): void {
   renderChannels();
-  renderWorkSessions();
   populateLogSourceFilters(); // 频道列表变动时刷新日志 source filter 选项
   document.getElementById('about-ipc')!.textContent = `IPC port: ${lastState.ipc_port}`;
   // 修内审 Optional #8 E7 本日消息统计 chip

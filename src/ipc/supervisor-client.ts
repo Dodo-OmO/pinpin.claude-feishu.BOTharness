@@ -24,7 +24,6 @@ import {
   type FeishuMessageParams,
   type ChatTriggerParams,
   type HelloParams,
-  type WorkStoppedPush,
 } from './protocol.js';
 
 export class SupervisorClient extends EventEmitter {
@@ -210,9 +209,6 @@ export class SupervisorClient extends EventEmitter {
         break;
       case IPC_METHODS.CHAT_TRIGGER:
         this.emit('chat-trigger', env.params as ChatTriggerParams);
-        break;
-      case IPC_METHODS.WORK_STOPPED:
-        this.emit('work-stopped', env.params as WorkStoppedPush);
         break;
       default:
         process.stderr.write(`[ipc-client] unknown method: ${env.method}\n`);

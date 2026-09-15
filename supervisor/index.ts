@@ -8,7 +8,6 @@
  *   4. （方案A：supervisor 不碰 DB——投票记票等 DB 操作 IPC 路由到有 DB 的频道子进程执行）
  *   5. IPC server 监听本机 TCP，子 stdio MCP server 进程通过 PINPIN_SUPERVISOR_PORT 连过来
  *   6. 频道 CLI 生命周期（ChannelCli pool；start/stop/restart/compact）
- *   7. work session（step 4 接 pinpin-spawn-work-session tool）
  */
 
 import { EventEmitter } from 'node:events';
@@ -29,7 +28,6 @@ import { parseEnvMap } from '../src/shared/sender-shared.js';
 import { IpcServer } from './ipc-server.js';
 import { ChannelCli } from './channel-cli.js';
 import { ChannelConfigStore, DEFAULT_AUTOCOMPACT_PCT } from './channel-config-store.js';
-import { WorkSession, type WorkSessionStopInfo } from './work-session.js';
 import { CcusagePoller, type QuotaSnapshot } from './ccusage-poller.js';
 import { SupervisorCronRunner } from './cron-runner.js';
 import { createWardenBridge } from './warden-bridge.js';
@@ -37,13 +35,7 @@ import { RelayBridge } from './relay-bridge.js';
 import { ensureBridgeToken } from '../src/ipc/bridge-token.js';
 import {
   IPC_METHODS,
-  type WorkSpawnParams,
-  type WorkSpawnResult,
-  type WorkSendParams,
-  type WorkEndParams,
   type WorkOkResult,
-  type WorkPeekParams,
-  type WorkPeekResult,
   type StatuslineUpdateParams,
   type RateLimits,
   type WardenSystemInfo,
@@ -145,13 +137,6 @@ export class Supervisor extends EventEmitter {
   private lastRateLimits: RateLimits | null = null;
   /** 仪表盘日志流 ring buffer（main.ts pushLog 灌入，warden.recent-logs 读）；上限 300 条 */
   private recentLogs: WardenLogEntry[] = [];
-  /** session_id → WorkSession（诉求 B 传话筒） */
-  private workSessions = new Map<string, WorkSession>();
-  /** work session 独立默认 model/effort（启动时从 channel-config.json __work_defaults__ load；null = fallback 频道默认） */
-  private workDefaultModel: string | null = null;
-  private workDefaultEffort: string | null = null;
-  /** work session 默认 fast（启动时从 __work_defaults__ load；null = 不开） */
-  private workDefaultFast: boolean | null = null;
   private started = false;
   private dbPath: string;
   /** name-mappings.json 绝对路径（supervisor 唯一写者；透传给子 CLI env 让两进程读同一文件）。 */
@@ -213,11 +198,6 @@ export class Supervisor extends EventEmitter {
     if (persistedDefaults?.effort) this.opts.defaultEffort = persistedDefaults.effort;
     if (persistedDefaults?.autoCompactPct) this.opts.defaultAutoCompactPct = persistedDefaults.autoCompactPct;
     if (persistedDefaults?.fast !== undefined) this.opts.defaultFast = persistedDefaults.fast;
-    // work session 独立默认（无 persisted → null，spawn 时 fallback 频道默认）
-    const persistedWorkDefaults = this.channelConfigStore.getWorkDefaults();
-    this.workDefaultModel = persistedWorkDefaults?.model ?? null;
-    this.workDefaultEffort = persistedWorkDefaults?.effort ?? null;
-    this.workDefaultFast = persistedWorkDefaults?.fast ?? null;
 
     // ── 0.5 name-map-store init + 首次种子 ──
     // 单一 name-mappings.json，supervisor 写、两进程读（子端靠 mtime 热重载=实时）。
@@ -306,73 +286,6 @@ export class Supervisor extends EventEmitter {
       // supervisor 不再监测用量阈值推 trigger（D-6 手工摘要机制已回滚）。
     });
 
-    // ── 2.5 注册 work session IPC request handlers ──
-    this.ipcServer.setRequestHandler(IPC_METHODS.WORK_SPAWN, async (params, chatId) => {
-      const p = params as WorkSpawnParams;
-      const originChatId = p.origin_chat_id || chatId;
-      const session = new WorkSession({
-        originChatId,
-        workDir: p.work_dir,
-        goal: p.goal,
-        model: p.model || this.workDefaultModel || this.opts.defaultModel,
-        effort: p.effort || this.workDefaultEffort || 'high',
-        fast: this.workDefaultFast ?? false,
-        // 多飞书应用：工人的 lark-cli 身份跟随发起频道所属应用
-        larkConfigDir: this.apps.get(this.resolveAppId(originChatId))?.cfg.larkBotDir,
-      });
-      this.workSessions.set(session.id, session);
-      // headless：每轮 result 事件确定性 emit 一次 'stopped'，无需 idle 猜停/15s 去重——直接 push 给品品。
-      session.on('stopped', (info: WorkSessionStopInfo) => {
-        const pushed = this.ipcServer.pushWorkStopped(session.opts.originChatId, {
-          session_id: session.id,
-          result: info.result,
-          is_error: info.is_error,
-          stop_reason: info.stop_reason,
-          duration_ms: info.duration_ms,
-          total_cost_usd: info.total_cost_usd,
-        });
-        // 遥控修复 Bug2 诊断：唤醒信号没送到品品（IPC 客户端不在线）时不能静默丢——写 WARN 便于定位断点
-        if (!pushed) {
-          process.stderr.write(
-            `[supervisor] WARN: pushWorkStopped 失败（originChatId=${session.opts.originChatId.slice(-8)} 无 IPC 客户端）` +
-              ` session=${session.id} —— 品品收不到工作 CLI 停止提醒\n`,
-          );
-        }
-      });
-      session.start();
-      const result: WorkSpawnResult = { session_id: session.id };
-      return result;
-    });
-
-    this.ipcServer.setRequestHandler(IPC_METHODS.WORK_SEND, async (params) => {
-      const p = params as WorkSendParams;
-      const session = this.workSessions.get(p.session_id);
-      if (!session) {
-        const result: WorkOkResult = { ok: false, error: `unknown session: ${p.session_id}` };
-        return result;
-      }
-      const sent = session.sendMessage(p.message);
-      const result: WorkOkResult = sent ? { ok: true } : { ok: false, error: 'work CLI not running' };
-      return result;
-    });
-
-    // Q7: 品品主动 peek work session（拿翻译后的最近 N 条事件行）
-    this.ipcServer.setRequestHandler(IPC_METHODS.WORK_PEEK, async (params) => {
-      const p = params as WorkPeekParams;
-      const session = this.workSessions.get(p.session_id);
-      if (!session) {
-        const result: WorkPeekResult = { ok: false, error: `unknown session: ${p.session_id}`, lines: [] };
-        return result;
-      }
-      const limit = Math.min(Math.max(p.limit ?? 50, 1), 500);
-      const result: WorkPeekResult = {
-        ok: true,
-        lines: session.peekHistory(limit),
-        status: session.status,
-      };
-      return result;
-    });
-
     // 手动 /压缩：compact_chat tool → 往本频道 CLI 的 PTY 写 `/compact\n` 触发原生压缩
     this.ipcServer.setRequestHandler(IPC_METHODS.COMPACT_VIA_PTY, async (params, chatId) => {
       const p = params as CompactViaPtyParams;
@@ -458,19 +371,6 @@ export class Supervisor extends EventEmitter {
       return { ok } as WorkOkResult;
     });
 
-    this.ipcServer.setRequestHandler(IPC_METHODS.WORK_END, async (params) => {
-      const p = params as WorkEndParams;
-      const session = this.workSessions.get(p.session_id);
-      if (!session) {
-        const result: WorkOkResult = { ok: false, error: `unknown session: ${p.session_id}` };
-        return result;
-      }
-      session.end();
-      this.workSessions.delete(p.session_id);
-      const result: WorkOkResult = { ok: true };
-      return result;
-    });
-
     // ── 3+4+4.5 多飞书应用：每个 app 各自 init client + FeishuPoll + FeishuEventSubscriber ──
     // poll 与 WS 双轨并存不能动：飞书 chat.list 不返 P2P + 事件订阅不推 bot 消息 = 平台约束必然
     for (const cfg of this.opts.apps) {
@@ -550,9 +450,6 @@ export class Supervisor extends EventEmitter {
             rate_limits: this.lastRateLimits,
           };
         },
-        // 批3 work session
-        getWorkSessions: () => this.workSessions,
-        getWorkSession: (sid) => this.getWorkSession(sid),
         // 批4 全局设置 + 系统 + 日志
         getDefaults: () => ({
           channel: {
@@ -561,10 +458,8 @@ export class Supervisor extends EventEmitter {
             fast: this.opts.defaultFast ?? false,
             autoCompactPct: this.opts.defaultAutoCompactPct,
           },
-          work: this.getWorkDefaults(),
         }),
         setDefaults: (patch) => this.setDefaults(patch),
-        setWorkDefaults: (patch) => this.setWorkDefaults(patch),
         restartSupervisor: () => this.restart(),
         quitApp: () => this.emit('warden-request-quit'),
         getRecentLogs: (limit) => this.recentLogs.slice(-limit),
@@ -615,15 +510,13 @@ export class Supervisor extends EventEmitter {
   async stop(): Promise<void> {
     if (!this.started) return;
     this.started = false;
-    // 最优先同步树杀所有频道 CLI + 工人 CLI（放在任何 await 之前：即便后续异步收尾卡住、
+    // 最优先同步树杀所有频道 CLI（放在任何 await 之前：即便后续异步收尾卡住、
     // 或 Electron 抢着退出，taskkill /F /T 也已先发，绝不留孤儿 claude.exe / MCP server）。
     for (const cli of this.channels.values()) cli.stop();
     this.channels.clear();
     // 清所有就绪看门狗（restart() 复用实例，防 stale 定时器带旧 cli 引用晚触发）
     for (const t of this.helloWatchdogs.values()) clearTimeout(t);
     this.helloWatchdogs.clear();
-    for (const ws of this.workSessions.values()) ws.end();
-    this.workSessions.clear();
     this.cronRunner.stop();
     this.recurringTaskRunner.stop();
     await this.ccusagePoller.stop();
@@ -860,24 +753,6 @@ export class Supervisor extends EventEmitter {
           );
         });
     }, 8_000);
-  }
-
-  getWorkSessionStats(): Array<ReturnType<WorkSession['getStats']>> {
-    return [...this.workSessions.values()].map((ws) => ws.getStats());
-  }
-
-  /** Q5: work 终端 IPC 用 —— 拿 WorkSession 实例做 attach/detach/sendMessage/peek */
-  getWorkSession(sessionId: string): WorkSession | undefined {
-    return this.workSessions.get(sessionId);
-  }
-
-  /** 主面板 work session 卡 ✕ 按钮 → 强制结束（修内审 Required #1） */
-  endWorkSession(sessionId: string): boolean {
-    const ws = this.workSessions.get(sessionId);
-    if (!ws) return false;
-    ws.end();
-    this.workSessions.delete(sessionId);
-    return true;
   }
 
   isRunning(): boolean {
@@ -1239,29 +1114,6 @@ export class Supervisor extends EventEmitter {
     if (patch.fast !== undefined) this.opts.defaultFast = patch.fast;
     this.channelConfigStore.setDefaults(patch);
     process.stderr.write(`[supervisor] defaults set: ${JSON.stringify(patch)}\n`);
-  }
-
-  /** work session 默认 model/effort/fast + 持久化。只影响后续 spawn 的 work session，不动已起的 */
-  setWorkDefaults(patch: { model?: string; effort?: string; fast?: boolean }): void {
-    // 空字符串（用户清空输入框保存）不当真实值——过滤掉，让 fallback 链回退到频道默认
-    const clean: { model?: string; effort?: string; fast?: boolean } = {};
-    if (patch.model) clean.model = patch.model;
-    if (patch.effort) clean.effort = patch.effort;
-    if (patch.fast !== undefined) clean.fast = patch.fast;
-    if (clean.model !== undefined) this.workDefaultModel = clean.model;
-    if (clean.effort !== undefined) this.workDefaultEffort = clean.effort;
-    if (clean.fast !== undefined) this.workDefaultFast = clean.fast;
-    this.channelConfigStore.setWorkDefaults(clean);
-    process.stderr.write(`[supervisor] work defaults set: ${JSON.stringify(clean)}\n`);
-  }
-
-  /** 暴露 work 默认给 main process settings.get（未设/空时 fallback 频道默认 model / high） */
-  getWorkDefaults(): { model: string; effort: string; fast: boolean } {
-    return {
-      model: this.workDefaultModel || this.opts.defaultModel,
-      effort: this.workDefaultEffort || 'high',
-      fast: this.workDefaultFast ?? false,
-    };
   }
 
   /** P1.3: 暴露 channel-usage map 给 main process 拼 state */

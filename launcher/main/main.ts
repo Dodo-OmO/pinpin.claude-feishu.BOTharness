@@ -24,7 +24,7 @@ const VAULT_CWD = process.env['PINPIN_VAULT_CWD'] ?? getVaultRoot();
 process.env['PINPIN_DB_PATH'] = join(APP_ROOT, 'data.db');
 // 多飞书应用：一个启动器同时挂 N 个自建应用（每个 chat 归属且只归属一个应用），见 supervisor/feishu-apps.ts。
 const feishuApps = loadFeishuApps(process.env, APP_ROOT);
-// lark-cli 身份隔离：品品全家（supervisor / 频道 CLI / MCP 子进程 / 工人 CLI）走独立配置目录（同一飞书应用，
+// lark-cli 身份隔离：品品全家（supervisor / 频道 CLI / MCP 子进程）走独立配置目录（同一飞书应用，
 // strict-mode bot = 只能机器人身份、永不持有Owner的用户 token）；Owner本人的 ~/.lark-cli 只给她自己的窗口 +
 // 品品 DM 频道（channel-cli 对 DM 删掉此 env 回落）。PINPIN_LARK_GUARD 供全局 hook scripts/lark-guard.cjs 识别品品进程。
 // 全局默认值 = primary 应用（apps[0]）的 bot 目录；其余应用的频道 spawn 时由 channel-cli 按自身 app 覆盖。
@@ -47,8 +47,6 @@ let isQuiting = false;
 let supervisor: Supervisor | null = null;
 /** chat_id → 终端子窗口（同 chat 只允许一个终端窗，避免 detach 紊乱） */
 const terminalWindows = new Map<string, BrowserWindow>();
-/** Q5: session_id → work session 终端子窗（同 session 只允许一个窗，避免 detach 紊乱） */
-const workTerminalWindows = new Map<string, BrowserWindow>();
 
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
@@ -156,7 +154,7 @@ function createTray(): void {
 
 function snapshotState(): SupervisorStateSnapshot {
   if (!supervisor) {
-    return { ipc_port: 0, chats: [], channels: [], work_sessions: [], today_messages: 0 };
+    return { ipc_port: 0, chats: [], channels: [], today_messages: 0 };
   }
   const sv = supervisor;
   return {
@@ -176,7 +174,6 @@ function snapshotState(): SupervisorStateSnapshot {
         usage_updated_at: u?.updated_at,
       };
     }),
-    work_sessions: sv.getWorkSessionStats(),
     today_messages: sv.getTodayMessageCount(),
   };
 }
@@ -401,17 +398,6 @@ app.whenReady().then(async () => {
   ipcMain.handle('personas.set', (_, chatId: string, sel: string[] | '__ALL__') => {
     supervisor?.setChannelPersonas(chatId, sel);
   });
-  ipcMain.handle('work.end', (_, sessionId: string) => {
-    // 修内审 Required #1：UI 主动 end 接 supervisor.endWorkSession
-    const ok = supervisor?.endWorkSession(sessionId);
-    pushLog({
-      ts: Date.now(),
-      level: ok ? 'info' : 'warn',
-      source: 'launcher',
-      message: ok ? `work session ${sessionId} 已结束` : `work session ${sessionId} 不存在`,
-    });
-    pushState();
-  });
   ipcMain.handle('app.restart-bot', async () => {
     if (!supervisor) return;
     // renderer window.confirm 默认禁用，确认对话框移到 main process
@@ -449,14 +435,11 @@ app.whenReady().then(async () => {
   ipcMain.handle('settings.get', () => ({
     default_model: supervisor?.opts.defaultModel ?? '',
     default_effort: supervisor?.opts.defaultEffort ?? 'high',
-    work_default_model: supervisor?.getWorkDefaults().model ?? '',
-    work_default_effort: supervisor?.getWorkDefaults().effort ?? 'high',
-    work_default_fast: supervisor?.getWorkDefaults().fast ?? false,
     default_fast: supervisor?.opts.defaultFast ?? false,
     default_compact_pct: supervisor?.opts.defaultAutoCompactPct ?? 25,
   }));
-  ipcMain.handle('settings.set', (_, s: { default_model?: string; default_effort?: string; work_default_model?: string; work_default_effort?: string; work_default_fast?: boolean; default_fast?: boolean; default_compact_pct?: number }) => {
-    // P2.2: settings.set 实装——写 channel-config.json 的 __defaults__ / __work_defaults__ + 更新 supervisor opts
+  ipcMain.handle('settings.set', (_, s: { default_model?: string; default_effort?: string; default_fast?: boolean; default_compact_pct?: number }) => {
+    // P2.2: settings.set 实装——写 channel-config.json 的 __defaults__ + 更新 supervisor opts
     if (!supervisor) return;
     supervisor.setDefaults({
       model: s.default_model,
@@ -464,16 +447,11 @@ app.whenReady().then(async () => {
       autoCompactPct: s.default_compact_pct,
       fast: s.default_fast,
     });
-    supervisor.setWorkDefaults({
-      model: s.work_default_model,
-      effort: s.work_default_effort,
-      fast: s.work_default_fast,
-    });
     pushLog({
       ts: Date.now(),
       level: 'info',
       source: 'app',
-      message: `默认已保存：频道 model=${s.default_model ?? '(unchanged)'}/effort=${s.default_effort ?? '(unchanged)'}；work model=${s.work_default_model ?? '(unchanged)'}/effort=${s.work_default_effort ?? '(unchanged)'}`,
+      message: `默认已保存：频道 model=${s.default_model ?? '(unchanged)'}/effort=${s.default_effort ?? '(unchanged)'}`,
     });
   });
 
@@ -544,113 +522,7 @@ app.whenReady().then(async () => {
     };
   });
 
-  // ── Q5: work session 终端子窗口 IPC handlers ──
-  ipcMain.handle('work-terminal.open', (_, sessionId: string) => {
-    openWorkTerminalWindow(sessionId);
-  });
-
-  ipcMain.on('work-terminal.subscribe-pty', (e, sessionId: string) => {
-    const win = BrowserWindow.fromWebContents(e.sender);
-    if (!win) return;
-    const ws = supervisor?.getWorkSession(sessionId);
-    if (!ws) {
-      e.sender.send(`work-pty-data:${sessionId}`, `\r\n[supervisor] work session 未找到\r\n`);
-      return;
-    }
-    ws.attachTerminal((data) => {
-      if (!win.isDestroyed()) e.sender.send(`work-pty-data:${sessionId}`, data);
-    });
-  });
-
-  ipcMain.on('work-terminal.unsubscribe-pty', (_, sessionId: string) => {
-    supervisor?.getWorkSession(sessionId)?.detachTerminal();
-  });
-
-  ipcMain.handle('work-terminal.resize-pty', (_, sessionId: string, cols: number, rows: number) => {
-    supervisor?.getWorkSession(sessionId)?.resizeTerminal(cols, rows);
-  });
-
-  ipcMain.handle('work-terminal.send-input', (_, sessionId: string, text: string) => {
-    supervisor?.getWorkSession(sessionId)?.sendMessage(text);
-  });
-
-  ipcMain.handle('work-terminal.end', async (_, sessionId: string) => {
-    // renderer window.confirm 默认禁用，确认对话框移到 main process
-    const workTermWin = BrowserWindow.getAllWindows().find(
-      (w) => !w.isDestroyed() && w !== mainWindow,
-    );
-    const choice = await dialog.showMessageBox(workTermWin ?? mainWindow ?? new BrowserWindow({ show: false }), {
-      type: 'warning',
-      buttons: ['取消', '结束 session'],
-      defaultId: 0,
-      cancelId: 0,
-      title: '结束 work session',
-      message: '确认结束这个 work session？',
-      detail: '· 关窗 ≠ 结束；点「结束 session」才真的杀掉 work CLI\n· 结束后无法恢复，请确认 work 已完成',
-      noLink: true,
-    });
-    if (choice.response !== 1) return false;
-    supervisor?.endWorkSession(sessionId);
-    pushState();
-    return true;
-  });
-
-  ipcMain.handle('work-terminal.get-meta', (_, sessionId: string) => {
-    const ws = supervisor?.getWorkSession(sessionId);
-    if (!ws) return null;
-    const stats = ws.getStats();
-    const originChat = supervisor?.allChats().find((c) => c.chat_id === stats.origin_chat_id);
-    return {
-      work_dir: stats.work_dir,
-      model: stats.model,
-      effort: stats.effort,
-      status: stats.status,
-      origin_chat_name: originChat?.name,
-    };
-  });
-
 });
-
-function openWorkTerminalWindow(sessionId: string): void {
-  const existing = workTerminalWindows.get(sessionId);
-  if (existing && !existing.isDestroyed()) {
-    existing.show();
-    existing.focus();
-    return;
-  }
-  const win = new BrowserWindow({
-    width: 880,
-    height: 620,
-    minWidth: 600,
-    minHeight: 380,
-    title: '品品 work session 终端',
-    icon: join(__dirname, '../../launcher/renderer/assets/品品图标.png'),
-    autoHideMenuBar: true,
-    webPreferences: {
-      preload: join(__dirname, '../preload/preload.mjs'),
-      contextIsolation: true,
-      nodeIntegration: false,
-      sandbox: false,
-    },
-  });
-  workTerminalWindows.set(sessionId, win);
-  const devUrl = process.env['ELECTRON_RENDERER_URL'];
-  if (devUrl) {
-    void win.loadURL(`${devUrl}/work-terminal.html?session_id=${encodeURIComponent(sessionId)}`);
-  } else {
-    void win.loadFile(join(__dirname, '../renderer/work-terminal.html'), {
-      search: `session_id=${encodeURIComponent(sessionId)}`,
-    });
-  }
-  win.on('close', () => {
-    // workCLI 窗 X = 真结束这个 work session：ws.end() 走 pty.kill→taskkill /F /T 树杀
-    // work CLI + 其 MCP server + Task 子 agent 等全部衍生进程（Owner要求：X 掉不留僵尸）。
-    supervisor?.getWorkSession(sessionId)?.end();
-  });
-  win.on('closed', () => {
-    workTerminalWindows.delete(sessionId);
-  });
-}
 
 function openTerminalWindow(chatId: string): void {
   const existing = terminalWindows.get(chatId);
@@ -699,7 +571,7 @@ app.on('window-all-closed', () => {
 let quitCleanupStarted = false;
 app.on('before-quit', async (event) => {
   // ⚠️ Electron 不会 await 异步 before-quit handler——必须 preventDefault 拦住退出，
-  // 等 supervisor.stop()（同步 taskkill /F /T 树杀所有频道 CLI + 工人 CLI）跑完再 app.exit(0)，
+  // 等 supervisor.stop()（同步 taskkill /F /T 树杀所有频道 CLI）跑完再 app.exit(0)，
   // 否则进程抢先退出会留一堆孤儿 claude.exe / MCP server（Owner实测）。
   if (quitCleanupStarted) return;
   quitCleanupStarted = true;

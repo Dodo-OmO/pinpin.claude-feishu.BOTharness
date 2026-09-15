@@ -18,7 +18,6 @@
  */
 
 const DEFAULTS_KEY = '__defaults__';
-const WORK_DEFAULTS_KEY = '__work_defaults__';
 
 /** 自动压缩阈值默认值（上下文用量百分比）。per-channel 未配 + 全局默认未设时的兜底，与历史硬编码一致。 */
 export const DEFAULT_AUTOCOMPACT_PCT = 25;
@@ -49,7 +48,7 @@ export interface ChannelConfig {
    *  非空时注入 CLAUDE_CODE_ADDITIONAL_DIRECTORIES_CLAUDE_MD=1 让各目录 CLAUDE.md 原生加载。重启生效。 */
   addDirs?: string[];
   /** fast 模式（Opus 加速输出）。spawn 时注入 --settings 的 fastMode；改完需重启该频道 CLI 生效。
-   *  per-channel / __defaults__ / __work_defaults__ 三处通用。 */
+   *  per-channel / __defaults__ 两处通用。 */
   fast?: boolean;
 }
 
@@ -95,13 +94,13 @@ export class ChannelConfigStore {
   }
 
   get(chatId: string): ChannelConfig | undefined {
-    if (chatId === DEFAULTS_KEY || chatId === WORK_DEFAULTS_KEY) return undefined; // 保留 key，不让外部当 chat_id 用
+    if (chatId === DEFAULTS_KEY) return undefined; // 保留 key，不让外部当 chat_id 用
     return this.cache[chatId];
   }
 
   /** 写一条 channel config + 原子持久化（write tmp + rename） */
   set(chatId: string, patch: ChannelConfig): void {
-    if (chatId === DEFAULTS_KEY || chatId === WORK_DEFAULTS_KEY) return; // 同上保护
+    if (chatId === DEFAULTS_KEY) return; // 同上保护
     const existing = this.cache[chatId] ?? {};
     this.cache[chatId] = { ...existing, ...patch };
     this.flush();
@@ -119,29 +118,17 @@ export class ChannelConfigStore {
     this.flush();
   }
 
-  /** work session 全局默认 (model/effort)。spawn work session 时无显式参数 → fallback 这里 */
-  getWorkDefaults(): ChannelConfig | undefined {
-    return this.cache[WORK_DEFAULTS_KEY];
-  }
-
-  /** 写 work session 全局默认 + 原子持久化 */
-  setWorkDefaults(patch: ChannelConfig): void {
-    const existing = this.cache[WORK_DEFAULTS_KEY] ?? {};
-    this.cache[WORK_DEFAULTS_KEY] = { ...existing, ...patch };
-    this.flush();
-  }
-
-  /** 列出所有已识别频道 chat_id（过滤两个特殊 key） */
+  /** 列出所有已识别频道 chat_id（过滤特殊 key） */
   listChatIds(): string[] {
     return Object.keys(this.cache).filter(
-      (k) => k !== DEFAULTS_KEY && k !== WORK_DEFAULTS_KEY,
+      (k) => k !== DEFAULTS_KEY,
     );
   }
 
   /** 标 seen=true（+ 可选钉死 appId 归属）。spawnChannelCli 首次 spawn 时调，让该 chat 进入"常驻"持久列表。
    *  已 seen 且已有 appId → 归属早钉死，直接 return（防重复 flush）；否则合并写。 */
   markSeen(chatId: string, appId?: string): void {
-    if (chatId === DEFAULTS_KEY || chatId === WORK_DEFAULTS_KEY) return;
+    if (chatId === DEFAULTS_KEY) return;
     const existing = this.cache[chatId] ?? {};
     if (existing.seen === true && existing.appId !== undefined) return;
     this.cache[chatId] = { ...existing, seen: true, ...(appId !== undefined ? { appId } : {}) };
@@ -150,7 +137,7 @@ export class ChannelConfigStore {
 
   /** 彻底删除某 chat 配置（disband 解散群后调，防 spawnAllKnownChannels 重拉已解散群）。 */
   remove(chatId: string): void {
-    if (chatId === DEFAULTS_KEY || chatId === WORK_DEFAULTS_KEY) return;
+    if (chatId === DEFAULTS_KEY) return;
     if (this.cache[chatId]) { delete this.cache[chatId]; this.flush(); }
   }
 
@@ -160,7 +147,7 @@ export class ChannelConfigStore {
   }
 
   setStandby(chatId: string, standby: boolean): void {
-    if (chatId === DEFAULTS_KEY || chatId === WORK_DEFAULTS_KEY) return;
+    if (chatId === DEFAULTS_KEY) return;
     const existing = this.cache[chatId] ?? {};
     this.cache[chatId] = { ...existing, standby };
     this.flush();

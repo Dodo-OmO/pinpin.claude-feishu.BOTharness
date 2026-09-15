@@ -3,7 +3,7 @@
 // 只看含 lark-cli 的命令：
 //  ① 全机一律拒 `lark-cli event …`：品品 supervisor 已用同一飞书应用长连接收事件，飞书长连接为集群模式
 //     （同应用多客户端只投一个），再起 event bus daemon 会抢走品品的消息。
-//  ② 品品全家（启动器注入 PINPIN_LARK_GUARD=1，频道 CLI / MCP 子进程 / 工人 CLI 继承）再拒：
+//  ② 品品全家（启动器注入 PINPIN_LARK_GUARD=1，频道 CLI / MCP 子进程继承）再拒：
 //     切 profile / 覆盖 LARKSUITE_CLI_* 环境变量 / profile·config 管理 / 登录登出 / 自升级。
 //     身份主闸是品品专用配置目录的 strict-mode bot，本 hook 是防误用的第二道闸。
 //  脚本任何异常 → 放行（exit 0），绝不拖累全机 Bash 工具。
@@ -32,7 +32,7 @@ try {
   if (process.env.PINPIN_LARK_GUARD !== '1') process.exit(0);
 
   // Owner私聊频道（PINPIN_CHAT_ID === PINPIN_OWNER_CHAT_ID）例外：允许 `auth login`——
-  // Owner身份授权失效时品品在私聊里自己发起设备码授权、把链接发给Owner点，不让她跑命令。工人 CLI 无 PINPIN_CHAT_ID，不享此例外。
+  // Owner身份授权失效时品品在私聊里自己发起设备码授权、把链接发给Owner点，不让她跑命令。
   const isDm = !!process.env.PINPIN_CHAT_ID && process.env.PINPIN_CHAT_ID === process.env.PINPIN_OWNER_CHAT_ID;
   const rules = [
     [/--profile\b/, '切换 profile'],

@@ -49,7 +49,6 @@ process.stdin.on('end', () => {
   const cost = (data && data.cost) || {};
   const model = (data && data.model) || {};
   // 口径统一：上下文% 一律用 CLI 权威的 used_percentage（= total_input_tokens / 窗口）。
-  // work-session.ts 自算分支用同一口径（同分子 total_input_tokens），故两处可横向比较。
   const usedPct = typeof ctx.used_percentage === 'number' ? ctx.used_percentage : null;
   const totalIn = typeof ctx.total_input_tokens === 'number' ? ctx.total_input_tokens : null;
   const ctxSize = typeof ctx.context_window_size === 'number' ? ctx.context_window_size : null;

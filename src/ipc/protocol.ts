@@ -24,12 +24,6 @@ export const IPC_METHODS = {
   BYE: 'bye',
   FEISHU_MESSAGE: 'feishu.message',
   CHAT_TRIGGER: 'chat-trigger',
-  // 诉求 B 传话筒（step 4）—— child → main 是 request，main → child 是 push notification
-  WORK_SPAWN: 'work.spawn',         // request → returns { session_id }
-  WORK_SEND: 'work.send',           // request → returns { ok }
-  WORK_END: 'work.end',             // request → returns { ok }
-  WORK_PEEK: 'work.peek',           // Q7: request → returns { lines: string[] } 品品主动看 work 翻译行
-  WORK_STOPPED: 'work.stopped',     // main → child push notification（stop signal）
   // P1.3: statusLine sink → supervisor 推 per-CLI 上下文用量（fire-and-forget，不走 hello）
   STATUSLINE_UPDATE: 'statusline.update',
   // 手动 /压缩：compact_chat tool → supervisor 往本频道 CLI 的 PTY 写 `/compact\n` 触发原生压缩
@@ -61,16 +55,9 @@ export const IPC_METHODS = {
   WARDEN_SEND_INPUT: 'warden.send-input',         // request {chat_id, text} → WorkOkResult（写 PTY，跟 CLI 对话）
   // 批2 额度
   WARDEN_FETCH_QUOTA: 'warden.fetch-quota',       // request → 透传 {quota, today_messages, rate_limits}（先触发 fetchQuotaNow 刷新）
-  // 批3 work session（Owner"干活"session 全复刻：列表/终端看写/结束）
-  WARDEN_LIST_WORK: 'warden.list-work',           // request → 透传 {sessions: WorkSession.getStats()[]}
-  WARDEN_WORK_SUB_TERMINAL: 'warden.work-sub-terminal',     // request {session_id} → WorkOkResult（attach，push TERMINAL_DATA 以 session_id 作路由 key）
-  WARDEN_WORK_UNSUB_TERMINAL: 'warden.work-unsub-terminal', // request {session_id} → WorkOkResult
-  WARDEN_WORK_SEND: 'warden.work-send',           // request {session_id, text} → WorkOkResult（给 work CLI 发指令）
-  WARDEN_WORK_END: 'warden.work-end',             // request {session_id} → WorkOkResult（结束 work）
   // 批4 全局设置 + 系统 + 日志
-  WARDEN_GET_DEFAULTS: 'warden.get-defaults',     // request → {channel:{model,effort,fast,autoCompactPct}, work:{model,effort,fast}}
+  WARDEN_GET_DEFAULTS: 'warden.get-defaults',     // request → {channel:{model,effort,fast,autoCompactPct}}
   WARDEN_SET_DEFAULTS: 'warden.set-defaults',     // request {model?,effort?,fast?,autoCompactPct?} → WorkOkResult
-  WARDEN_SET_WORK_DEFAULTS: 'warden.set-work-defaults', // request {model?,effort?,fast?} → WorkOkResult
   WARDEN_RESTART_SUPERVISOR: 'warden.restart-supervisor', // request → WorkOkResult（重启品品 supervisor）
   WARDEN_QUIT_APP: 'warden.quit-app',             // request → WorkOkResult（关闭品品，经 main.ts isQuiting）
   WARDEN_RECENT_LOGS: 'warden.recent-logs',       // request {limit?} → {logs: WardenLogEntry[]}
@@ -236,60 +223,9 @@ export interface ChatTriggerParams {
   meta?: Record<string, string>;
 }
 
-// ── work session params（step 4 诉求 B 传话筒） ──
-
-export interface WorkSpawnParams {
-  /** 谁发起的——supervisor 通过这个反推 stop 信号往哪推 */
-  origin_chat_id: string;
-  work_dir: string;
-  goal: string;
-  /** 可选——不传则用 supervisor 的默认（见 supervisor/index.ts defaultModel）/ high */
-  model?: string;
-  effort?: string;
-}
-
-export interface WorkSpawnResult {
-  session_id: string;
-}
-
-export interface WorkSendParams {
-  session_id: string;
-  message: string;
-}
-
-export interface WorkEndParams {
-  session_id: string;
-}
-
 export interface WorkOkResult {
   ok: boolean;
   error?: string;
-}
-
-// Q7: peek 主动观察 work 翻译行（品品判断啥时看，supervisor 返最近 N 条翻译事件）
-export interface WorkPeekParams {
-  session_id: string;
-  /** 默认 50 条；上限 500 */
-  limit?: number;
-}
-
-export interface WorkPeekResult {
-  ok: boolean;
-  error?: string;
-  /** 人类可读翻译行（system_init/assistant/tool_use/tool_result/result），按时间顺序 */
-  lines: string[];
-  /** 当前 work 状态：running/stopped/failed 等 */
-  status?: string;
-}
-
-export interface WorkStoppedPush {
-  session_id: string;
-  /** claude --output-format stream-json 的 type:"result" 事件 */
-  result: string;
-  is_error: boolean;
-  stop_reason?: string;
-  duration_ms?: number;
-  total_cost_usd?: number;
 }
 
 // ── 手动 /压缩 params（compact_chat → COMPACT_VIA_PTY；复用 WorkOkResult 作返回）──
