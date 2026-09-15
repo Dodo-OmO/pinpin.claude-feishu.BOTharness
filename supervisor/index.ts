@@ -23,8 +23,8 @@ import { buildPollCard, buildApprovalCard, type ApprovalCardValue } from '../src
 import { RecurringTaskRunner } from './recurring-tasks.js';
 import { recurringTasksPath } from '../src/shared/recurring-tasks-store.js';
 import { feishuEmojiTypeToUnicode } from '../src/mcp/utils/feishu-emoji-map.js';
-import { resolveSenderNameSync } from './sender-resolver.js';
-import { initNameMapStore, seedNameMapIfAbsent, getAllMappings, setNameMapping } from '../src/shared/name-map-store.js';
+import { resolveSenderNameSync, resolveUserNameAsync } from './sender-resolver.js';
+import { initNameMapStore, seedNameMapIfAbsent, getAllMappings, setNameMapping, getHumanNameMapping } from '../src/shared/name-map-store.js';
 import { parseEnvMap } from '../src/shared/sender-shared.js';
 import { IpcServer } from './ipc-server.js';
 import { ChannelCli } from './channel-cli.js';
@@ -403,8 +403,12 @@ export class Supervisor extends EventEmitter {
     this.ipcServer.setRequestHandler(IPC_METHODS.SPAWN_CHANNEL, async (params, requesterChatId) => {
       const p = params as SpawnChannelParams;
       if (!p.chat_id) return { ok: false, error: 'missing chat_id' } as WorkOkResult;
-      if (p.is_p2p) this.applyNewP2pDefault(p.chat_id, p.peer_open_id);
-      this.spawnChannelCli(p.chat_id, p.chat_name, requesterChatId ? this.resolveAppId(requesterChatId) : undefined);
+      const spawnAppId = requesterChatId ? this.resolveAppId(requesterChatId) : undefined;
+      if (p.is_p2p) {
+        this.applyNewP2pDefault(p.chat_id, p.peer_open_id);
+        if (p.peer_open_id) void this.ensureP2pDisplayName(p.chat_id, p.peer_open_id, spawnAppId);
+      }
+      this.spawnChannelCli(p.chat_id, p.chat_name, spawnAppId);
       return { ok: true } as WorkOkResult;
     });
 
@@ -1140,8 +1144,11 @@ export class Supervisor extends EventEmitter {
     this.channelConfigStore.markSeen(chatId, app.appId);
     // P1.2: 优先 persisted config，fallback defaults
     const persisted = this.channelConfigStore.get(chatId);
-    // P4.Q3 续：display_name 优先级 = 用户自定义 > 飞书自动反查 > undefined（renderer fallback chat_id 末 12 位）
-    const effectiveChatName = persisted?.display_name ?? chatName;
+    // 群名首次见到即落盘：启动器显示与对话记录目录名都从 display_name 取，群改名不再另起目录（Owner改名走启动器）
+    if (!persisted?.display_name && chatName && !chatName.startsWith('oc_')) {
+      this.channelConfigStore.set(chatId, { display_name: chatName });
+    }
+    const effectiveChatName = this.channelConfigStore.get(chatId)?.display_name ?? chatName;
     cli = new ChannelCli({
       chatId,
       chatName: effectiveChatName,
@@ -1402,7 +1409,10 @@ export class Supervisor extends EventEmitter {
       process.stderr.write(
         `[supervisor] WSClient 发现未监听 chat_id=${msg.chat_id} (sender=${msg.sender_open_id.slice(0, 8)}…) → 动态 spawn channel CLI\n`,
       );
-      if (msg.is_p2p) this.applyNewP2pDefault(msg.chat_id, msg.sender_open_id);
+      if (msg.is_p2p) {
+        this.applyNewP2pDefault(msg.chat_id, msg.sender_open_id);
+        void this.ensureP2pDisplayName(msg.chat_id, msg.sender_open_id, msg.app_id);
+      }
       this.spawnChannelCli(msg.chat_id, guessName, msg.app_id);
     }
 
@@ -1678,6 +1688,24 @@ export class Supervisor extends EventEmitter {
     if (peerOpenId && alwaysOn.includes(peerOpenId)) return;
     this.channelConfigStore.setStandby(chatId, true);
     process.stderr.write(`[supervisor] 新私聊 ${chatId.slice(-8)} 默认睡眠（peer=${peerOpenId?.slice(-6) ?? '?'}）\n`);
+  }
+
+  /**
+   * 新私聊自动落显示名 `VS <全名>（私聊）`：全名按 认人表 → env → 飞书通讯录 API 反查；查到的同时写进认人表，
+   * 让对话记录目录用同一个名字。查不到（应用无权限）→ 不落，留给启动器"待命名"。
+   */
+  private async ensureP2pDisplayName(chatId: string, peerOpenId: string, appId?: string): Promise<void> {
+    if (chatId === process.env.PINPIN_OWNER_CHAT_ID || this.channelConfigStore.get(chatId)?.display_name) return;
+    try {
+      const name = await resolveUserNameAsync(peerOpenId, appId);
+      if (!name) return;
+      if (!getHumanNameMapping(peerOpenId)) setNameMapping('human', peerOpenId, name);
+      this.channelConfigStore.set(chatId, { display_name: `VS ${name}（私聊）` });
+      this.channels.get(chatId)?.setChatName(`VS ${name}（私聊）`);
+      process.stderr.write(`[supervisor] 私聊 ${chatId.slice(-8)} 显示名 → VS ${name}（私聊）\n`);
+    } catch (e) {
+      process.stderr.write(`[supervisor] ensureP2pDisplayName 失败 ${chatId.slice(-8)}: ${e instanceof Error ? e.message : e}\n`);
+    }
   }
 
   /** 事件投递前确保目标频道 CLI 就绪（find-or-spawn + 等 hello，仿 onPollAction 离线兜底） */
