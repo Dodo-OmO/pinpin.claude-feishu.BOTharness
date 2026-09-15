@@ -1,5 +1,5 @@
 // 永存记忆自检 cron（MCP 版）
-// 周日 23:30 推 memory-audit trigger（错峰周回顾 22:00）
+// 周日 23:30 推 memory-audit trigger
 
 import { registerCron } from "./registry.js";
 import { pushChannelTrigger } from "../utils/push-channel.js";

@@ -49,10 +49,9 @@ import { setServerInstance, pushChannelTrigger } from './utils/push-channel.js';
 import { channelBriefPath, readVaultFile } from './instructions.js';
 // 阶段 4 批次 2：定时播报类 cron（import 触发 registerCron 副作用）
 import './cron/daily-news.js';
-import './cron/weekly-recap.js';
 import './cron/memory-audit.js';
-import './cron/free-activity.js';
 import './cron/daily-diary.js';
+import './cron/doc-watch.js';
 import { schedulerStart, schedulerStop } from './cron/scheduled-jobs-tick.js';
 // 阶段 4 批次 1 步骤 1.5：read_chat_log tool
 import { readChatLogTool, handleReadChatLog } from './tools/read-chat-log.js';
@@ -62,20 +61,18 @@ import { createGroupTool, handleCreateGroup } from './tools/create-group.js';
 import { disbandGroupTool, handleDisbandGroup } from './tools/disband-group.js';
 import { listActiveChatsTool, handleListActiveChats } from './tools/list-active-chats.js';
 import { writeDiaryTool, handleWriteDiary } from './tools/write-diary.js';
-import { writeWeeklyRecapTool, handleWriteWeeklyRecap } from './tools/write-weekly-recap.js';
 import { readPushedNewsUrlsTool, handleReadPushedNewsUrls } from './tools/read-pushed-news-urls.js';
 import { sendDailyNewsCardTool, handleSendDailyNewsCard } from './tools/send-daily-news-card.js';
 import { memoryAuditReadTool, handleMemoryAuditRead } from './tools/memory-audit-read.js';
 import { memoryRewriteTool, handleMemoryRewrite } from './tools/memory-rewrite.js';
 import { readAttachmentTool, handleReadAttachment } from './tools/read-attachment.js';
-import { writeJourneyLogTool, handleWriteJourneyLog } from './tools/write-journey-log.js';
-import { triggerFreeActivityTool, handleTriggerFreeActivity } from './tools/trigger-free-activity.js';
-// 阶段 4 批次 3 tools（4 个）
-import { moodAppraiseTool, handleMoodAppraise } from './tools/mood-appraise.js';
+// 阶段 4 批次 3 tools
 import { scheduleReminderTool, handleScheduleReminder } from './tools/schedule-reminder.js';
 import { cancelScheduledTool, handleCancelScheduled } from './tools/cancel-scheduled.js';
+import { recurringTaskTool, handleRecurringTask } from './tools/recurring-task.js';
+import { askPersonTool, handleAskPerson } from './tools/ask-person.js';
 import { notifyWhenSpeaksTool, handleNotifyWhenSpeaks } from './tools/notify-when-speaks.js';
-// 2026-05-28 多 CLI 落地：跨频道发言 tool（free-activity 茶水间触发后品品自决跨群用）
+// 2026-05-28 多 CLI 落地：跨频道发言 tool
 import { CROSS_CHAT_MESSAGE_TOOL, handleCrossChatMessage } from './tools/cross-chat-message.js';
 // 传话主动催 relay tool
 import { relayMessageTool, handleRelayMessage } from './tools/relay-message.js';
@@ -97,13 +94,15 @@ import {
   handleResolveOpenId,
   handleArchiveSearch,
 } from './tools/misc-tools.js';
-// 2026-05-28 阶段补齐：卡片家族 4 tool（含 confirm_dangerous_action 降级版）
+// 2026-05-28 阶段补齐：卡片家族 4 tool（B4：send_approval_card 真按钮回调，confirm_dangerous_action 复用之）
 import {
   SEND_CARD_TOOL,
   SEND_POLL_CARD_TOOL,
+  SEND_APPROVAL_CARD_TOOL,
   CONFIRM_DANGEROUS_ACTION_TOOL,
   handleSendCard,
   handleSendPollCard,
+  handleSendApprovalCard,
   handleConfirmDangerousAction,
 } from './tools/cards.js';
 import { appendFileSync, mkdirSync, existsSync } from 'node:fs';
@@ -153,7 +152,7 @@ async function main() {
       // 全量人格/协议/记忆改走 supervisor 的 --append-system-prompt-file（突破本字段 2KB 截断，
       // 详见 instructions.ts 文件头）。此处仅留极简兜底——万一注入文件生成失败，品品至少知道 channel 机制。
       instructions:
-        '飞书消息以 <channel ...> 标签到达。完整人格/行为协议/永存记忆/人物画像/心境见 system prompt。' +
+        '飞书消息以 <channel ...> 标签到达。完整人格/行为协议/永存记忆/人物画像见 system prompt。' +
         '收到用户消息每轮必调一个工具回应：pinpin_reply_text / pinpin_reply_voice / pinpin_react 或 pinpin_no_reply。',
     },
   );
@@ -162,14 +161,14 @@ async function main() {
 
   // alwaysLoad 白名单：ENABLE_TOOL_SEARCH=true 下所有 MCP tool 默认折叠（按需 ToolSearch），
   // 仅本名单内 tool 注入 _meta['app/alwaysLoad'] 豁免常驻。
-  // 划分依据：① 每轮回话必调 ② 每轮 reply 后 trigger 自动触发（心情/记忆）③ 高频 cron 产出工具。
-  // 其余折叠按需——被 cron 提示词 / sub-agent frontmatter 按名点到的折叠工具（write_weekly_recap /
+  // 划分依据：① 每轮回话必调 ② 每轮 reply 后 trigger 自动触发（记忆）③ 高频 cron 产出工具。
+  // 其余折叠按需——被 cron 提示词 / sub-agent frontmatter 按名点到的折叠工具（
   // memory_rewrite / read_chat_log / pinpin_peek_work_session 等）实测都能按名 ToolSearch 到，不必常驻。
   // 飞书云文档/任务等走 lark-cli，不在 MCP。
   const ALWAYS_LOAD = new Set<string>([
     'pinpin_reply_text', 'pinpin_reply_voice', 'pinpin_react', 'pinpin_no_reply',
-    'pinpin_memorize', 'mood_appraise',
-    'write_diary', 'send_daily_news_card', 'write_journey_log',
+    'pinpin_memorize',
+    'write_diary', 'send_daily_news_card',
     'send_private_message',
   ]);
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
@@ -186,18 +185,16 @@ async function main() {
       sendPrivateMessageTool,
       listActiveChatsTool,
       writeDiaryTool,
-      writeWeeklyRecapTool,
       readPushedNewsUrlsTool,
       sendDailyNewsCardTool,
       memoryAuditReadTool,
       memoryRewriteTool,
       readAttachmentTool,
-      writeJourneyLogTool,
-      triggerFreeActivityTool,
-      // 阶段 4 批次 3（4 个）
-      moodAppraiseTool,
+      // 阶段 4 批次 3
       scheduleReminderTool,
       cancelScheduledTool,
+      recurringTaskTool,
+      askPersonTool,
       notifyWhenSpeaksTool,
       // 阶段 5 步骤 4：诉求 B 传话筒 work session 3 tools + P3.Q7 peek
       pinpinSpawnWorkSessionTool,
@@ -223,6 +220,7 @@ async function main() {
       // 2026-05-28 阶段补齐：卡片家族 4 tool（send_poll_card 已实装，重新加回）
       SEND_CARD_TOOL,
       SEND_POLL_CARD_TOOL,
+      SEND_APPROVAL_CARD_TOOL,
       CONFIRM_DANGEROUS_ACTION_TOOL,
     ].map((t) =>
       ALWAYS_LOAD.has(t.name)
@@ -276,8 +274,6 @@ async function main() {
         return handleListActiveChats();
       case 'write_diary':
         return handleWriteDiary(args as unknown as Parameters<typeof handleWriteDiary>[0]);
-      case 'write_weekly_recap':
-        return handleWriteWeeklyRecap(args as unknown as Parameters<typeof handleWriteWeeklyRecap>[0]);
       case 'read_pushed_news_urls':
         return handleReadPushedNewsUrls(args as unknown as Parameters<typeof handleReadPushedNewsUrls>[0]);
       case 'send_daily_news_card':
@@ -288,17 +284,15 @@ async function main() {
         return handleMemoryRewrite(args as unknown as Parameters<typeof handleMemoryRewrite>[0]);
       case 'read_attachment':
         return handleReadAttachment(args as unknown as Parameters<typeof handleReadAttachment>[0]);
-      case 'write_journey_log':
-        return handleWriteJourneyLog(args as unknown as Parameters<typeof handleWriteJourneyLog>[0]);
-      case 'trigger_free_activity':
-        return handleTriggerFreeActivity(args as unknown as Parameters<typeof handleTriggerFreeActivity>[0]);
       // 阶段 4 批次 3
-      case 'mood_appraise':
-        return handleMoodAppraise(args as unknown as Parameters<typeof handleMoodAppraise>[0]);
       case 'schedule_reminder':
         return handleScheduleReminder(args as unknown as Parameters<typeof handleScheduleReminder>[0]);
       case 'cancel_scheduled':
         return handleCancelScheduled(args as unknown as Parameters<typeof handleCancelScheduled>[0]);
+      case 'recurring_task':
+        return handleRecurringTask(args as unknown as Parameters<typeof handleRecurringTask>[0]);
+      case 'ask_person':
+        return handleAskPerson(args as unknown as Parameters<typeof handleAskPerson>[0]);
       case 'notify_when_speaks':
         return handleNotifyWhenSpeaks(args as unknown as Parameters<typeof handleNotifyWhenSpeaks>[0]);
       // 阶段 5 步骤 4：诉求 B 传话筒 work session 3 tools
@@ -338,6 +332,8 @@ async function main() {
         return handleSendCard(args as unknown as Parameters<typeof handleSendCard>[0]);
       case 'send_poll_card':
         return handleSendPollCard(args as unknown as Parameters<typeof handleSendPollCard>[0]);
+      case 'send_approval_card':
+        return handleSendApprovalCard(args as unknown as Parameters<typeof handleSendApprovalCard>[0]);
       case 'confirm_dangerous_action':
         return handleConfirmDangerousAction(args as unknown as Parameters<typeof handleConfirmDangerousAction>[0]);
       default:

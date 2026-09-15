@@ -19,7 +19,9 @@ import { FeishuPoll, type ChatListDiff, type FeishuInboundMessage } from './feis
 import { FeishuEventSubscriber, type PollActionValue } from './feishu-event-subscriber.js';
 import { type FeishuAppConfig, isChatAllowed } from './feishu-apps.js';
 import type { CardActionEvent, ReactionEvent, BotAddedEvent, CommentEvent } from '@larksuiteoapi/node-sdk';
-import { buildPollCard } from '../src/mcp/feishu/cards/diy-card.js';
+import { buildPollCard, buildApprovalCard, type ApprovalCardValue } from '../src/mcp/feishu/cards/diy-card.js';
+import { RecurringTaskRunner } from './recurring-tasks.js';
+import { recurringTasksPath } from '../src/shared/recurring-tasks-store.js';
 import { feishuEmojiTypeToUnicode } from '../src/mcp/utils/feishu-emoji-map.js';
 import { resolveSenderNameSync } from './sender-resolver.js';
 import { initNameMapStore, seedNameMapIfAbsent, getAllMappings, setNameMapping } from '../src/shared/name-map-store.js';
@@ -111,6 +113,10 @@ export class Supervisor extends EventEmitter {
   private ccusagePoller: CcusagePoller;
   private channelConfigStore: ChannelConfigStore;
   private cronRunner: SupervisorCronRunner;
+  /** 固定任务引擎（登记表 recurring-tasks.json，启动器级定时，离线先拉起） */
+  private recurringTaskRunner: RecurringTaskRunner;
+  /** 审批卡点击去重（approval_id 只处理一次） */
+  private handledApprovals = new Set<string>();
   /** YYYY-MM-DD → 当日入站消息数（修内审 Optional #8 E7 本日消息统计） */
   private dailyMessageCount = new Map<string, number>();
   /** chat_id → ChannelCli */
@@ -186,6 +192,13 @@ export class Supervisor extends EventEmitter {
     // name-mappings.json 跟 channel-config.json 同源（dataDir = userData），两进程读、supervisor 写
     this.nameMapPath = path.join(this.opts.dataDir, 'name-mappings.json');
     this.cronRunner = new SupervisorCronRunner(this);
+    this.recurringTaskRunner = new RecurringTaskRunner({
+      filePath: recurringTasksPath(this.dbPath),
+      ensureReady: (chatId) => this.ensureChannelReadyForEvent(chatId),
+      pushTrigger: (chatId, body, meta) => this.ipcServer.pushChatTrigger(chatId, body, meta),
+      notifyOwner: (chatId, text) => this.notifyOwnerDm(chatId, text),
+      displayName: (chatId) => this.getChannelDisplayName(chatId),
+    });
   }
 
   async start(): Promise<void> {
@@ -390,6 +403,7 @@ export class Supervisor extends EventEmitter {
     this.ipcServer.setRequestHandler(IPC_METHODS.SPAWN_CHANNEL, async (params, requesterChatId) => {
       const p = params as SpawnChannelParams;
       if (!p.chat_id) return { ok: false, error: 'missing chat_id' } as WorkOkResult;
+      if (p.is_p2p) this.applyNewP2pDefault(p.chat_id, p.peer_open_id);
       this.spawnChannelCli(p.chat_id, p.chat_name, requesterChatId ? this.resolveAppId(requesterChatId) : undefined);
       return { ok: true } as WorkOkResult;
     });
@@ -416,12 +430,16 @@ export class Supervisor extends EventEmitter {
       }
       const fromName = this.getChannelDisplayName(fromChatId);
       const toName = this.getChannelDisplayName(p.chat_id);
-      const body = `【来自「${fromName}」频道的你捎的话】${p.text}\n（先弄清前因后果，按本频道的关系和语气决定说不说、怎么说，不要原样复读。）`;
+      // verbatim=true（ask_person 回复转发等）：原文送达，不加"自行判断怎么说"外壳
+      const body = p.verbatim
+        ? p.text
+        : `【来自「${fromName}」频道的你捎的话】${p.text}\n（先弄清前因后果，按本频道的关系和语气决定说不说、怎么说，不要原样复读。）`;
       const pushed = this.ipcServer.pushChatTrigger(p.chat_id, body, {
+        ...(p.meta ?? {}), // 附加 meta 放前面，固定字段不被覆盖
         user: `品品（${fromName}）`,
         sender_type: 'system',
         message_id: `peer-${Date.now()}-${fromChatId.slice(-6)}`,
-        trigger: 'peer-message',
+        trigger: p.trigger ?? 'peer-message',
         from_chat_id: fromChatId,
       });
       process.stderr.write(`[supervisor] peer-message ${fromChatId.slice(-8)} → ${p.chat_id.slice(-8)} ${pushed ? 'ok' : 'push 失败'}\n`);
@@ -470,6 +488,7 @@ export class Supervisor extends EventEmitter {
         isChatAllowed: allowed,
         onMessage: (msg) => this.onFeishuMessage(msg),
         onPollAction: (evt, val) => this.onPollAction(evt, val),
+        onApprovalAction: (evt, val) => this.onApprovalAction(evt, val, cfg.appId),
         onReaction: (evt) => this.onReaction(evt, cfg.appId),
         onBotAdded: (evt) => this.onBotAdded(evt, cfg.appId),
         onComment: (evt) => this.onComment(evt),
@@ -490,9 +509,10 @@ export class Supervisor extends EventEmitter {
     this.spawnAllKnownChannels();
 
     // ── 5.5 supervisor 内嵌 cron（2026-05-28 多 CLI 决策）：
-    //         mood-decay / feishu-token-keepalive / daily-restart 编排
-    //         这 3 个不依赖 CLI 在线，统一在 main process 跑（避免 N 个 CLI 重复触发） ──
+    //         feishu-token-keepalive / daily-restart 编排
+    //         这 2 个不依赖 CLI 在线，统一在 main process 跑（避免 N 个 CLI 重复触发） ──
     this.cronRunner.start();
+    this.recurringTaskRunner.start();
 
     // ── 5.6 管家口 47900 + 传话口 47901（固定端口、共用本机口令；旁路，失败不崩品品）──
     let bridgeToken = '';
@@ -601,6 +621,7 @@ export class Supervisor extends EventEmitter {
     for (const ws of this.workSessions.values()) ws.end();
     this.workSessions.clear();
     this.cronRunner.stop();
+    this.recurringTaskRunner.stop();
     await this.ccusagePoller.stop();
     for (const { poll, subscriber } of this.apps.values()) {
       await poll.stop();
@@ -685,6 +706,20 @@ export class Supervisor extends EventEmitter {
       process.stderr.write(
         `[supervisor] 下线通知发送失败 chat=${chatId.slice(-8)}: ${e instanceof Error ? e.message : e}\n`,
       );
+    }
+  }
+
+  /** 固定任务连续触发失败时私聊 owner 告警（该 chat 所属应用的 ownerOpenId，无则静默）。 */
+  private async notifyOwnerDm(chatId: string, text: string): Promise<void> {
+    const app = this.appForChat(chatId);
+    if (!app.ownerOpenId) return;
+    try {
+      await getFeishuClient(app.appId).im.v1.message.create({
+        data: { receive_id: app.ownerOpenId, msg_type: 'text', content: JSON.stringify({ text }) },
+        params: { receive_id_type: 'open_id' },
+      });
+    } catch (e) {
+      process.stderr.write(`[supervisor] notifyOwnerDm 失败 chat=${chatId.slice(-8)}: ${e instanceof Error ? e.message : e}\n`);
     }
   }
 
@@ -1367,6 +1402,7 @@ export class Supervisor extends EventEmitter {
       process.stderr.write(
         `[supervisor] WSClient 发现未监听 chat_id=${msg.chat_id} (sender=${msg.sender_open_id.slice(0, 8)}…) → 动态 spawn channel CLI\n`,
       );
+      if (msg.is_p2p) this.applyNewP2pDefault(msg.chat_id, msg.sender_open_id);
       this.spawnChannelCli(msg.chat_id, guessName, msg.app_id);
     }
 
@@ -1506,6 +1542,49 @@ export class Supervisor extends EventEmitter {
     }
   }
 
+  /**
+   * 审批卡按钮点击：only_owner 非 owner 点 → 卡片提示、不推；否则去重后把卡片刷成已决，
+   * 再把结果以 trigger=approval-result 推回发起频道（离线先拉起）。
+   */
+  private async onApprovalAction(evt: CardActionEvent, val: ApprovalCardValue, appId: string): Promise<void> {
+    const { approval_id, origin_chat_id, choice, tag, only_owner, title } = val;
+    const clicker = evt.operator.openId;
+    const app = this.apps.get(appId);
+    if (!app || !isChatAllowed(app.cfg, origin_chat_id)) return;
+    const clickerName = resolveSenderNameSync(clicker, 'user', appId);
+    try {
+      if (only_owner && clicker !== app.cfg.ownerOpenId) {
+        await app.subscriber.updateCard(evt.messageId, buildApprovalCard(title, val.lines ?? [], val.buttons ?? [], val, { note: `仅豆姐可点（${clickerName} 点了不算）` }));
+        return;
+      }
+      if (this.handledApprovals.has(approval_id)) return;
+      this.handledApprovals.add(approval_id);
+      const chosenLabel = val.buttons?.find((b) => b.choice === choice)?.label ?? choice;
+      await app.subscriber.updateCard(evt.messageId, buildApprovalCard(title, val.lines ?? [], [], val, { by: clickerName, choice_label: chosenLabel }));
+      if (!(await this.ensureChannelReadyForEvent(origin_chat_id, appId))) {
+        process.stderr.write(`[supervisor] approval ${approval_id}: 发起频道 ${origin_chat_id.slice(-8)} 拉不起来，结果未送达\n`);
+        return;
+      }
+      this.ipcServer.pushChatTrigger(
+        origin_chat_id,
+        `【审批结果】${clickerName} 在「${title}」选择了「${choice}」${tag ? `（${tag}）` : ''}。按之前约定继续处理。`,
+        {
+          user: clickerName,
+          sender_type: 'human',
+          message_id: `approval-${approval_id}-${clicker.slice(-6)}`,
+          trigger: 'approval-result',
+          approval_id,
+          choice,
+          clicker_open_id: clicker,
+          clicker_name: clickerName,
+          tag: tag ?? '',
+        },
+      );
+    } catch (e) {
+      process.stderr.write(`[supervisor] onApprovalAction error: ${e instanceof Error ? e.message : e}\n`);
+    }
+  }
+
   /** 方案A 离线兜底：等某 chat 的频道子进程 IPC hello 就绪（channel-mcp-ready），超时返 false */
   private waitForChannelReady(chatId: string, timeoutMs: number): Promise<boolean> {
     if (this.ipcServer.listClients().some((c) => c.chat_id === chatId)) {
@@ -1587,6 +1666,18 @@ export class Supervisor extends EventEmitter {
     })();
     this.msgInfoResolveInflight.set(messageId, p);
     return p;
+  }
+
+  /**
+   * 新私聊默认睡眠：首次见到的 p2p chat（还没有 channel-config）→ standby=true（有人说话仍会被唤醒送达，只是 04:10 不自动上线）。
+   * 豁免：Owner单聊（PINPIN_OWNER_CHAT_ID）+ env PINPIN_P2P_ALWAYS_ON_OPEN_IDS（CSV open_id，组员）。已 seen 的旧私聊不动，之后由启动器开关决定。
+   */
+  private applyNewP2pDefault(chatId: string, peerOpenId?: string): void {
+    if (chatId === process.env.PINPIN_OWNER_CHAT_ID || this.channelConfigStore.get(chatId)) return;
+    const alwaysOn = (process.env.PINPIN_P2P_ALWAYS_ON_OPEN_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (peerOpenId && alwaysOn.includes(peerOpenId)) return;
+    this.channelConfigStore.setStandby(chatId, true);
+    process.stderr.write(`[supervisor] 新私聊 ${chatId.slice(-8)} 默认睡眠（peer=${peerOpenId?.slice(-6) ?? '?'}）\n`);
   }
 
   /** 事件投递前确保目标频道 CLI 就绪（find-or-spawn + 等 hello，仿 onPollAction 离线兜底） */

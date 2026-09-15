@@ -15,6 +15,8 @@ import type {
   AddTimerJobInput,
   AddSpeakWatchJobInput,
   AddRelayJobInput,
+  AddAskJobInput,
+  AskPayload,
   KnownUser,
   DiyPollDef,
   RelayPayload,
@@ -37,7 +39,7 @@ export function initDatabase(): void {
   db.pragma("foreign_keys = ON");
 
   db.exec(`
-    -- 周期任务执行记录（早报/周回顾/记忆自检/token 保活等）。
+    -- 周期任务执行记录（早报/记忆自检/token 保活等）。
     -- cron registry 启动时读 last_run_at 决定是否补跑（catch-up）。
     CREATE TABLE IF NOT EXISTS scheduled_tasks (
       task_id TEXT PRIMARY KEY,
@@ -373,6 +375,64 @@ export function bumpRelayNudge(jobId: number, newFireAtIso: string): number {
     .prepare(`UPDATE scheduled_jobs SET payload = ?, fire_at = ? WHERE id = ?`)
     .run(JSON.stringify(payload), newFireAtIso, jobId);
   return payload.remindCount;
+}
+
+// ============ ask job (B5：私聊问一个人一句，只认他私聊回复，超时算放弃) ============
+
+/** 创建一条 ask 任务（type='ask'，watch_user_id=被问者 open_id，chat_id=发起频道） */
+export function addAskJob(input: AddAskJobInput): number {
+  const payload: AskPayload = {
+    question: input.question,
+    tag: input.tag,
+    origin_chat_id: input.chatId,
+    target_name: input.targetName,
+    asked_at: new Date().toISOString(),
+  };
+  const result = getDb()
+    .prepare(
+      `INSERT INTO scheduled_jobs (chat_id, type, fire_at, watch_user_id, context_hint, payload, intent, status)
+       VALUES (?, 'ask', ?, ?, ?, ?, 'soft', 'pending')`
+    )
+    .run(
+      input.chatId,
+      input.fireAtIso,
+      input.targetOpenId,
+      input.question,
+      JSON.stringify(payload)
+    );
+  return Number(result.lastInsertRowid);
+}
+
+/**
+ * 查找某人（watcherOpenId）是否有 pending 的 ask 任务（回音检测用）。
+ * 该人私聊发消息进来时调此函数——命中说明是在回 ask_person 的问话。
+ */
+export function findPendingAskJobByWatcher(watcherOpenId: string): ScheduledJob | undefined {
+  return getDb()
+    .prepare(
+      `SELECT * FROM scheduled_jobs
+       WHERE type = 'ask' AND status = 'pending' AND watch_user_id = ?
+       ORDER BY created_at ASC
+       LIMIT 1`
+    )
+    .get(watcherOpenId) as ScheduledJob | undefined;
+}
+
+/**
+ * 查 pending ask 任务（schedulerStart 重启恢复用）。
+ * 多 CLI 架构：只返回发起频道自己的 ask（chat_id=ownChatId）——跟 timer/relay 同款隔离。
+ */
+export function listPendingAskJobs(ownChatId?: string): ScheduledJob[] {
+  if (ownChatId) {
+    return getDb()
+      .prepare(
+        `SELECT * FROM scheduled_jobs WHERE type = 'ask' AND status = 'pending' AND chat_id = ? ORDER BY fire_at ASC`
+      )
+      .all(ownChatId) as ScheduledJob[];
+  }
+  return getDb()
+    .prepare(`SELECT * FROM scheduled_jobs WHERE type = 'ask' AND status = 'pending' ORDER BY fire_at ASC`)
+    .all() as ScheduledJob[];
 }
 
 // ============ known_users (协议 #46) ============

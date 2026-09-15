@@ -104,7 +104,7 @@ function scheduleNext(job: CronJob): void {
  * 算下次触发点。
  * - daily/weekday/hourly：按墙钟算（与重启无关，本就对齐到固定时刻）。
  * - interval：**锚定 DB last_run_at + ms**，而非 now + ms——否则频繁重启会把"每 4h"
- *   倒计时反复清零，永远攒不满（free-activity 长期不触发的根因）。
+ *   倒计时反复清零，永远攒不满。
  *   若 last_run_at + ms 已过期（停机 > ms），startAllCrons 的 isMissed 已先走 catch-up
  *   runOnce（不经本函数）；本函数只在"未漏跑"时被调，故 last_run_at + ms 必在未来或贴近 now，
  *   配合 scheduleNext 的 Math.max(100, …) floor 不会 0 delay 死循环、也不会重复触发。

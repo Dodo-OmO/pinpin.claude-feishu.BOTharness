@@ -26,13 +26,16 @@ import { sanitizeChannelParams } from "../utils/sanitize-surrogates.js";
 import {
   listPendingSpeakWatchByOpenId,
   findPendingRelayJobByWatcher,
+  findPendingAskJobByWatcher,
   markJobFired,
   upsertKnownUser,
 } from "../db/database.js";
-import type { RelayPayload } from "../db/types.js";
+import type { RelayPayload, AskPayload, ScheduledJob } from "../db/types.js";
 import { logBackground } from "../utils/background-log.js";
 import { pad2 } from "../utils/helper.js";
 import { PARSERS, type ParseCtx } from "./parse-inbound.js";
+import { getSupervisorClient } from "../../ipc/client-singleton.js";
+import { IPC_METHODS, type PeerMessageParams, type PeerMessageResult } from "../../ipc/protocol.js";
 
 // 本地时间格式化 YYYY-MM-DD HH:MM（用系统时区=Owner机器所在时区）——
 // 给品品注入可读的「消息发送时间」+「当前时间」，让她随时感知时间。
@@ -65,8 +68,8 @@ const restartCareTriggered = new Set<string>();
 const restartHeadingWritten = new Set<string>();
 const RESTART_CARE_WINDOW_HOURS = Number(process.env.RESTART_CARE_WINDOW_HOURS ?? 12);
 
-// 骰子语音命中阈值——约 10% 概率附"本轮用语音"祈使指令（Owner否过 150，VOICE_TEXT_LIMIT 仍 120）
-const VOICE_DICE_THRESHOLD = 0.1;
+// 骰子语音命中阈值——约 5% 概率附"本轮用语音"祈使指令（Owner否过 150，VOICE_TEXT_LIMIT 仍 120）
+const VOICE_DICE_THRESHOLD = 0.05;
 
 // 防串台 envelope 钉频：真人/bot 入站每 N 条钉一次表态提醒（per-chat 计数、进程内，重启重置）
 const REPLY_DISCIPLINE_EVERY = 20;
@@ -212,8 +215,27 @@ export async function handleInboundMessage(
   const pendingWatches = listPendingSpeakWatchByOpenId(senderOpenId);
   const speakWatchHits = pendingWatches.filter((j) => j.chat_id === chatId);
 
+  // ── ask 回音检测（B5）：仅私聊 + 非 bot 才可能命中——群里答的不算，SOP 里靠品品手动收 ──
+  let askJob: ScheduledJob | undefined;
+  let askPayload: AskPayload | undefined;
+  if (payload.is_p2p && !isBot) {
+    const hit = findPendingAskJobByWatcher(senderOpenId);
+    if (hit && hit.payload) {
+      try {
+        askPayload = JSON.parse(hit.payload) as AskPayload;
+        askJob = hit;
+      } catch {
+        // payload 损坏，当没命中
+      }
+    }
+  }
+  const askSuffix =
+    askJob && askPayload
+      ? `\n\n〔系统〕此回复已转给发起频道${askPayload.tag ? `（${askPayload.tag}）` : ""}。`
+      : "";
+
   const notifParams = sanitizeChannelParams(
-    text + voiceDirective + replyDiscipline,
+    text + voiceDirective + replyDiscipline + askSuffix,
     {
       source: "feishu-channel",
       chat_id: chatId,
@@ -267,6 +289,40 @@ export async function handleInboundMessage(
       markJobFired(watch.id);
     } catch (e) {
       logBackground("inbound", `speak-watch job=${watch.id} 推送失败，保持 pending: ${e instanceof Error ? e.message : e}`);
+    }
+  }
+
+  // ── ask 回音检测（B5）：命中 pending ask → 转发给发起频道，成功才 markJobFired；失败保持 pending 等下次再回 ──
+  if (askJob && askPayload) {
+    const originChatId = askPayload.origin_chat_id;
+    const forwardText = `〔ask 回复${askPayload.tag ? `｜${askPayload.tag}` : ""}〕${senderName}：${text.slice(0, 500)}`;
+    const forwardMeta: Record<string, string> = {
+      ask_job_id: String(askJob.id),
+      tag: askPayload.tag ?? "",
+      from_open_id: senderOpenId,
+      question: askPayload.question.slice(0, 200),
+    };
+    try {
+      if (originChatId === chatId) {
+        // 发起频道就是本频道——本地推 trigger，不必绕 IPC 一圈
+        await pushChannelTrigger(
+          { trigger: "ask-reply", chat_id: originChatId, body: forwardText, meta: forwardMeta },
+          { throwOnError: true },
+        );
+      } else {
+        const r = await getSupervisorClient().request<PeerMessageResult>(IPC_METHODS.PEER_MESSAGE, {
+          chat_id: originChatId,
+          text: forwardText,
+          verbatim: true,
+          trigger: "ask-reply",
+          meta: forwardMeta,
+        } as PeerMessageParams);
+        if (!r.ok) throw new Error(r.error ?? "peer-message 失败");
+      }
+      markJobFired(askJob.id);
+      logBackground("inbound", `ask job=${askJob.id} replied by ${senderName}, forwarded to ${originChatId.slice(-6)}`);
+    } catch (e) {
+      logBackground("inbound", `ask job=${askJob.id} 转发失败，保持 pending: ${e instanceof Error ? e.message : e}`);
     }
   }
 

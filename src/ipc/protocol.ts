@@ -303,6 +303,10 @@ export interface SpawnChannelParams {
   chat_id: string;
   /** 可选频道友好名（建群时传群名；单聊可不传，supervisor 用 chat_id 兜底） */
   chat_name?: string;
+  /** 单聊标志（B8 频道默认睡眠判定用：新私聊首次挂号默认 standby） */
+  is_p2p?: boolean;
+  /** 单聊对方 open_id（在 PINPIN_P2P_ALWAYS_ON_OPEN_IDS 白名单内则不睡眠） */
+  peer_open_id?: string;
 }
 export interface StopChannelParams {
   chat_id: string;
@@ -340,6 +344,12 @@ export interface PeerMessageParams {
   chat_id: string;
   /** 捎的话：前因后果 + 请那边的品品做什么 */
   text: string;
+  /** true = 原文逐字送达，不加"捎话"外壳（ask_person 回复转发用） */
+  verbatim?: boolean;
+  /** trigger 名（默认 peer-message；ask_person 用 ask-reply） */
+  trigger?: string;
+  /** 附加 meta，随 trigger 送到目标频道 */
+  meta?: Record<string, string>;
 }
 export interface PeerMessageResult {
   ok: boolean;

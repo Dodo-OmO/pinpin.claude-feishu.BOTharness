@@ -9,9 +9,12 @@ import type { FeishuInboundMessagePayload } from "../../ipc/protocol.js";
 import { resolveMentions } from "../../shared/sender-shared.js";
 import { saveInboundImage, saveInboundFile } from "../utils/media-attachments.js";
 import { setPendingSaveFile } from "../utils/save-target.js";
-import { downloadMessageResource } from "../tools/feishu-send.js";
+import { downloadMessageResource, getFeishuClient } from "../tools/feishu-send.js";
 import { transcribeAudio } from "../utils/stt.js";
 import { logBackground } from "../utils/background-log.js";
+import { getUserName, resolveBotName } from "../utils/sender-names.js";
+import { getKnownUserName } from "../db/database.js";
+import { pad2 } from "../utils/helper.js";
 
 // ── ParseCtx 契约（定死不许改）──
 
@@ -350,6 +353,125 @@ export async function parseMedia(ctx: ParseCtx): Promise<string | null> {
   }
 }
 
+// ── 合并转发（B6）──
+// im.v1.message.get 反查子消息列表。真实响应结构未在 SDK .d.ts 里如实建模（SDK 自带类型对不上
+// 实测字段），故手写 interface + `as unknown as` 转换——同 reply-quote.ts:resolveReplyQuote 已验证
+// 的既有写法（sender 只有 {id, id_type, sender_type}，没有 sender_name 字段；app 名字反查跟
+// resolveReplyQuote 一致：resolveBotName(id) ?? id，不指望不存在的 sender_name）。
+interface MergeForwardItem {
+  message_id?: string;
+  upper_message_id?: string;
+  msg_type?: string;
+  body?: { content?: string };
+  sender?: { id?: string; id_type?: string; sender_type?: string };
+  create_time?: string | number;
+}
+
+const MERGE_FORWARD_MAX_ITEMS = 40;
+const MERGE_FORWARD_MAX_CHARS = 4000;
+
+/** create_time 是毫秒字符串（同 chat-message.ts create_time_ms 用法，非秒级） → `MM-DD HH:mm` */
+function fmtItemTime(v: string | number | undefined): string {
+  const ms = Number(v);
+  if (!Number.isFinite(ms) || ms <= 0) return "";
+  const d = new Date(ms);
+  return `${pad2(d.getMonth() + 1)}-${pad2(d.getDate())} ${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+/** post 子消息文字提取（只取文字，合并转发列表不下钻内嵌图片）。 */
+function extractPostText(raw: string | undefined): string {
+  try {
+    const body = unwrapPost(JSON.parse(raw || "{}"));
+    if (!body) return "";
+    const lines: string[] = [];
+    if (body.title) lines.push(body.title);
+    for (const para of body.content ?? []) {
+      if (!Array.isArray(para)) continue;
+      let line = "";
+      for (const el of para) {
+        if (el.tag === "text") line += el.text ?? "";
+        else if (el.tag === "a") line += el.text ?? el.href ?? "";
+      }
+      if (line.trim()) lines.push(line);
+    }
+    return lines.join(" ").trim();
+  } catch {
+    return "";
+  }
+}
+
+/** 子消息正文按 msg_type 渲染成一行可读文字。 */
+function renderMergeForwardItemText(item: MergeForwardItem): string {
+  const content = item.body?.content ?? "";
+  switch (item.msg_type) {
+    case "text":
+      return parseTextContent(content) || "(无内容)";
+    case "post":
+      return extractPostText(content) || "(无内容)";
+    case "image":
+      return "[图片]";
+    case "file": {
+      let name = "未命名";
+      try {
+        name = (JSON.parse(content || "{}") as { file_name?: string }).file_name ?? name;
+      } catch {
+        /* 解析失败留默认名 */
+      }
+      return `[文件「${name}」]`;
+    }
+    case "audio":
+      return "[语音]";
+    default:
+      return `[${item.msg_type ?? "未知类型"}]`;
+  }
+}
+
+/** 子消息发送者名字反查：user 走已知映射优先（省一次 API 往返），app 走花名册。 */
+async function resolveMergeForwardSenderName(sender: MergeForwardItem["sender"]): Promise<string> {
+  const id = sender?.id;
+  if (!id) return "未知用户";
+  if (sender?.sender_type === "app") {
+    return resolveBotName(id) ?? id;
+  }
+  return getKnownUserName(id) ?? (await getUserName(id));
+}
+
+/**
+ * 合并转发的聊天记录：反查子消息列表并渲染成可读多行文字。
+ * 失败（网络/权限/解析异常）回退旧文案 + 原因，不抛错不 DROP。
+ */
+export async function parseMergeForward(ctx: ParseCtx): Promise<string | null> {
+  const messageId = ctx.payload.message_id;
+  try {
+    const res = await getFeishuClient().im.v1.message.get({
+      path: { message_id: messageId },
+    });
+    const items = (res.data?.items ?? []) as unknown as MergeForwardItem[];
+    const children = items
+      .filter((it) => !!it.upper_message_id)
+      .sort((a, b) => Number(a.create_time ?? 0) - Number(b.create_time ?? 0))
+      .slice(0, MERGE_FORWARD_MAX_ITEMS);
+    if (children.length === 0) {
+      return "[合并转发的聊天记录]（正文看不到）";
+    }
+    const lines: string[] = [];
+    for (const item of children) {
+      const name = await resolveMergeForwardSenderName(item.sender);
+      const text = renderMergeForwardItemText(item);
+      lines.push(`[${fmtItemTime(item.create_time)}] ${name}：${text}`);
+    }
+    let body = lines.join("\n");
+    if (body.length > MERGE_FORWARD_MAX_CHARS) {
+      body = body.slice(0, MERGE_FORWARD_MAX_CHARS) + "…（已截断）";
+    }
+    return `合并转发（${children.length} 条）：\n${body}`;
+  } catch (e) {
+    const reason = e instanceof Error ? e.message : String(e);
+    process.stderr.write(`[chat-message] 合并转发解析失败 msg_id=${messageId}: ${reason}\n`);
+    return `[合并转发的聊天记录]（拉取正文失败：${reason}）`;
+  }
+}
+
 // ── 路由表 ──
 
 export const PARSERS: Record<string, Parser> = {
@@ -363,7 +485,7 @@ export const PARSERS: Record<string, Parser> = {
   sticker: label(() => "[表情包]"),
   share_chat: label(() => "[分享了一个群名片]"),
   share_user: label(() => "[分享了一张个人名片]"),
-  merge_forward: label(() => "[合并转发的聊天记录]（正文看不到）"),
+  merge_forward: parseMergeForward,
   location: label((c) => `[位置] ${str(c.name)}${str(c.address) ? ` ${str(c.address)}` : ""}`),
   todo: label((c) => `[任务] ${unwrapPost(c.summary)?.title || "（无标题）"}${fmtTs(c.due_time, " 截止 ")}`),
   vote: label((c) => `[投票] ${str(c.topic)}｜选项：${(Array.isArray(c.options) ? c.options : []).map(str).join(" / ")}`),

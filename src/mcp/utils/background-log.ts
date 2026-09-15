@@ -1,6 +1,6 @@
 // 后台账本（MCP 版）
 // 结构：vault\系统日志\后台账本\YYYY-MM\YYYY-MM-DD.md（月目录 + 每天一个文件）。
-// 多类别用行内 [category] 字段区分（cron 跑动 / 心境衰减 / token 保活 / mcp-boot / inbound 等）。
+// 多类别用行内 [category] 字段区分（cron 跑动 / token 保活 / mcp-boot / inbound 等）。
 // 保留串行队列 + EBUSY 重试（同 chat-log 模式）。
 
 import fs from "node:fs";
@@ -37,7 +37,7 @@ async function tryAppend(filePath: string, content: string): Promise<void> {
 }
 
 /**
- * 记一条后台事件——cron 跑动 / 心境衰减 / token 保活 / sub-agent 调度 等全用这个
+ * 记一条后台事件——cron 跑动 / token 保活 / sub-agent 调度 等全用这个
  * 格式：`YYYY-MM-DD HH:MM [category] content`
  */
 export function logBackground(category: string, content: string): void {

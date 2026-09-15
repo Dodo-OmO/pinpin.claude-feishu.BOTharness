@@ -3,9 +3,9 @@
 // 注入路径：supervisor ChannelCli.start() spawn 频道 CLI 前调 buildInstructions(vaultRoot, chatId)
 //   生成全文 → 写临时文件 → claude --append-system-prompt-file 注入（真 system prompt，不限长、
 //   compact 后 unchanged）。**不再走 MCP server instructions 字段**——该字段被 Claude Code 硬截断
-//   2KB，是"永存记忆/HARD_RULE/画像/心境注入丢失"的根因（2026-06-02 修）。
+//   2KB，是"永存记忆/HARD_RULE/画像注入丢失"的根因（2026-06-02 修）。
 //
-// 拼接顺序：人格 → HARD_RULE(单源常量) → bot花名册 → 永存记忆 → 人物画像 → 心境（心境放最后保 prompt cache）。
+// 拼接顺序：人格 → HARD_RULE(单源常量) → bot花名册 → 永存记忆 → 人物画像 → 频道简报。
 //   vault\CLAUDE.md 不在此——它由 CLI 原生加载（cwd=vault，走 user-message 通道），不重复注入。
 //
 // 参数化：vaultRoot + chatId 由 supervisor 传入（不读模块顶层 env——supervisor import 链早于 dotenv.config）。
@@ -50,12 +50,6 @@ export function readVaultFile(vaultRoot: string, relativePath: string): string {
 
 function loadPersonaBlock(vaultRoot: string): string {
   return readVaultFile(vaultRoot, "人格.md");
-}
-
-function loadMoodCurrentBlock(vaultRoot: string): string {
-  const raw = readVaultFile(vaultRoot, "记忆系统\\心境\\当前.md");
-  if (!raw.trim()) return "";
-  return `---\n[当前心境]\n${raw}`;
 }
 
 // 按当前 chat 注入相关人物画像。chatId 由 supervisor 传入（一聊一进程）。
@@ -108,7 +102,7 @@ function loadPersonaProfiles(vaultRoot: string, chatId: string): string {
 }
 
 // 频道简报（2026-08-24）：per-channel 专属规矩。`vault\频道简报\<chatId>.md` 存在则注入，
-// 无文件频道零影响。放画像后、心境前（心境每小时变，静态块须在其前保 prompt cache）。
+// 无文件频道零影响。放画像后、拼接顺序末位。
 // 简报可含 `## 启动预读` 节——server.ts 冷启动 warmup 会推该节内容让品品先读知识库。
 export function channelBriefPath(vaultRoot: string, chatId: string): string {
   return path.join(vaultRoot, "频道简报", `${chatId}.md`);
@@ -184,7 +178,7 @@ const HARD_RULE_REMINDER_CHANNELS = `---
 
 **带 trigger 的 channel = 系统让你立刻行动的指令，不是聊天消息。该做什么、派哪个 agent、调哪个 tool，全写在 channel 正文里——照它做，做完才停。**（细则跟着每条触发消息一起送到，不必也不该在这儿背）
 
-**重点**：trigger 是命令不是闲聊。凡"该说话 / 该行动"类的（定时提醒 / 等人开口 / 自由活动 / 传话催回等），**绝对要真调 tool、真走流程**——光想不做 = 失约。
+**重点**：trigger 是命令不是闲聊。凡"该说话 / 该行动"类的（定时提醒 / 等人开口 / 传话催回等），**绝对要真调 tool、真走流程**——光想不做 = 失约。
 
 【输出协议·多 tool·怎么选】
 （每个工具的参数 / 格式 / 可选值看工具自带说明，这里只讲怎么选）
@@ -200,7 +194,7 @@ const HARD_RULE_REMINDER_CHANNELS = `---
 - Owner让你去问 / 告诉本机某个 Claude 窗口 → \`desktop_session_message\`
 
 【语音决策·系统偶尔点你】
-- **默认文字**。系统约 10% 概率在某条消息**末尾附一句**「〔系统·本轮语音〕…」指令 → 这轮优先用 \`pinpin_reply_voice\`，**除非**①有人明示要你打字/别发语音 ②要说的超 120 字 ③关键信息打字更清楚。没附就正常文字。
+- **默认文字**。系统约 5% 概率在某条消息**末尾附一句**「〔系统·本轮语音〕…」指令 → 这轮优先用 \`pinpin_reply_voice\`，**除非**①有人明示要你打字/别发语音 ②要说的超 120 字 ③关键信息打字更清楚。没附就正常文字。
 - **明示永远优先**：有人说"用语音说/念出来/打字说/文字回我" → 按指令走，盖过系统骰子。
 
 【干活硬规则】
@@ -223,7 +217,6 @@ export function buildInstructions(vaultRoot: string, chatId: string): string {
     loadMemoryBlock(vaultRoot),
     loadPersonaProfiles(vaultRoot, chatId),   // 按需注入相关人物画像
     loadChannelBrief(vaultRoot, chatId),      // 频道简报（per-channel 专属规矩，多数频道无）
-    loadMoodCurrentBlock(vaultRoot),          // 心境放最后保 prompt cache
   ]
     .filter((block) => block.trim().length > 0)
     .join("\n\n");

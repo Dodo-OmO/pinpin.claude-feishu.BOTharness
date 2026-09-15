@@ -109,7 +109,7 @@ export class ChannelCli extends EventEmitter {
       ...(this.opts.fast ? { fastMode: true } : {}),
     });
 
-    // 开场白注入：生成完整人格/协议/记忆/画像/心境写临时文件，--append-system-prompt-file 注入。
+    // 开场白注入：生成完整人格/协议/记忆/画像写临时文件，--append-system-prompt-file 注入。
     // 走真 system prompt（不限长、compact 后 unchanged），突破 MCP instructions 字段的 2KB 截断
     // （根因详见 src/mcp/instructions.ts 文件头）。生成失败则降级不传该 flag，靠 MCP server 兜底句。
     const safeChat = this.opts.chatId.replace(/[^a-zA-Z0-9_-]/g, '_');
@@ -167,7 +167,7 @@ export class ChannelCli extends EventEmitter {
       // app/alwaysLoad 的核心/自动触发工具常驻。省每轮固定 MCP 开销（~40k→~10k）。
       // true=强制开启（跳过走网络时的 fallback；网络 透传 tool_reference 块）。
       ENABLE_TOOL_SEARCH: 'true',
-      // 关闭 Claude Code 自动记忆（AutoMem）：品品已有永久记忆50条 + 日记/人物/心境整套记忆系统，
+      // 关闭 Claude Code 自动记忆（AutoMem）：品品已有永久记忆50条 + 日记/人物整套记忆系统，
       // AutoMem 与之重复并行，关掉省启动注入 + 统一到 vault 一套记忆。
       CLAUDE_CODE_DISABLE_AUTO_MEMORY: '1',
       // MCP 启动连接超时（毫秒，官方 env）：launcher 重启 / 04:10 批量重启时多频道 CLI+MCP 同时开机 IO 风暴，

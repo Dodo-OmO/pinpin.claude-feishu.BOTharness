@@ -1,9 +1,10 @@
 /**
- * 卡片家族 3 tool —— send_card / send_poll_card / confirm_dangerous_action
+ * 卡片家族 4 tool —— send_card / send_poll_card / send_approval_card / confirm_dangerous_action
  *
  * - send_card：DIY 纯展示卡（标题+段落+落款）
  * - send_poll_card：投票卡（DB diy_polls/diy_poll_votes + 卡片回调实时刷票）
- * - confirm_dangerous_action：危险操作确认卡降级版（发提示卡 + 等用户文字回复）
+ * - send_approval_card：审批卡（真按钮回调，点击结果以 trigger=approval-result 回发起频道）
+ * - confirm_dangerous_action：危险操作确认卡（复用 send_approval_card，only_owner=true）
  */
 
 import { randomUUID } from "node:crypto";
@@ -12,10 +13,13 @@ import { getFeishuClient } from "./feishu-send.js";
 import {
   buildDiyCard,
   buildPollCard,
-  buildConfirmCard,
+  buildApprovalCard,
   type DiyCardSection,
+  type ApprovalButton,
+  type ApprovalCardValue,
 } from "../feishu/cards/diy-card.js";
 import { appendBotReply } from "../utils/chat-log.js";
+import { resolveTargetOpenId, sendDirectMessage } from "../utils/dm-send.js";
 import {
   insertDiyPoll,
   updateDiyPollMessageId,
@@ -169,15 +173,104 @@ export async function handleSendPollCard(args: {
 }
 
 // ───────────────────────────────────────────────────────────
-// confirm_dangerous_action（降级版——发卡 + 等文字回复）
+// send_approval_card（真按钮回调审批卡，结果以 trigger=approval-result 回发起频道）
+// ───────────────────────────────────────────────────────────
+
+export const SEND_APPROVAL_CARD_TOOL: Tool = {
+  name: "send_approval_card",
+  description:
+    "发一张带按钮的审批卡（同意/拒绝或自定义选项）。点谁选了什么会自动以 trigger=approval-result 送回你发起这次调用的频道，不用等文字回复。" +
+    "默认发到当前频道；也可传 chat_id 发到别的群，或传 person_name/open_id 私聊发给具体某人审批（结果仍回你这边）。" +
+    "拿到本 tool 返回后不要猜结果——等收到 approval-result 那条消息再继续处理。",
+  inputSchema: {
+    type: "object",
+    properties: {
+      title: { type: "string", description: "卡片标题（≤80字，说清是什么审批）" },
+      lines: {
+        type: "array",
+        items: { type: "string" },
+        description: "正文行数组（说明要审批的内容/背景）",
+        minItems: 1,
+      },
+      buttons: {
+        type: "array",
+        items: {
+          type: "object",
+          properties: {
+            label: { type: "string", description: "按钮显示文字，如『同意』" },
+            choice: { type: "string", description: "点击后回传的选择值，如『approve』" },
+            style: { type: "string", enum: ["default", "primary", "danger"], description: "可选按钮颜色" },
+          },
+          required: ["label", "choice"],
+        },
+        description: "按钮数组（≥1），如 [{label:'同意',choice:'approve'},{label:'拒绝',choice:'reject'}]",
+        minItems: 1,
+      },
+      chat_id: { type: "string", description: "可选，卡片发到指定群/频道（默认当前频道）" },
+      person_name: { type: "string", description: "可选，私聊发给某已知联系人" },
+      open_id: { type: "string", description: "可选，私聊发给某 open_id" },
+      tag: { type: "string", description: "可选标签，收到 approval-result 时用来识别是哪类审批" },
+      only_owner: { type: "boolean", description: "true=只认豆姐点击，其他人点会被拒绝提示、不产生结果" },
+    },
+    required: ["title", "lines", "buttons"],
+  },
+};
+
+export async function handleSendApprovalCard(args: {
+  title: string;
+  lines: string[];
+  buttons: ApprovalButton[];
+  chat_id?: string;
+  person_name?: string;
+  open_id?: string;
+  tag?: string;
+  only_owner?: boolean;
+}): Promise<ToolResult> {
+  const originChatId = process.env.PINPIN_CHAT_ID;
+  if (!originChatId) return textErr("缺 PINPIN_CHAT_ID env");
+  if (!args.buttons || args.buttons.length < 1) {
+    return textErr("buttons 至少 1 个。");
+  }
+  const approvalId = randomUUID();
+  const value: Omit<ApprovalCardValue, "choice"> = {
+    approval_id: approvalId,
+    origin_chat_id: originChatId,
+    tag: args.tag,
+    only_owner: args.only_owner,
+    title: args.title,
+  };
+  const card = buildApprovalCard(args.title, args.lines, args.buttons, value);
+  try {
+    const targetOpenId = resolveTargetOpenId({ person_name: args.person_name, open_id: args.open_id });
+    let messageId: string;
+    let chatId: string;
+    if (targetOpenId) {
+      const res = await sendDirectMessage(targetOpenId, "interactive", card, `[发了审批卡：${args.title}]`);
+      messageId = res.messageId;
+      chatId = res.dmChatId ?? targetOpenId;
+    } else {
+      chatId = args.chat_id ?? originChatId;
+      messageId = await sendInteractiveCard(chatId, card);
+      appendBotReply(chatId, `[发了审批卡：${args.title}]`);
+    }
+    return textOk(
+      `已发审批卡「${args.title}」到 chat_id=${chatId}（approval_id=${approvalId} message_id=${messageId}）。` +
+        `结果以 trigger=approval-result 回本频道，收到前别猜。`,
+    );
+  } catch (e) {
+    return textErr(`发审批卡失败：${e instanceof Error ? e.message : String(e)}`);
+  }
+}
+
+// ───────────────────────────────────────────────────────────
+// confirm_dangerous_action（复用 send_approval_card，only_owner=true 只认豆姐点击）
 // ───────────────────────────────────────────────────────────
 
 export const CONFIRM_DANGEROUS_ACTION_TOOL: Tool = {
   name: "confirm_dangerous_action",
   description:
-    "群里非Owner的人触发『需要Owner拍板』的危险操作时调：发确认卡到当前 chat 等Owner回复。" +
-    "降级版：卡片回调监听 channel 版未接入，Owner需手动文字回复『同意』/『拒绝』。" +
-    "⚠️ 这是提示、不是强制闸——执行侧无任何代码层硬拦截，全靠模型自觉：拿到本 tool 返回后**不要直接执行**，等下一条Owner消息识别同意/拒绝。" +
+    "群里非Owner的人触发『需要Owner拍板』的危险操作时调：发审批卡到当前频道，只认豆姐点击的同意/拒绝按钮。" +
+    "拿到本 tool 返回后**不要直接执行**——等收到 trigger=approval-result 那条消息，按豆姐选的同意/拒绝再决定。" +
     "用法：action_summary 一句话说要做什么。",
   inputSchema: {
     type: "object",
@@ -194,15 +287,14 @@ export const CONFIRM_DANGEROUS_ACTION_TOOL: Tool = {
 export async function handleConfirmDangerousAction(args: {
   action_summary: string;
 }): Promise<ToolResult> {
-  const chatId = process.env.PINPIN_CHAT_ID;
-  if (!chatId) return textErr("缺 PINPIN_CHAT_ID env");
-  try {
-    await sendInteractiveCard(chatId, buildConfirmCard(args.action_summary));
-    appendBotReply(chatId, `[发确认卡：${args.action_summary}]`);
-    return textOk(
-      `已发确认卡问Owner是否同意「${args.action_summary}」。**先别执行**，等下一条Owner消息识别她说的『同意/可以』或『拒绝/算了』再决定。`,
-    );
-  } catch (e) {
-    return textErr(`发确认卡失败：${e instanceof Error ? e.message : String(e)}`);
-  }
+  return handleSendApprovalCard({
+    title: "⚠️ 危险操作请确认",
+    lines: [`**操作**：${args.action_summary}`],
+    buttons: [
+      { label: "✅ 同意", choice: "approve", style: "primary" },
+      { label: "❌ 拒绝", choice: "reject", style: "danger" },
+    ],
+    tag: "dangerous",
+    only_owner: true,
+  });
 }

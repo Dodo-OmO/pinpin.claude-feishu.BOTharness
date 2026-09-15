@@ -3,11 +3,11 @@
 // 每个 CLI spawn 时通过 env PINPIN_CHAT_ID 传入自己的 chat_id。
 // 系统级周期 cron 注册到特定归属 CLI，让其它 CLI 不重复触发：
 //   - "tea"     → 茶水间 CLI（PINPIN_TEA_CHAT_ID）
-//                 daily-news / daily-diary / free-activity
+//                 daily-news / daily-diary
 //   - "owner"  → Owner单聊 CLI（PINPIN_OWNER_CHAT_ID）
-//                 memory-audit / weekly-recap
+//                 memory-audit
 //   - "supervisor" → 不在 MCP 子进程跑（搬到 supervisor 主进程）
-//                    daily-restart / feishu-token-keepalive / mood-decay
+//                    daily-restart / feishu-token-keepalive
 //
 // 使用方式：
 //   import { isOwnerOfCron } from "./cron-owner.js";

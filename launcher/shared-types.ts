@@ -17,7 +17,7 @@ export interface ChannelStatusInfo {
   fast?: boolean;
   /** 休眠模式：每日 4 点整体重启时不自动拉起，有人在该频道说话才唤醒（唤醒后读到触发消息）。
    *  睡着时该卡为 stopped 态但带休眠标记；醒着时 running 仍带休眠标记（下次重启回休眠）。 */
-  standby?: boolean;
+  standby?: boolean; // 睡眠：不随启动器/04:10 自动上线，有消息仍被唤醒。新私聊首次出现默认 true（Owner单聊 + PINPIN_P2P_ALWAYS_ON_OPEN_IDS 豁免）
   /** P1.3: per-CLI 上下文用量（statusLine sink 推过来） */
   context_pct?: number | null;
   context_tokens?: number | null;

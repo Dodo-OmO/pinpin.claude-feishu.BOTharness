@@ -18,6 +18,7 @@
 import * as Lark from '@larksuiteoapi/node-sdk';
 import type { CardActionEvent, ReactionEvent, BotAddedEvent, CommentEvent } from '@larksuiteoapi/node-sdk';
 import type { FeishuInboundMessage } from './feishu-poll.js';
+import type { ApprovalCardValue } from '../src/mcp/feishu/cards/diy-card.js';
 
 /** 卡片投票回调结构（action.value.poll_id + option_idx） */
 export interface PollActionValue {
@@ -34,6 +35,8 @@ export interface FeishuEventSubscriberOptions {
   onMessage: (msg: FeishuInboundMessage) => void | Promise<void>;
   /** 收到卡片投票点击时调用（supervisor 处理计票 + 刷卡片） */
   onPollAction?: (evt: CardActionEvent, value: PollActionValue) => void | Promise<void>;
+  /** 收到审批卡按钮点击时调用（B4：value 带 approval_id + choice，与投票卡回调互斥分流） */
+  onApprovalAction?: (evt: CardActionEvent, value: ApprovalCardValue) => void | Promise<void>;
   /** 别人加/撤消息表情回复（reaction 无 chat_id，supervisor 侧反查路由） */
   onReaction?: (evt: ReactionEvent) => void | Promise<void>;
   /** 品品被拉进某群（evt.chatId 即新群） */
@@ -105,26 +108,35 @@ export class FeishuEventSubscriber {
       });
     });
 
-    // 卡片交互回调（投票按钮点击）—— 只处理携带 poll_id 的 callback action
-    if (this.opts.onPollAction) {
+    // 卡片交互回调（投票 / 审批按钮点击）—— 按 value 形态分流：先审批卡（approval_id+choice），否则投票卡（poll_id+option_idx）
+    if (this.opts.onPollAction || this.opts.onApprovalAction) {
       this.channel.on('cardAction', (evt: CardActionEvent) => {
         setImmediate(() => {
           try {
-            const val = evt.action?.value as Partial<PollActionValue> | undefined;
-            if (
-              typeof val?.poll_id !== 'string' ||
-              typeof val?.option_idx !== 'number'
-            ) {
-              // 非投票卡回调，忽略
+            const val = evt.action?.value as
+              | (Partial<ApprovalCardValue> & Partial<PollActionValue>)
+              | undefined;
+            if (typeof val?.approval_id === 'string' && typeof val?.choice === 'string') {
+              if (!this.opts.onApprovalAction) return; // 未接审批处理，忽略
+              Promise.resolve(this.opts.onApprovalAction(evt, val as ApprovalCardValue)).catch((e) => {
+                process.stderr.write(
+                  `[feishu-event] onApprovalAction 异步异常: ${e instanceof Error ? e.message : e}\n`,
+                );
+              });
               return;
             }
-            Promise.resolve(
-              this.opts.onPollAction!(evt, { poll_id: val.poll_id, option_idx: val.option_idx }),
-            ).catch((e) => {
-              process.stderr.write(
-                `[feishu-event] onPollAction 异步异常: ${e instanceof Error ? e.message : e}\n`,
-              );
-            });
+            if (typeof val?.poll_id === 'string' && typeof val?.option_idx === 'number') {
+              if (!this.opts.onPollAction) return; // 未接投票处理，忽略
+              Promise.resolve(
+                this.opts.onPollAction(evt, { poll_id: val.poll_id, option_idx: val.option_idx }),
+              ).catch((e) => {
+                process.stderr.write(
+                  `[feishu-event] onPollAction 异步异常: ${e instanceof Error ? e.message : e}\n`,
+                );
+              });
+              return;
+            }
+            // 未识别的卡片回调，忽略
           } catch (e) {
             process.stderr.write(
               `[feishu-event] cardAction handler 同步异常: ${e instanceof Error ? e.message : e}\n`,

@@ -61,7 +61,7 @@ export function getVaultRoot(): string {
   return vaultFromEnvFile || process.cwd();
 }
 
-/** ISO 8601 周数 + 年份——给永存记忆自检 / 周回顾文件命名用。
+/** ISO 8601 周数 + 年份——给永存记忆自检文件命名用。
  *  要该周归哪个月目录 → 用 isoWeekToMonth(year, week)（两者同一套算法）。 */
 export function getISOWeek(d: Date = new Date()): { year: number; week: number } {
   const target = new Date(d.valueOf());

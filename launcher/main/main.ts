@@ -316,7 +316,7 @@ app.whenReady().then(async () => {
   });
   ipcMain.handle('channel.stop', async (_, chatId: string) => {
     // 2026-05-28 多 CLI 兜底：停"系统 cron host"（茶水间 / Owner单聊）前先弹原生 warning
-    // 让Owner知情——这两个 CLI 持有 daily-news / weekly-recap / memory-audit 等系统 cron
+    // 让Owner知情——这两个 CLI 持有 daily-news / memory-audit 等系统 cron
     const isCronHost =
       (process.env['PINPIN_TEA_CHAT_ID'] && chatId === process.env['PINPIN_TEA_CHAT_ID']) ||
       (process.env['PINPIN_OWNER_CHAT_ID'] && chatId === process.env['PINPIN_OWNER_CHAT_ID']);
@@ -324,8 +324,8 @@ app.whenReady().then(async () => {
       const isTea = chatId === process.env['PINPIN_TEA_CHAT_ID'];
       const role = isTea ? '茶水间' : 'Owner单聊';
       const crons = isTea
-        ? 'daily-news / daily-diary / free-activity'
-        : 'weekly-recap / memory-audit';
+        ? 'daily-news / daily-diary'
+        : 'memory-audit';
       const choice = await dialog.showMessageBox(mainWindow ?? new BrowserWindow({ show: false }), {
         type: 'warning',
         buttons: ['取消', '仍要停止'],
@@ -337,7 +337,7 @@ app.whenReady().then(async () => {
           `停止后以下 cron 会暂停，直到Owner手动重启该 CLI：`,
           `  ${crons}`,
           '',
-          `（mood-decay / feishu-token-keepalive / daily-restart 三个由 supervisor 跑，不受 CLI stop 影响。）`,
+          `（feishu-token-keepalive / daily-restart 两个由 supervisor 跑，不受 CLI stop 影响。）`,
         ].join('\n'),
         noLink: true,
       });

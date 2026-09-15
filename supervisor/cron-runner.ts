@@ -1,16 +1,15 @@
 /**
  * supervisor 主进程内 cron runner（2026-05-28 多 CLI 架构落地）
  *
- * 这里跑的 4 个 job 共同点：**不依赖任何 CLI 在线**：
- *   1. mood-decay               每小时整点 → 直接调 decayMoodlets() 写 mood-state 文件
- *   2. feishu-token-keepalive   04:00      → 以Owner本人身份跑一次 lark-cli 用户接口：触发 token 续期 + 校验，失效即私聊Owner
- *   3. daily-restart-shutdown   03:55      → stop 所有 CLI
- *   4. daily-restart-startup    04:10      → start 所有常驻 CLI
+ * 这里跑的 3 个 job 共同点：**不依赖任何 CLI 在线**：
+ *   1. feishu-token-keepalive   04:00      → 以Owner本人身份跑一次 lark-cli 用户接口：触发 token 续期 + 校验，失效即私聊Owner
+ *   2. daily-restart-shutdown   03:55      → stop 所有 CLI
+ *   3. daily-restart-startup    04:10      → start 所有常驻 CLI
  *
  * 跟 src/mcp/cron/registry.ts 的关系：
  *   - 复用 computeNextRunAt / nextDailyAt / nextHourlyAt 的时间计算
  *   - 但 supervisor 这边**不读 SQLite scheduled_tasks 表做 catch-up**——supervisor 启动时刻
- *     直接 scheduleNext，漏跑就漏跑（漏一次影响极小：mood 多衰减一格 / token 等下次 refresh 临期再补 / restart 第二天再来）
+ *     直接 scheduleNext，漏跑就漏跑（漏一次影响极小：token 等下次 refresh 临期再补 / restart 第二天再来）
  */
 
 import {
@@ -19,7 +18,6 @@ import {
   computeNextRunAt,
   type CronSchedule,
 } from '../src/mcp/cron/registry.js';
-import { decayMoodlets } from '../src/mcp/utils/mood-state.js';
 import { exec } from 'node:child_process';
 import { existsSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname, join } from 'node:path';
@@ -159,22 +157,7 @@ export class SupervisorCronRunner {
     }
   }
   private registerAll(): void {
-    // 1. mood-decay：每小时整点 → decayMoodlets()
-    this.jobs.set('mood-decay', {
-      name: 'mood-decay',
-      schedule: { kind: 'hourly', m: 0 },
-      handler: () => {
-        try {
-          decayMoodlets();
-        } catch (e) {
-          process.stderr.write(
-            `[supervisor-cron] mood-decay failed: ${e instanceof Error ? e.message : e}\n`,
-          );
-        }
-      },
-    });
-
-    // 2. feishu-token-keepalive：每天 04:00 → 以「Owner DM 所属应用」的用户身份配置跑一次 lark-cli 用户接口。
+    // 1. feishu-token-keepalive：每天 04:00 → 以「Owner DM 所属应用」的用户身份配置跑一次 lark-cli 用户接口。
     //    lark-cli 的 refresh token 7 天滚动，每天用一次即自动续期；用户身份缺失/失效 → alertOwnerReauth：
     //    品品自己发起设备码授权、把链接私聊给Owner点一下、后台轮询完成登录（Owner不用跑任何命令）。
     //    品品全家的 LARKSUITE_CLI_CONFIG_DIR 指向 bot 专用目录，这里要换成该应用的用户身份目录才是Owner本人配置。
@@ -208,7 +191,7 @@ export class SupervisorCronRunner {
         }),
     });
 
-    // 3. daily-restart-shutdown：03:55 stop 所有 CLI
+    // 2. daily-restart-shutdown：03:55 stop 所有 CLI
     this.jobs.set('daily-restart-shutdown', {
       name: 'daily-restart-shutdown',
       schedule: { kind: 'daily', h: SHUTDOWN_HOUR, m: SHUTDOWN_MIN },
@@ -226,7 +209,7 @@ export class SupervisorCronRunner {
       },
     });
 
-    // 4. daily-restart-startup：04:10 start 所有持久化频道（含被 03:55 stop 的）
+    // 3. daily-restart-startup：04:10 start 所有持久化频道（含被 03:55 stop 的）
     this.jobs.set('daily-restart-startup', {
       name: 'daily-restart-startup',
       schedule: { kind: 'daily', h: STARTUP_HOUR, m: STARTUP_MIN },

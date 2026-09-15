@@ -1,7 +1,7 @@
 // MCP 版 DB 层类型定义
 // 阶段 4：从 早期版本 src/db/types.ts 继承核心类型，砍 早期版本的 Project/Session 概念
 
-export type JobType = "timer" | "speak_watch" | "relay";
+export type JobType = "timer" | "speak_watch" | "relay" | "ask";
 export type JobIntent = "hard" | "soft";
 export type JobStatus = "pending" | "fired" | "cancelled" | "failed";
 
@@ -63,6 +63,28 @@ export interface RelayPayload {
   body: string;           // 要转达的原话
   remindCount?: number;   // 已催次数（0-2）
   _fromOpenId?: string;   // 委托人 open_id（回报回音时私聊用）
+}
+
+// ============ ask_person（B5：私聊问一个人一句，只认他私聊回复，超时算放弃） ============
+
+export interface AskPayload {
+  question: string;      // 问的原话
+  tag?: string;          // 可选标注（如场景/事由），转发时带出
+  origin_chat_id: string; // 发起频道 chat_id（回复转发目标）
+  target_name: string;   // 被问者展示名
+  asked_at: string;      // 发问时刻 ISO（超时算分钟用）
+}
+
+export interface AddAskJobInput {
+  /** 发起频道 chat_id（= PINPIN_CHAT_ID，多 CLI 隔离：只有发起那个频道的 CLI 才 schedule + fire） */
+  chatId: string;
+  /** 被问者 open_id（回复命中靠这个匹配） */
+  targetOpenId: string;
+  targetName: string;
+  question: string;
+  tag?: string;
+  /** 超时触发时间（ISO） */
+  fireAtIso: string;
 }
 
 export interface AddRelayJobInput {

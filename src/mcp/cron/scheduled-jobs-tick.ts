@@ -11,6 +11,7 @@
 import {
   listPendingTimerJobs,
   listPendingRelayJobs,
+  listPendingAskJobs,
   getJobById,
   markJobFired,
   revertJobToPending,
@@ -18,7 +19,7 @@ import {
   bumpRelayNudge,
   getKnownUserName,
 } from "../db/database.js";
-import type { ScheduledJob, RelayPayload } from "../db/types.js";
+import type { ScheduledJob, RelayPayload, AskPayload } from "../db/types.js";
 import { pushChannelTrigger } from "../utils/push-channel.js";
 import { logBackground } from "../utils/background-log.js";
 
@@ -76,6 +77,13 @@ async function fireJob(jobId: number): Promise<void> {
     });
   }
 
+  // ask 类型：超时未回，推 ask-timeout 提醒（B5）
+  if (job.type === "ask") {
+    return fireAskJob(jobId, job).catch((e) => {
+      logBackground("scheduled-jobs", `ask job=${jobId} 未捕获异常: ${e instanceof Error ? e.message : e}`);
+    });
+  }
+
   // v8.4 ④A 时序修复：先推 channel 成功才 markJobFired，失败回 pending + retry_count++
   // throwOnError: true 让 push-channel 失败时抛异常进 catch 走 retry（intent=hard 不丢任务）
   try {
@@ -106,6 +114,48 @@ async function fireJob(jobId: number): Promise<void> {
       process.stderr.write(`[scheduled-jobs] job=${jobId} 重试 ${MAX_RETRY} 次仍失败，置 failed\n`);
     } else {
       // 5 分钟后重试
+      setTimeout(() => scheduleJob(jobId), 5 * 60 * 1000);
+    }
+  }
+}
+
+/** ask 超时：B5 私聊问话到点未回，推 ask-timeout 让品品自判再催/告知/放弃（先推成功再 markFired，失败走 retry） */
+async function fireAskJob(jobId: number, job: ScheduledJob): Promise<void> {
+  if (!job.payload) {
+    markJobFailed(jobId);
+    return;
+  }
+  let payload: AskPayload;
+  try {
+    payload = JSON.parse(job.payload) as AskPayload;
+  } catch {
+    markJobFailed(jobId);
+    return;
+  }
+  const askedAtMs = Date.parse(payload.asked_at);
+  const elapsedMin = Number.isNaN(askedAtMs) ? "?" : Math.round((Date.now() - askedAtMs) / 60000);
+  const tagSuffix = payload.tag ? `（${payload.tag}）` : "";
+  try {
+    await pushChannelTrigger(
+      {
+        trigger: "ask-timeout",
+        chat_id: job.chat_id,
+        body:
+          `⏳ 问话超时（ask_job_id=${jobId}）：你 ${elapsedMin} 分钟前私聊问 ${payload.target_name}「${payload.question}」${tagSuffix}，对方没回。再催/告知/放弃自判。`,
+        meta: { job_id: jobId, tag: payload.tag ?? "" },
+      },
+      { throwOnError: true }
+    );
+    markJobFired(jobId);
+    logBackground("scheduled-jobs", `ask job=${jobId} timeout fired chat=${job.chat_id}`);
+  } catch (e) {
+    const retry = revertJobToPending(jobId);
+    const msg = e instanceof Error ? e.message : String(e);
+    logBackground("scheduled-jobs", `ask job=${jobId} fire FAILED retry=${retry} err=${msg}`);
+    if (retry >= MAX_RETRY) {
+      markJobFailed(jobId);
+      process.stderr.write(`[scheduled-jobs] ask job=${jobId} 重试 ${MAX_RETRY} 次仍失败，置 failed\n`);
+    } else {
       setTimeout(() => scheduleJob(jobId), 5 * 60 * 1000);
     }
   }
@@ -219,9 +269,13 @@ export function schedulerStart(): void {
   for (const job of relayPending) {
     scheduleJob(job.id);
   }
+  const askPending = listPendingAskJobs(ownChatId);
+  for (const job of askPending) {
+    scheduleJob(job.id);
+  }
   logBackground(
     "scheduled-jobs",
-    `schedulerStart fired (${timerPending.length} timers, ${relayPending.length} relays for chat=${ownChatId.slice(-8)})`,
+    `schedulerStart fired (${timerPending.length} timers, ${relayPending.length} relays, ${askPending.length} asks for chat=${ownChatId.slice(-8)})`,
   );
 }
 

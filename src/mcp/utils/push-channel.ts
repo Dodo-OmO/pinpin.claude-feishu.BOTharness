@@ -31,12 +31,12 @@ export function setServerInstance(server: Server): void {
   serverRef = server;
 }
 
-// 回复工具返回值里附带的一句提示（不再另推 trigger 多跑一轮）：心境 / 记忆两件事品品在同一轮顺手判断
+// 回复工具返回值里附带的一句提示（不再另推 trigger 多跑一轮）：记忆判断品品在同一轮顺手做
 export const POST_REPLY_HINT =
-  "心境有显著变化→mood_appraise；这轮有值得长期记的（个人信息 / 长期偏好 / 强烈情感 / 内梗）→pinpin_memorize；都没有就不用。";
+  "这轮有值得长期记的（个人信息 / 长期偏好 / 强烈情感 / 内梗）→pinpin_memorize；没有就不用。";
 
 export interface ChannelTriggerPayload {
-  /** trigger 名称（早报/周回顾/记忆自检/心境衰减/重启失忆护理 等） */
+  /** trigger 名称（早报/记忆自检/重启失忆护理 等） */
   trigger: string;
   /** 内容正文（让主 session 看到该做什么） */
   body: string;

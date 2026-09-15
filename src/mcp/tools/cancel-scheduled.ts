@@ -9,7 +9,7 @@ import { unscheduleJob } from "../cron/scheduled-jobs-tick.js";
 export const cancelScheduledTool: Tool = {
   name: "cancel_scheduled",
   description:
-    "取消一个之前注册的 timer/speak-watch 任务。" +
+    "取消一个之前注册的 timer/speak-watch/ask 任务。" +
     "传 job_id = 取消该任务（仅 status=pending 可取消）；" +
     "不传 = 返本频道 pending 任务列表（Owner说'有啥任务' / '取消任务'但没给 id 时用）。",
   inputSchema: {
