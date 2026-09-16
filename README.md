@@ -95,7 +95,7 @@ Electron 启动器 / Electron launcher
 > - ***MCP tool layer*** *— dozens of tools: Feishu send/receive, emoji reactions, group creation, approval cards (real button callbacks), timed ask-a-person, memory read/write, background work sessions, and more; cloud docs / tasks / calendar / mail are delegated to the official **lark-cli** (28 embedded skills, synced locally by `scripts/lark-skills-sync.cjs`).*
 > - ***Dual auth*** *— lark-cli identity isolation via two config dirs (bot identity in groups, my own identity in my DM; the global guard hook `scripts/lark-guard.cjs` blocks identity / config switching and login/logout) + a hard OWNER open_id check (dangerous actions only the owner can trigger).*
 > - ***Background jobs*** *— diary / briefings / memory audit / doc probe, scheduled and routed by chat_id ownership; a **recurring-task engine** in the launcher reads a registry and pushes each task's SOP to its channel on time (catch-up on missed runs, alert when delivery fails) — the bot registers new tasks itself, no code change needed.*
-> - ***Resident worker*** *— the owner keeps a resident Claude Code session as a "worker"; Pinpin dispatches a task brief through the local relay port and the result comes back to the original chat.*
+> - ***Hosted workers*** *— the launcher hosts a few named Claude Code sessions (resumed on demand via `--resume`, stopped after 30 idle minutes, guarded against double-open); Pinpin wakes one with `wake_worker`, then talks to it directly over local cross-session messaging.*
 
 ---
 

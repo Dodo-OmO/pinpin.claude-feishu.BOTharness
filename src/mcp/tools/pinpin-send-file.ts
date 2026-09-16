@@ -17,16 +17,23 @@ import { appendBotReply } from "../utils/chat-log.js";
 // 挡住被社工诱导把 .env / 飞书 token / 私钥等凭据发到群里。工作文件（.docx/.png 等）一律放行。
 const BLOCKED_EXTS = new Set([".pem", ".key", ".pfx", ".p12", ".ppk"]); // 私钥/证书（含 PuTTY .ppk）
 const BLOCKED_NAMES = new Set([
-  ".envrc", "credentials", // direnv 环境 / 云凭据文件
+  ".envrc", "credentials", ".credentials.json", "credentials.json", // direnv 环境 / 云凭据文件
   "id_rsa", "id_ed25519", "id_ecdsa", "id_dsa", // SSH 私钥
   ".git-credentials", ".npmrc", // git 凭据 / npm token
+  "data.db", // 品品本体数据库
 ]);
+// 路径段命中即挡：飞书 / lark-cli 凭据目录、品品自身配置目录
+const BLOCKED_DIR_SEGMENTS = [".claude", ".pinpin"];
+const BLOCKED_DIR_PREFIX = ".lark-cli"; // 含 .lark-cli-*
 
 export function isBlockedCredentialFile(p: string): boolean {
   const name = path.basename(p).toLowerCase();
   if (name === ".env" || name.startsWith(".env.")) return true; // .env / .env.local 等
   if (BLOCKED_NAMES.has(name)) return true;
   if (BLOCKED_EXTS.has(path.extname(name))) return true;
+  if (name.endsWith(".db-wal") || name.endsWith(".db-shm")) return true; // sqlite 日志/共享内存文件
+  const segments = p.toLowerCase().split(/[/\\]/);
+  if (segments.some((s) => BLOCKED_DIR_SEGMENTS.includes(s) || s.startsWith(BLOCKED_DIR_PREFIX))) return true;
   return false;
 }
 
@@ -106,7 +113,7 @@ export async function handlePinpinSendFile(
   if (isBlockedCredentialFile(file_path)) {
     return {
       isError: true,
-      content: [{ type: "text", text: "这是凭据/密钥类文件（.env / 飞书 token / 私钥证书等），不能发到群里（群消息撤不回，怕泄密）。" }],
+      content: [{ type: "text", text: "这是凭据/密钥类文件（.env / 飞书 token / 私钥证书 / lark-cli 或品品配置目录下的文件 / 数据库文件等），不能发到群里（群消息撤不回，怕泄密）。" }],
     };
   }
 

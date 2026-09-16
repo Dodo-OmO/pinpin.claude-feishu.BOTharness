@@ -21,7 +21,9 @@ import type {
   QuotaSnapshot,
   NameMappings,
   PendingNameEntry,
+  WorkerStatusInfo,
 } from '../shared-types.js';
+import { MODEL_OPTIONS, EFFORT_OPTIONS, supportsFast } from '../shared-types.js';
 
 declare global {
   interface Window {
@@ -57,43 +59,23 @@ declare global {
         get: (chatId: string) => Promise<string[] | '__ALL__'>;
         set: (chatId: string, sel: string[] | '__ALL__') => Promise<void>;
       };
+      worker: {
+        wake: (name: string) => Promise<{ ok: boolean; state?: 'woke' | 'already' | 'failed'; error?: string }>;
+        stop: (name: string) => Promise<void>;
+      };
     };
   }
 }
 
 // ── 状态 ──
-let lastState: SupervisorStateSnapshot = { ipc_port: 0, chats: [], channels: [], today_messages: 0 };
+let lastState: SupervisorStateSnapshot = { ipc_port: 0, chats: [], channels: [], today_messages: 0, workers: [] };
 const logs: LogEntry[] = [];
 const errors: LogEntry[] = [];
 const MAX_LOGS = 500;
 
-function fmtUptime(ms: number): string {
-  if (ms < 1000) return '<1s';
-  const s = Math.floor(ms / 1000);
-  if (s < 60) return `${s}s`;
-  const m = Math.floor(s / 60);
-  if (m < 60) return `${m}m ${s % 60}s`;
-  const h = Math.floor(m / 60);
-  return `${h}h ${m % 60}m`;
-}
-
 function fmtTime(ts: number): string {
   const d = new Date(ts);
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
-}
-
-/** 频道卡"启动"项：绝对启动时间 "YYYY-MM-DD HH:mm（X 前）"。
- *  started_at 缺失时回退到相对时长（兼容旧 supervisor / 重启过渡态）。 */
-function fmtStartedAt(c: ChannelStatusInfo): string {
-  if (c.started_at) {
-    const d = new Date(c.started_at);
-    const pad = (n: number) => String(n).padStart(2, '0');
-    const abs = `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
-    const rel = fmtUptime(Date.now() - c.started_at);
-    return `${abs}（${rel} 前）`;
-  }
-  if (c.uptime_ms > 0) return `${fmtUptime(c.uptime_ms)} 前`;
-  return c.status === 'stopped' ? '已关闭' : '—';
 }
 
 function healthDot(status: ChannelStatusInfo['status']): string {
@@ -113,9 +95,7 @@ function effortClass(effort: string): string {
 
 // ── 频道行渲染 ──
 // ⚠️ model 名与 [1m] 之间必须有空格；sonnet 不带 [1m]（Owner 2026-05-31 定）
-// ⚠️ warden\public\index.html 有同名常量的独立副本（纯静态页、不接 build 链路，无法 import 共享）——加模型要两处一起改，否则手机管家上看不到
-const MODEL_OPTIONS = ['claude-opus-5 [1m]', 'claude-opus-4-8 [1m]', 'claude-opus-4-7 [1m]', 'claude-opus-4-6 [1m]', 'claude-sonnet-5', 'claude-sonnet-4-6'];
-const EFFORT_OPTIONS = ['low', 'medium', 'high', 'max'];
+// model/effort 清单单源见 src/ipc/protocol.ts（经 shared-types.js re-export；warden/public/index.html 经 /api/defaults 拿同一份）
 
 /** 生成 model <option> 列表。current 不在 MODEL_OPTIONS 时补一个（兼容旧持久化值，避免 select 静默回退第一项后被覆盖）。 */
 function buildModelOptions(current: string): string {
@@ -187,54 +167,223 @@ function wireChannelActions(root: HTMLElement): void {
   });
 }
 
-function renderChannels(): void {
-  const row = document.getElementById('channels-row');
-  if (!row) return;
-  const channels = lastState.channels;
-  const active = channels.filter((c) => !c.standby);
-  const standby = channels.filter((c) => c.standby);
-
-  if (active.length === 0) {
-    row.innerHTML = `<div class="empty-hint">${channels.length === 0 ? '尚未拉到 chat 列表（supervisor 正在启动 / 飞书空）' : '全部频道睡眠中（见下方睡眠区）'}</div>`;
-  } else {
-    row.innerHTML = active.map((c) => renderChannelCard(c)).join('');
-    wireChannelActions(row);
+// ── 频道列表：应用分组 + 在线/睡眠折叠 + 过滤 ──
+// 折叠状态存 localStorage（key 带应用 label），跨刷新/重开保留；读写包 try/catch（隐私模式等场景静默降级）。
+const FOLD_KEY_PREFIX = 'pinpin.chanFold.';
+function getFoldState(label: string, section: 'online' | 'sleep', defaultExpanded: boolean): boolean {
+  try {
+    const v = localStorage.getItem(`${FOLD_KEY_PREFIX}${label}.${section}`);
+    return v === null ? defaultExpanded : v === '1';
+  } catch {
+    return defaultExpanded;
   }
+}
+function setFoldState(label: string, section: 'online' | 'sleep', expanded: boolean): void {
+  try {
+    localStorage.setItem(`${FOLD_KEY_PREFIX}${label}.${section}`, expanded ? '1' : '0');
+  } catch { /* 隐私模式等场景静默降级 */ }
+}
 
-  // 休眠折叠区
-  renderStandbyFold(standby);
+let chanFilterText = '';
+let filterActiveOnly = false;
+let filterFreshOnly = false;
+
+/** "有新消息" 快捷筛：60 分钟内有活动 或 有待投递消息。 */
+function isFreshChannel(c: ChannelStatusInfo): boolean {
+  return (c.pending_count ?? 0) > 0 || (c.last_activity_at !== undefined && Date.now() - c.last_activity_at < 3600_000);
+}
+function passesChanFilter(c: ChannelStatusInfo): boolean {
+  if (chanFilterText && !(c.chat_name ?? '').toLowerCase().includes(chanFilterText)) return false;
+  if (filterActiveOnly && !(c.status === 'running' || c.status === 'starting')) return false;
+  if (filterFreshOnly && !isFreshChannel(c)) return false;
+  return true;
+}
+
+/** 相对时间："刚刚 / x 分钟前 / x 小时前 / —"（无记录）。 */
+function fmtRelTime(ts?: number): string {
+  if (ts === undefined || ts === null) return '—';
+  const diffSec = Math.floor((Date.now() - ts) / 1000);
+  if (diffSec < 60) return '刚刚';
+  if (diffSec < 3600) return `${Math.floor(diffSec / 60)} 分钟前`;
+  return `${Math.floor(diffSec / 3600)} 小时前`;
+}
+
+function groupByAppLabel(channels: ChannelStatusInfo[]): Array<{ label: string; channels: ChannelStatusInfo[] }> {
+  const map = new Map<string, ChannelStatusInfo[]>();
+  for (const c of channels) {
+    const label = c.app_label || '其他';
+    const arr = map.get(label);
+    if (arr) arr.push(c);
+    else map.set(label, [c]);
+  }
+  const labels = [...map.keys()].sort((a, b) => {
+    if (a === '其他' && b !== '其他') return 1;
+    if (b === '其他' && a !== '其他') return -1;
+    return a.localeCompare(b, 'zh');
+  });
+  return labels.map((label) => ({ label, channels: map.get(label)! }));
+}
+
+function renderChannels(): void {
+  const root = document.getElementById('channels-groups');
+  if (!root) return;
+  const all = lastState.channels;
 
   const count = document.getElementById('channels-count');
   if (count) {
-    // 在线=运行态(status)；睡眠归属=归属(standby)。两者正交，被唤醒的睡眠频道两边各记一次属正常（标签已区分"在线"vs"归属"）。
-    const running = channels.filter((c) => c.status === 'running').length;
-    const sleeping = standby.length;
-    const parts = [`${running} 在线`];
-    if (sleeping > 0) parts.push(`${sleeping} 睡眠归属`);
-    count.textContent = parts.join(' · ');
+    const active = all.filter((c) => c.status === 'running' || c.status === 'starting').length;
+    const sleep = all.filter((c) => c.standby).length;
+    const failed = all.filter((c) => c.status === 'failed').length;
+    count.textContent = `${all.length} 个频道｜活 ${active}｜睡 ${sleep}｜挂 ${failed}`;
   }
-}
 
-// 睡眠区默认展开（睡眠频道的后台要看得见——Owner诉求）；Owner手动折叠的选择跨状态刷新保留。
-let standbyFoldExpanded = true;
-
-/** 睡眠频道区：和常驻一样的全功能卡片（开/关/重启/终端/设置 + 睡眠徽章 + 常驻↔睡眠开关）。默认展开。 */
-function renderStandbyFold(standby: ChannelStatusInfo[]): void {
-  const fold = document.getElementById('standby-fold');
-  const body = document.getElementById('standby-fold-body');
-  const countEl = document.getElementById('standby-count');
-  const caret = document.getElementById('standby-fold-caret');
-  if (!fold || !body) return;
-  if (standby.length === 0) {
-    fold.style.display = 'none';
+  if (all.length === 0) {
+    root.innerHTML = `<div class="empty-hint">尚未拉到 chat 列表（supervisor 正在启动 / 飞书空）</div>`;
     return;
   }
-  fold.style.display = '';
-  if (countEl) countEl.textContent = String(standby.length);
-  body.innerHTML = `<div class="cards-row">${standby.map((c) => renderChannelCard(c)).join('')}</div>`;
-  wireChannelActions(body);
-  body.style.display = standbyFoldExpanded ? '' : 'none';
-  caret?.classList.toggle('open', standbyFoldExpanded);
+  const filtered = all.filter(passesChanFilter);
+  if (filtered.length === 0) {
+    root.innerHTML = `<div class="empty-hint">没有匹配的频道</div>`;
+    return;
+  }
+  root.innerHTML = groupByAppLabel(filtered).map((g) => renderChanGroup(g)).join('')
+    + renderWorkerGroup(lastState.workers ?? []); // 顶部总账不计工人：count 只统计 all（频道）
+  wireChannelActions(root); // 工人「终端」按钮沿用同一 data-action="open-terminal" 事件委托（id 传 worker:<name>）
+  wireWorkerActions(root);
+  wireChanFolds(root);
+}
+
+// ── 工人（常驻托管：医生 / 总导演 / 顺子）分组：沿用 chan-group / chan-row 样式，紧跟在频道分组之后 ──
+function workerDot(status: WorkerStatusInfo['status']): string {
+  if (status === 'awake') return 'green';
+  if (status === 'broken') return 'red';
+  return 'gray';
+}
+
+function renderWorkerGroup(workers: WorkerStatusInfo[]): string {
+  if (workers.length === 0) return '';
+  return `
+    <div class="chan-group">
+      <div class="chan-group-title">工人</div>
+      <div class="chan-section-body">
+        ${workers.map((w) => renderWorkerRow(w)).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function renderWorkerRow(w: WorkerStatusInfo): string {
+  const isAwake = w.status === 'awake';
+  const wakeBtn = !isAwake
+    ? `<button class="btn primary" data-action="worker-wake" data-worker-name="${escapeHtml(w.name)}">唤醒</button>`
+    : '';
+  const termBtn = isAwake
+    ? `<button class="btn btn-more" data-action="open-terminal" data-chat-id="worker:${escapeHtml(w.name)}" title="打开终端">终端</button>`
+    : '';
+  const stopBtn = isAwake
+    ? `<button class="btn btn-more" data-action="worker-stop" data-worker-name="${escapeHtml(w.name)}" title="结束">✕</button>`
+    : '';
+  const errHtml = w.status === 'broken' && w.error
+    ? `<span class="worker-error" title="${escapeHtml(w.error)}">${escapeHtml(w.error)}</span>`
+    : '';
+  return `
+    <div class="card chan-row">
+      <div class="health-dot ${workerDot(w.status)}" title="${escapeHtml(w.status)}"></div>
+      <div class="card-title chan-row-name" title="${escapeHtml(w.name)}">${escapeHtml(w.name)}</div>
+      <div class="chan-row-activity" title="最后输出">${fmtRelTime(w.last_output_at)}</div>
+      ${errHtml}
+      <div class="chan-row-actions">${termBtn}${wakeBtn}${stopBtn}</div>
+    </div>
+  `;
+}
+
+/** 唤醒 / 结束按钮接线（终端按钮走 wireChannelActions 的 open-terminal 分支，不重复接）。 */
+function wireWorkerActions(root: HTMLElement): void {
+  root.querySelectorAll<HTMLButtonElement>('button[data-action="worker-wake"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const name = btn.getAttribute('data-worker-name');
+      if (!name) return;
+      const row = btn.closest('.chan-row');
+      row?.querySelector('.worker-error')?.remove();
+      btn.setAttribute('disabled', '');
+      const original = btn.textContent;
+      btn.textContent = '唤醒中…';
+      void window.pinpin.worker.wake(name).then((res) => {
+        if (res.ok) return; // 成功：channel-state-changed 推 state 会重渲染整行
+        btn.removeAttribute('disabled');
+        btn.textContent = original;
+        const err = document.createElement('span');
+        err.className = 'worker-error';
+        err.title = res.error ?? '未知原因';
+        err.textContent = `唤醒失败：${res.error ?? '未知原因'}`;
+        const actions = row?.querySelector('.chan-row-actions');
+        actions?.parentElement?.insertBefore(err, actions);
+      }).catch((e: unknown) => {
+        btn.removeAttribute('disabled');
+        btn.textContent = original;
+        console.warn('[worker] 唤醒失败', e);
+      });
+    });
+  });
+  root.querySelectorAll<HTMLButtonElement>('button[data-action="worker-stop"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      // 确认对话框在 main process 的 ipcMain.handle('worker.stop') 里（renderer window.confirm 默认禁用）
+      const name = btn.getAttribute('data-worker-name');
+      if (name) void window.pinpin.worker.stop(name);
+    });
+  });
+}
+
+function renderChanGroup(g: { label: string; channels: ChannelStatusInfo[] }): string {
+  // 按归属分段：常驻（默认展开）/ 睡眠（默认折叠）；运行状态看行首状态点
+  const online = g.channels.filter((c) => !c.standby);
+  const sleeping = g.channels.filter((c) => c.standby);
+  return `
+    <div class="chan-group">
+      <div class="chan-group-title">${escapeHtml(g.label)}</div>
+      ${renderChanSection(g.label, 'online', '常驻', online, getFoldState(g.label, 'online', true))}
+      ${renderChanSection(g.label, 'sleep', '睡眠', sleeping, getFoldState(g.label, 'sleep', false))}
+    </div>
+  `;
+}
+
+function renderChanSection(groupLabel: string, sectionKey: 'online' | 'sleep', title: string, list: ChannelStatusInfo[], expanded: boolean): string {
+  if (list.length === 0) return '';
+  return `
+    <div class="chan-section">
+      <div class="chan-section-head" data-fold-group="${escapeHtml(groupLabel)}" data-fold-section="${sectionKey}">
+        <span class="chan-section-caret ${expanded ? 'open' : ''}">▸</span>
+        <span class="chan-section-title">${escapeHtml(title)} · ${list.length}</span>
+      </div>
+      <div class="chan-section-body" style="display:${expanded ? '' : 'none'}">
+        ${list.map((c) => renderChannelRow(c)).join('')}
+      </div>
+    </div>
+  `;
+}
+
+function wireChanFolds(root: HTMLElement): void {
+  root.querySelectorAll<HTMLElement>('[data-fold-group]').forEach((head) => {
+    head.addEventListener('click', () => {
+      const group = head.getAttribute('data-fold-group');
+      const section = head.getAttribute('data-fold-section') as 'online' | 'sleep' | null;
+      const body = head.nextElementSibling as HTMLElement | null;
+      const caret = head.querySelector('.chan-section-caret');
+      if (!group || !section || !body) return;
+      const next = body.style.display === 'none';
+      body.style.display = next ? '' : 'none';
+      caret?.classList.toggle('open', next);
+      setFoldState(group, section, next);
+    });
+  });
+}
+
+/** 60s tick：只刷新已渲染行上的相对时间文本，不整页重渲染。 */
+function refreshActivityTimes(): void {
+  document.querySelectorAll<HTMLElement>('.chan-row-activity').forEach((el) => {
+    const ts = el.getAttribute('data-ts');
+    el.textContent = ts ? fmtRelTime(Number(ts)) : '—';
+  });
 }
 
 function fmtCtxLine(c: ChannelStatusInfo): string {
@@ -270,8 +419,11 @@ function standbyToggle(c: ChannelStatusInfo): string {
   </label>`;
 }
 
-function renderChannelCard(c: ChannelStatusInfo): string {
+/** 一行一频道：状态点 + 名字（省略号，title=全名）+ 模型短名·effort + 最后活动 + 待处理徽章 + 原有按钮组。
+ *  行元素保留 `.card` / 名字元素保留 `.card-title`——改名功能（wireChannelActions rename 分支）靠这俩类名定位。 */
+function renderChannelRow(c: ChannelStatusInfo): string {
   const dim = c.status === 'stopped' ? 'dim' : '';
+  const failedCls = c.status === 'failed' ? 'chan-row-failed' : '';
   const startedBtn = c.status === 'stopped'
     ? `<button class="btn primary" data-action="start" data-chat-id="${c.chat_id}">启动</button>`
     : `<button class="btn primary" data-action="open-terminal" data-chat-id="${c.chat_id}" title="打开终端">终端</button>`;
@@ -284,28 +436,26 @@ function renderChannelCard(c: ChannelStatusInfo): string {
     : '';
   const gearBtn = `<button class="btn btn-more" data-action="settings" data-chat-id="${c.chat_id}" title="频道设置（模型/effort/压缩/fast）">⚙</button>`;
   const fastBadge = c.fast ? '<span class="badge-fast">fast</span>' : '';
-  // 睡眠归属徽章：standby=true 即标，与运行态(开/关)正交——即便此刻被唤醒 running 也显示，提示"4 点重启回睡、靠消息唤醒"。
   const sleepBadge = c.standby
     ? '<span class="badge-sleep" title="睡眠归属：全部重启后不自动上线，有人说话才临时唤醒">睡眠</span>'
     : '';
+  const pendingBadge = (c.pending_count ?? 0) > 0
+    ? `<span class="chan-pending-badge" title="待投递消息">${c.pending_count}</span>`
+    : '';
+  const fullName = c.chat_name ?? c.chat_id.slice(-12);
   return `
-    <div class="card ${dim}">
-      <div class="card-head">
-        <div class="health-dot ${healthDot(c.status)}"></div>
-        <div class="card-title" title="${escapeHtml(c.chat_id)}">${escapeHtml(c.chat_name ?? c.chat_id.slice(-12))}</div>
-        ${sleepBadge}
-        ${standbyToggle(c)}
-        <button class="btn-rename" data-action="rename" data-chat-id="${c.chat_id}" data-current-name="${escapeHtml(c.chat_name ?? '')}" title="改卡片名">✎</button>
+    <div class="card chan-row ${dim} ${failedCls}">
+      <div class="health-dot ${healthDot(c.status)}" title="${escapeHtml(c.status)}"></div>
+      <div class="card-title chan-row-name" title="${escapeHtml(fullName)}">${escapeHtml(fullName)}</div>
+      <div class="chan-row-meta" title="模型 · effort">
+        ${escapeHtml(shortModel(c.model))}<span class="sep">·</span><span class="${effortClass(c.effort)}">${escapeHtml(c.effort)}</span>
       </div>
-      <div class="card-meta-line">
-        <span title="模型">${escapeHtml(shortModel(c.model))}</span><span class="sep">·</span>
-        <span class="${effortClass(c.effort)}" title="effort">${escapeHtml(c.effort)}</span><span class="sep">·</span>
-        <span title="自动压缩阈值">压缩 ${c.autoCompactPct ?? 25}%</span>
-        ${fastBadge ? `<span class="sep">·</span>${fastBadge}` : ''}<span class="sep">·</span>
-        <span class="${ctxPctClass(c.context_pct)}" title="上下文用量">${fmtCtxLine(c)}</span><span class="sep">·</span>
-        <span class="mi-label" title="启动时间">${fmtStartedAt(c)}</span>
-      </div>
-      <div class="card-actions">${startedBtn}${compactBtn}${gearBtn}${restartBtn}${stopBtn}</div>
+      <div class="chan-row-activity" data-ts="${c.last_activity_at ?? ''}" title="最后活动">${fmtRelTime(c.last_activity_at)}</div>
+      ${pendingBadge}
+      ${sleepBadge}
+      ${fastBadge}
+      ${standbyToggle(c)}
+      <div class="chan-row-actions">${startedBtn}${compactBtn}${gearBtn}${restartBtn}${stopBtn}<button class="btn-rename" data-action="rename" data-chat-id="${c.chat_id}" title="改名">✎</button></div>
     </div>
   `;
 }
@@ -313,7 +463,19 @@ function renderChannelCard(c: ChannelStatusInfo): string {
 // ── 频道设置弹窗 ──
 let modalChatId: string | null = null;
 
-/** 打开某频道的设置弹窗：填模型/effort/压缩/fast/上下文；运行中 model/effort/压缩/fast disabled。 */
+/** fast 开关仅 Opus 5 / Opus 4.8 支持：其余模型 disabled + title 说明，且强制取消勾选（供 openChannelModal /
+ *  modelSel change 两处复用，保持一致）。 */
+function applyFastAvailability(modelValue: string): void {
+  const fastInp = document.getElementById('modal-fast') as HTMLInputElement | null;
+  if (!fastInp) return;
+  const ok = supportsFast(modelValue);
+  fastInp.disabled = !ok;
+  fastInp.title = ok ? '' : '只有 Opus 5 / Opus 4.8 支持 fast';
+  if (!ok && fastInp.checked) fastInp.checked = false;
+}
+
+/** 打开某频道的设置弹窗：填模型/effort/压缩/fast/上下文。运行中也可改——改完该频道会接着原对话续接重启生效
+ *  （supervisor.applyChannelConfigLive，非"重启清零"），弹窗内不再 disabled，改用提示语说明。 */
 function openChannelModal(chatId: string): void {
   const c = lastState.channels.find((x) => x.chat_id === chatId);
   if (!c) return;
@@ -332,17 +494,19 @@ function openChannelModal(chatId: string): void {
   if (title) title.textContent = `频道设置 · ${c.chat_name ?? c.chat_id.slice(-12)}`;
   modelSel.innerHTML = buildModelOptions(c.model);
   modelSel.value = c.model;
-  // effort 选项单源 EFFORT_OPTIONS；当前值不在列表则补一项（兼容旧 xhigh 等持久化值）
+  // effort 选项单源 EFFORT_OPTIONS；当前值不在列表则补一项（兼容旧持久化值）
   const effortList = EFFORT_OPTIONS.includes(c.effort) || !c.effort ? EFFORT_OPTIONS : [c.effort, ...EFFORT_OPTIONS];
   effortSel.innerHTML = effortList.map((e) => `<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join('');
   effortSel.value = c.effort;
   compactInp.value = String(c.autoCompactPct ?? 25);
   fastInp.checked = !!c.fast;
+  applyFastAvailability(c.model);
   if (ctxEl) { ctxEl.textContent = fmtCtxLine(c); ctxEl.className = `modal-ctx ${ctxPctClass(c.context_pct)}`; }
 
-  // 运行中：model/effort/压缩/fast 锁住（沿用"运行中不可改"语义），上下文只读永远可看
-  for (const el of [modelSel, effortSel, compactInp, fastInp]) el.disabled = isRunning;
-  if (lockHint) lockHint.style.display = isRunning ? '' : 'none';
+  if (lockHint) {
+    lockHint.style.display = isRunning ? '' : 'none';
+    lockHint.textContent = isRunning ? '改完这个频道会接着原对话重启，十几秒后恢复。' : '';
+  }
 
   // 人物画像多选：每次打开实时扫目录（自动刷新最新人物）；运行中也可改（只写 json，重启生效）
   void renderPersonaGrid(chatId);
@@ -407,6 +571,7 @@ function wireChannelModal(): void {
   });
 
   modelSel?.addEventListener('change', () => {
+    applyFastAvailability(modelSel.value); // 切到不支持 fast 的模型时本地即时取消勾选（main 侧同步 apply fast=false，只重启一次）
     if (modalChatId) void window.pinpin.channel.setModel(modalChatId, modelSel.value);
   });
   effortSel?.addEventListener('change', () => {
@@ -675,14 +840,26 @@ async function init(): Promise<void> {
 
   // 频道设置弹窗（一次性 wire；靠 modalChatId 取目标频道）
   wireChannelModal();
-  // 休眠折叠区 头部 点击展开/收起
-  document.getElementById('standby-fold-head')?.addEventListener('click', () => {
-    standbyFoldExpanded = !standbyFoldExpanded;
-    const body = document.getElementById('standby-fold-body');
-    const caret = document.getElementById('standby-fold-caret');
-    if (body) body.style.display = standbyFoldExpanded ? '' : 'none';
-    caret?.classList.toggle('open', standbyFoldExpanded);
+
+  // 频道列表：名字过滤 + 两个可叠加快捷筛（按下态高亮）
+  const chanFilterInput = document.getElementById('chan-filter') as HTMLInputElement | null;
+  chanFilterInput?.addEventListener('input', () => {
+    chanFilterText = chanFilterInput.value.trim().toLowerCase();
+    renderChannels();
   });
+  const filterActiveBtn = document.getElementById('filter-active');
+  filterActiveBtn?.addEventListener('click', () => {
+    filterActiveOnly = !filterActiveOnly;
+    filterActiveBtn.classList.toggle('active', filterActiveOnly);
+    renderChannels();
+  });
+  const filterFreshBtn = document.getElementById('filter-fresh');
+  filterFreshBtn?.addEventListener('click', () => {
+    filterFreshOnly = !filterFreshOnly;
+    filterFreshBtn.classList.toggle('active', filterFreshOnly);
+    renderChannels();
+  });
+  setInterval(refreshActivityTimes, 60_000); // 只刷相对时间文本，不整页重渲染
 
   // P1.3: 获取 quota 按钮 + 60s ago tick
   const fetchBtn = document.getElementById('quota-fetch');
@@ -709,7 +886,13 @@ async function init(): Promise<void> {
     // 批3: model 改下拉——用 buildModelOptions 填充（含旧值兼容：当前值不在列表则补一项，selected 已标好）
     const dm = document.getElementById('default-model') as HTMLSelectElement;
     dm.innerHTML = buildModelOptions(s.default_model);
-    (document.getElementById('default-effort') as HTMLSelectElement).value = s.default_effort;
+    const de = document.getElementById('default-effort') as HTMLSelectElement;
+    // 已存值不在 EFFORT_OPTIONS 里时补一项（兼容旧持久化值，避免保存时被静默改成清单第一项）
+    const defaultEffortList = EFFORT_OPTIONS.includes(s.default_effort) || !s.default_effort
+      ? EFFORT_OPTIONS
+      : [s.default_effort, ...EFFORT_OPTIONS];
+    de.innerHTML = defaultEffortList.map((e) => `<option value="${escapeHtml(e)}">${escapeHtml(e)}</option>`).join('');
+    de.value = s.default_effort;
     const ndf = document.getElementById('default-fast') as HTMLInputElement | null;
     if (ndf) ndf.checked = !!s.default_fast;
     (document.getElementById('default-compact') as HTMLInputElement).value = String(s.default_compact_pct ?? 25);

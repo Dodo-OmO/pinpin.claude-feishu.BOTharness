@@ -3,7 +3,7 @@
 // 传 job_id = 取消该任务；不传 = 返当前 pending 任务清单文本（卡片版留阶段后续）
 
 import type { Tool } from "@modelcontextprotocol/sdk/types.js";
-import { cancelJob, listAllPendingJobs } from "../db/database.js";
+import { cancelJob, getJobById, listAllPendingJobs } from "../db/database.js";
 import { unscheduleJob } from "../cron/scheduled-jobs-tick.js";
 
 export const cancelScheduledTool: Tool = {
@@ -16,13 +16,23 @@ export const cancelScheduledTool: Tool = {
     type: "object",
     properties: {
       job_id: { type: "number", description: "要取消的任务 id（不传 = 列清单）" },
-      chat_id: { type: "string", description: "列清单时只列某 chat 的 pending；默认本频道" },
     },
   },
 };
 
-export async function handleCancelScheduled(args: { job_id?: number; chat_id?: string }) {
+export async function handleCancelScheduled(args: { job_id?: number }) {
   if (args.job_id !== undefined) {
+    const job = getJobById(args.job_id);
+    if (!job || job.chat_id !== process.env.PINPIN_CHAT_ID) {
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: JSON.stringify({ cancelled: false, job_id: args.job_id, reason: "job 不存在或不属于本频道" }),
+          },
+        ],
+      };
+    }
     const ok = cancelJob(args.job_id);
     if (ok) unscheduleJob(args.job_id);
     return {
@@ -34,8 +44,11 @@ export async function handleCancelScheduled(args: { job_id?: number; chat_id?: s
       ],
     };
   }
-  // 默认只列本频道，别把别的频道的 context_hint/payload 全库倒给当前会话
-  const pending = listAllPendingJobs(args.chat_id ?? process.env.PINPIN_CHAT_ID);
+  // 列清单固定只列本频道；拿不到本频道 id 时拒绝（listAllPendingJobs 传 undefined 会查全库）
+  if (!process.env.PINPIN_CHAT_ID) {
+    return { isError: true, content: [{ type: "text" as const, text: "拿不到本频道 id，无法列任务清单" }] };
+  }
+  const pending = listAllPendingJobs(process.env.PINPIN_CHAT_ID);
   return {
     content: [
       {

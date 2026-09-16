@@ -14,6 +14,8 @@ import { EventEmitter } from 'node:events';
 import fs from 'node:fs';
 import path from 'node:path';
 import { initFeishuClient, getFeishuClient } from './feishu-client.js';
+import { readApprovalDefinitions, subscribeApprovalDefinitions, approvalStatusZh } from './approval-subscribe.js';
+import type { ApprovalEventPayload, AttendanceEventPayload } from './feishu-event-subscriber.js';
 import { FeishuPoll, type ChatListDiff, type FeishuInboundMessage } from './feishu-poll.js';
 import { FeishuEventSubscriber, type PollActionValue } from './feishu-event-subscriber.js';
 import { type FeishuAppConfig, isChatAllowed } from './feishu-apps.js';
@@ -22,11 +24,14 @@ import { buildPollCard, buildApprovalCard, type ApprovalCardValue } from '../src
 import { RecurringTaskRunner } from './recurring-tasks.js';
 import { recurringTasksPath } from '../src/shared/recurring-tasks-store.js';
 import { feishuEmojiTypeToUnicode } from '../src/mcp/utils/feishu-emoji-map.js';
+import { safeName, pad2 } from '../src/mcp/utils/helper.js';
+import { logBackground } from '../src/mcp/utils/background-log.js';
 import { resolveSenderNameSync, resolveUserNameAsync } from './sender-resolver.js';
 import { initNameMapStore, seedNameMapIfAbsent, getAllMappings, setNameMapping, getHumanNameMapping } from '../src/shared/name-map-store.js';
 import { parseEnvMap } from '../src/shared/sender-shared.js';
 import { IpcServer } from './ipc-server.js';
 import { ChannelCli } from './channel-cli.js';
+import { WorkerCli, loadWorkersConfig, saveWorkersConfig, type WorkerStatus } from './worker-cli.js';
 import { ChannelConfigStore, DEFAULT_AUTOCOMPACT_PCT } from './channel-config-store.js';
 import { CcusagePoller, type QuotaSnapshot } from './ccusage-poller.js';
 import { SupervisorCronRunner } from './cron-runner.js';
@@ -42,7 +47,13 @@ import {
   type WardenLogEntry,
   type CompactViaPtyParams,
   type SpawnChannelParams,
+  type SpawnChannelResult,
   type StopChannelParams,
+  type DeleteChannelParams,
+  type DeleteChannelResult,
+  type SetPersonNameParams,
+  type WakeWorkerParams,
+  type WakeWorkerResult,
   type FeishuInboundMessagePayload,
   type PollVoteParams,
   type PollVoteResult,
@@ -51,6 +62,8 @@ import {
   type ChatSummary,
   type ListChatsResult,
   type PeerMessageParams,
+  type BroadcastParams,
+  type BroadcastResult,
   type PeerMessageResult,
 } from '../src/ipc/protocol.js';
 
@@ -113,6 +126,12 @@ export class Supervisor extends EventEmitter {
   private dailyMessageCount = new Map<string, number>();
   /** chat_id → ChannelCli */
   private channels = new Map<string, ChannelCli>();
+  /** 常驻工人（医生/工程师/顺子等）：name → WorkerCli。构造时读 workers.json 建实例，不自动拉起。 */
+  private workers = new Map<string, WorkerCli>();
+  /** 空闲巡检定时器（60s 一轮，检查工人是否空闲超 30 分钟） */
+  private workerIdleInterval: NodeJS.Timeout | null = null;
+  /** 工人告警节流：name → 最近一次告警时刻（同一工人 30 分钟内只告警一次） */
+  private workerAlertedAt = new Map<string, number>();
   /** D1: chat_id → 崩溃熔断计数（实例级，不随 spawnChannelCli 重建闭包清零；stopChannel 才删）。
    *  原为 spawnChannelCli 闭包局部 var，stop→respawn 会重建闭包跳过熔断；提到实例级使熔断跨 respawn 持续。 */
   private crashState = new Map<
@@ -122,15 +141,19 @@ export class Supervisor extends EventEmitter {
   /** D3: chat_id → IPC 断线自愈 grace 定时器。断线后等窗口；MCP 自身重连(client-hello)取消之，
    *  否则判定 CLI 僵尸（PTY 活但 MCP/IPC 死）→ 杀掉重生。 */
   private graceTimers = new Map<string, NodeJS.Timeout>();
+  /** applyChannelConfigLive 合并重启用的防抖定时器 */
+  private liveRestartTimers = new Map<string, NodeJS.Timeout>();
   /** 就绪看门狗：chat_id → spawn 后等首次 IPC hello 的定时器。90s（> MCP_TIMEOUT 60s + CLI 启动余量）
    *  未 hello = CLI 活着但 MCP 连接已被放弃（CLI 对超时 MCP 永不重试）→ 重启该频道自愈。
    *  与 graceTimers 互补：本表管"从未握手"，graceTimers 管"握手过后断线"。 */
   private helloWatchdogs = new Map<string, NodeJS.Timeout>();
   /** D2: chat_id → CLI 未就绪时缓冲的入站消息（带入队时间戳）。CLI ready（client-hello）后 flush 投递。
-   *  每 chat 上限 50 条（超丢最旧）、flush 时丢弃入队 > 10min 的过期消息。stopChannel 时清。 */
+   *  每 chat 上限 50 条（超丢最旧）、flush 时丢弃入队 > 30min 的过期消息。stopChannel 时清。 */
   private pendingInbound = new Map<string, Array<{ msg: FeishuInboundMessagePayload; enqueuedAt: number }>>();
   /** P1.3: chat_id → 最新 statusLine 推过来的上下文用量 */
   private channelUsage = new Map<string, ChannelUsageInfo>();
+  /** 启动器频道列表用：chat_id → 最后一次入站消息时刻（Date.now()，进程内、重启清零）。 */
+  private lastActivityAt = new Map<string, number>();
   /** P1.3: ccusage quota 最近一次手动获取 snapshot（删 5min poll 后改按需触发） */
   private lastQuotaSnapshot: QuotaSnapshot | null = null;
   /** 账号级额度（5h+7天，来自任一 CLI statusLine 的 rate_limits）；逐窗口存最新已知值，无数据为 null */
@@ -147,6 +170,8 @@ export class Supervisor extends EventEmitter {
     string,
     { id: string; chat_id: string; snippet: string; type: 'human' | 'bot'; ts: number }
   >();
+  /** 认不出私聊对象名字时的问名提示：已排过队的 chat_id（每进程每频道只问一次，防刷屏）。 */
+  private nameAskScheduled = new Set<string>();
   /** message_id → {chat_id, 发送者} 有界缓存（reaction 事件不带 chat_id 也不带"被点消息是谁发的"，
    *  靠它+API 反查：既路由到对应频道，又判断被点的是不是品品自己发的（决定文案口径）。
    *  onFeishuMessage 每条入站记一笔；>2000 删最老。品品自己发的消息不入站 → 反查走 API 兜底。 */
@@ -173,6 +198,15 @@ export class Supervisor extends EventEmitter {
       this.emit('quota', snap);
     });
     this.channelConfigStore = new ChannelConfigStore(this.opts.dataDir);
+    // 常驻工人：构造时读 workers.json 建 WorkerCli 实例，不自动拉起（品品 wake_worker 时才 start）
+    for (const cfg of loadWorkersConfig(this.opts.dataDir)) {
+      const w = new WorkerCli(cfg);
+      w.on('crashed', () => {
+        this.emit('channel-state-changed');
+        void this.notifyWorkerAlert(cfg.name, '进程意外退出');
+      });
+      this.workers.set(cfg.name, w);
+    }
     this.dbPath = path.join(this.opts.appRoot, 'data.db');
     // name-mappings.json 跟 channel-config.json 同源（dataDir = userData），两进程读、supervisor 写
     this.nameMapPath = path.join(this.opts.dataDir, 'name-mappings.json');
@@ -319,10 +353,10 @@ export class Supervisor extends EventEmitter {
       const spawnAppId = requesterChatId ? this.resolveAppId(requesterChatId) : undefined;
       if (p.is_p2p) {
         this.applyNewP2pDefault(p.chat_id, p.peer_open_id);
-        if (p.peer_open_id) void this.ensureP2pDisplayName(p.chat_id, p.peer_open_id, spawnAppId);
+        if (p.peer_open_id) await this.ensureP2pDisplayName(p.chat_id, p.peer_open_id, spawnAppId);
       }
       this.spawnChannelCli(p.chat_id, p.chat_name, spawnAppId);
-      return { ok: true } as WorkOkResult;
+      return { ok: true, chat_name: this.channelConfigStore.get(p.chat_id)?.display_name } as SpawnChannelResult;
     });
 
     // 多飞书应用：跨应用能力集中在 supervisor（子进程只有本 chat 所属应用的 client）
@@ -332,6 +366,55 @@ export class Supervisor extends EventEmitter {
     });
     // 频道间捎话：A 频道的品品不替 B 频道发言，把前因后果推给 B 频道的 CLI（trigger=peer-message），由那边的品品自己决定怎么说。
     // B 离线（睡眠 / 已 evict）→ 先拉起等 hello；两个飞书应用的频道都可互捎。
+    // 广播：一件事扇出给相关频道（接收端只更新认知、不外发，规矩在 jiuzhou-ops §13）
+    this.ipcServer.setRequestHandler(IPC_METHODS.BROADCAST, async (params, fromChatId) => {
+      const p = params as BroadcastParams;
+      const delivered: string[] = [];
+      const failed: string[] = [];
+      if (!p?.text) return { delivered, failed } as BroadcastResult;
+      // 硬阻断级联广播：接收端"不转播"目前只是 prompt 约束，模型偶尔失手原样转发会造成雪崩
+      // （参考同一批次审批订阅未设硬闸导致的刷屏事故）。同一 kind+text 10 分钟内只放行一次。
+      const dedupeKey = `${p.kind}|${p.text}`;
+      const now = Date.now();
+      const lastSent = this.recentBroadcasts.get(dedupeKey);
+      if (lastSent && now - lastSent < 10 * 60 * 1000) {
+        process.stderr.write(`[broadcast] 疑似级联/重复广播已丢弃: ${dedupeKey.slice(0, 60)}\n`);
+        return { delivered, failed } as BroadcastResult;
+      }
+      this.recentBroadcasts.set(dedupeKey, now);
+      if (this.recentBroadcasts.size > 200) {
+        this.recentBroadcasts.delete(this.recentBroadcasts.keys().next().value as string);
+      }
+      const all = (process.env.PINPIN_BROADCAST_CHAT_IDS ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+      const targets = (p.scope === 'all' ? all : (p.chat_ids ?? [])).filter((id) => id && id !== fromChatId);
+      const fromName = this.getChannelDisplayName(fromChatId);
+      const body =
+        `【广播·${p.kind}】来自「${fromName}」：${p.text}\n` +
+        `（只是让你知道。跟本频道无关就 pinpin_no_reply；有关就记住，等对方问起或你下次开口时用得上。` +
+        `不要因为这条广播主动在本频道发言，也不要再转播。）`;
+      // 各目标互不依赖：并行唤醒 + 投递，避免 scope=all 时挨个 await（每个冷频道最长等 15s，
+      // 9 个目标串行=最长 135s 才返回；并行后最长仍是单个 15s）。
+      await Promise.all(targets.map(async (chatId) => {
+        const targetApp = this.apps.get(this.resolveAppId(chatId));
+        const name = this.getChannelDisplayName(chatId);
+        if (!targetApp || !isChatAllowed(targetApp.cfg, chatId)) { failed.push(name); return; }
+        if (!(await this.ensureChannelReadyForEvent(chatId))) { failed.push(name); return; }
+        const ok = this.ipcServer.pushChatTrigger(chatId, body, {
+          user: `品品（${fromName}）`,
+          sender_type: 'system',
+          message_id: `broadcast-${Date.now()}-${chatId.slice(-6)}`,
+          trigger: 'broadcast',
+          kind: p.kind,
+          from_chat_id: fromChatId,
+        });
+        (ok ? delivered : failed).push(name);
+      }));
+      const stamp = new Date().toLocaleString('zh-CN', { hour12: false });
+      this.appendBroadcastLedger(`${stamp}｜${p.kind}｜${fromName}｜${p.text}｜→ ${delivered.join('、') || '无'}`);
+      process.stderr.write(`[broadcast] ${p.kind} from=${fromName} → ${delivered.length} 成功 / ${failed.length} 失败\n`);
+      return { delivered, failed } as BroadcastResult;
+    });
+
     this.ipcServer.setRequestHandler(IPC_METHODS.PEER_MESSAGE, async (params, fromChatId) => {
       const p = params as PeerMessageParams;
       if (!p.chat_id || !p.text) return { ok: false, error: 'missing chat_id/text' } as PeerMessageResult;
@@ -371,6 +454,35 @@ export class Supervisor extends EventEmitter {
       return { ok } as WorkOkResult;
     });
 
+    // 彻底删除频道（delete_channel tool）：群→自建解散/否则退群，私聊→只清本地
+    this.ipcServer.setRequestHandler(IPC_METHODS.DELETE_CHANNEL, async (params) => {
+      return this.deleteChannel(params as DeleteChannelParams);
+    });
+
+    // 记人名（set_person_name tool）：写认人表 + 私聊无名时补显示名
+    this.ipcServer.setRequestHandler(IPC_METHODS.SET_PERSON_NAME, async (params) => {
+      const p = params as SetPersonNameParams;
+      if (!p.open_id || !p.name) return { ok: false, error: 'missing open_id/name' } as WorkOkResult;
+      setNameMapping('human', p.open_id, p.name);
+      if (p.chat_id) {
+        const persisted = this.channelConfigStore.get(p.chat_id)?.display_name;
+        if (!persisted || persisted.includes('ou_')) {
+          const displayName = `VS ${p.name}（私聊）`;
+          this.channelConfigStore.set(p.chat_id, { display_name: displayName });
+          this.channels.get(p.chat_id)?.setChatName(displayName);
+          this.emit('channel-state-changed', p.chat_id);
+        }
+      }
+      return { ok: true } as WorkOkResult;
+    });
+
+    // 叫醒常驻工人会话（wake_worker tool）
+    this.ipcServer.setRequestHandler(IPC_METHODS.WAKE_WORKER, async (params) => {
+      const p = params as WakeWorkerParams;
+      if (!p?.name) return { ok: false, error: 'missing name' } as WakeWorkerResult;
+      return this.wakeWorker(p.name);
+    });
+
     // ── 3+4+4.5 多飞书应用：每个 app 各自 init client + FeishuPoll + FeishuEventSubscriber ──
     // poll 与 WS 双轨并存不能动：飞书 chat.list 不返 P2P + 事件订阅不推 bot 消息 = 平台约束必然
     for (const cfg of this.opts.apps) {
@@ -396,6 +508,9 @@ export class Supervisor extends EventEmitter {
         onReaction: (evt) => this.onReaction(evt, cfg.appId),
         onBotAdded: (evt) => this.onBotAdded(evt, cfg.appId),
         onComment: (evt) => this.onComment(evt),
+        onApprovalEvent: (evt) => this.onApprovalEvent(evt, cfg.appId),
+        onP2pEntered: (chatId, openId) => this.onP2pEntered(chatId, openId, cfg.appId),
+        onAttendanceEvent: (evt) => this.onAttendanceEvent(evt, cfg.appId),
       });
       try {
         await subscriber.start();
@@ -407,6 +522,20 @@ export class Supervisor extends EventEmitter {
       }
 
       this.apps.set(cfg.appId, { cfg, poll, subscriber });
+    }
+
+    // 审批事件只推已订阅的定义：豆姐私聊所属应用按 vault 清单逐个订阅（幂等）。
+    // 必须等所有 app 都进 this.apps 之后再解析归属——在上面的 for 循环里解析时 apps 还没齐，
+    // resolveAppId 会回落 primary，结果拿「个人」应用去订Client的审批定义，全部报 approval code not found。
+    const ownerAppId = this.resolveAppId(process.env.PINPIN_OWNER_CHAT_ID ?? '');
+    const ownerApp = this.apps.get(ownerAppId);
+    if (ownerApp) {
+      const defs = readApprovalDefinitions(this.opts.vaultCwd);
+      if (defs.length) {
+        void subscribeApprovalDefinitions(getFeishuClient(ownerAppId), defs).then((n) =>
+          process.stderr.write(`[approval] app=${ownerApp.cfg.label} 订阅审批定义 ${n}/${defs.length}\n`),
+        );
+      }
     }
 
     // ── 5. 已识别的所有 chat 自动 spawn 频道 CLI（启动器一打开即全部上线）──
@@ -429,6 +558,8 @@ export class Supervisor extends EventEmitter {
       if (!bridgeToken) throw new Error('无口令');
       this.wardenBridge = await createWardenBridge({
         getChannels: () => this.channels,
+        getDisplayChannels: () => this.getDisplayChannels(),
+        applyChannelConfigLive: (chatId, patch) => this.applyChannelConfigLive(chatId, patch),
         getSystemInfo: (): WardenSystemInfo => ({
           channel_count: this.channels.size,
           rate_limits: this.lastRateLimits,
@@ -482,6 +613,7 @@ export class Supervisor extends EventEmitter {
         humans: () => getAllMappings().humans,
         ownerOpenIds: () => this.opts.apps.map((a) => a.ownerOpenId).filter((id): id is string => !!id),
         ownerChatId: () => process.env.PINPIN_OWNER_CHAT_ID,
+        notifyOwner: (chatId, text) => this.notifyOwnerDm(chatId, text),
       });
       try {
         await relay.start();
@@ -492,6 +624,9 @@ export class Supervisor extends EventEmitter {
         process.stderr.write(`[supervisor] relay-bridge 启动失败（不影响品品主功能）: ${e instanceof Error ? e.message : e}\n`);
       }
     }
+
+    // ── 5.7 常驻工人空闲巡检（60s 一轮；awake 超 30min 无输出 + transcript 也早于 30min → stop）──
+    this.workerIdleInterval = setInterval(() => this.checkWorkersIdle(), 60_000);
 
     // ── 6. ccusage poller (P1.3 改：Owner要求不轮询，删 5min interval；改按需 fetchQuotaNow 触发) ──
     // 不再自动 start interval；用户从 footer "获取 quota" 按钮触发 fetchQuotaNow()
@@ -514,9 +649,19 @@ export class Supervisor extends EventEmitter {
     // 或 Electron 抢着退出，taskkill /F /T 也已先发，绝不留孤儿 claude.exe / MCP server）。
     for (const cli of this.channels.values()) cli.stop();
     this.channels.clear();
+    for (const w of this.workers.values()) w.stop();
+    if (this.workerIdleInterval) {
+      clearInterval(this.workerIdleInterval);
+      this.workerIdleInterval = null;
+    }
     // 清所有就绪看门狗（restart() 复用实例，防 stale 定时器带旧 cli 引用晚触发）
     for (const t of this.helloWatchdogs.values()) clearTimeout(t);
     this.helloWatchdogs.clear();
+    // 清所有断线自愈 grace 定时器（同理防 stale 定时器晚触发误杀新 CLI）
+    for (const t of this.graceTimers.values()) clearTimeout(t);
+    this.graceTimers.clear();
+    for (const t of this.liveRestartTimers.values()) clearTimeout(t);
+    this.liveRestartTimers.clear();
     this.cronRunner.stop();
     this.recurringTaskRunner.stop();
     await this.ccusagePoller.stop();
@@ -603,6 +748,22 @@ export class Supervisor extends EventEmitter {
       process.stderr.write(
         `[supervisor] 下线通知发送失败 chat=${chatId.slice(-8)}: ${e instanceof Error ? e.message : e}\n`,
       );
+    }
+  }
+
+  /** 广播反级联去重：kind+text → 最近发出时间，防同一条内容被原样转播成雪崩（见 BROADCAST handler）。 */
+  private recentBroadcasts = new Map<string, number>();
+
+  /** 广播底账：一行一条追加到 vault `Client\广播板.md`，只留最近 200 条（重启后能回看，不占上下文）。 */
+  private appendBroadcastLedger(line: string): void {
+    try {
+      const file = path.join(this.opts.vaultCwd, 'Client', '广播板.md');
+      const head = '# 广播板\n\n<!-- 各频道品品的广播底账，supervisor 自动追加，只留最近 200 条。找历史看这里，别问别的频道。 -->\n\n';
+      const prev = fs.existsSync(file) ? fs.readFileSync(file, 'utf8') : head;
+      const kept = prev.split('\n').filter((l) => l.startsWith('- ')).slice(-199);
+      fs.writeFileSync(file, head + [...kept, `- ${line}`].join('\n') + '\n', 'utf8');
+    } catch (e) {
+      process.stderr.write(`[broadcast] 广播板写入失败: ${e instanceof Error ? e.message : e}\n`);
     }
   }
 
@@ -815,13 +976,23 @@ export class Supervisor extends EventEmitter {
     return [...this.channels.values()].map((c) => c.getStats());
   }
 
+  /** 该 chat 归属飞书应用的 label（供启动器频道列表分组；resolveAppId 命不中时回落 primary，仍能拿到某个 label）。 */
+  private appLabelFor(chatId: string): string | undefined {
+    return this.apps.get(this.resolveAppId(chatId))?.cfg.label;
+  }
+
   /** 启动器「展示用」频道列表 = 已 spawn 的真实状态 + 已识别但未 spawn（如待机）的合成"停止卡"。 */
-  getDisplayChannels(): Array<ReturnType<ChannelCli['getStats']>> {
+  getDisplayChannels(): Array<
+    ReturnType<ChannelCli['getStats']> & { app_label?: string; last_activity_at?: number; pending_count?: number }
+  > {
     // 盖 standby 戳：已 spawn 的（含被消息唤醒、当前 running 的睡眠频道）从 configStore 读，
     // 让卡片即使 running 也显示"睡眠"徽章（renderChannelCard 渲染，提示归属睡眠：4 点重启不上线、靠消息唤醒）。
     const spawned = this.getChannelCliStats().map((s) => ({
       ...s,
       standby: this.channelConfigStore.isStandby(s.chat_id),
+      app_label: this.appLabelFor(s.chat_id),
+      last_activity_at: this.lastActivityAt.get(s.chat_id),
+      pending_count: this.pendingInbound.get(s.chat_id)?.length ?? 0,
     }));
     const seen = new Set(spawned.map((c) => c.chat_id));
     const out = [...spawned];
@@ -845,6 +1016,9 @@ export class Supervisor extends EventEmitter {
         fast: persisted?.fast ?? this.opts.defaultFast ?? false,
         session_id: undefined,
         standby: this.channelConfigStore.isStandby(chatId),
+        app_label: this.appLabelFor(chatId),
+        last_activity_at: this.lastActivityAt.get(chatId),
+        pending_count: this.pendingInbound.get(chatId)?.length ?? 0,
       });
     }
     return out;
@@ -1161,6 +1335,24 @@ export class Supervisor extends EventEmitter {
     this.emit('channel-state-changed');
   }
 
+  /** 改模型/effort/压缩/fast 后「续接重启」立即生效：写配置 + 若该频道正在跑（running/starting）
+   *  则 reload 进 opts 后 --resume 接回原对话（非"重启清零"），而不是等Owner手动重启。 */
+  applyChannelConfigLive(chatId: string, patch: { model?: string; effort?: string; autoCompactPct?: number; fast?: boolean }): void {
+    this.setChannelConfig(chatId, patch);
+    // 弹窗里连着改几项只重启一次：1.5s 内的后续改动合并
+    const prev = this.liveRestartTimers.get(chatId);
+    if (prev) clearTimeout(prev);
+    this.liveRestartTimers.set(chatId, setTimeout(() => {
+      this.liveRestartTimers.delete(chatId);
+      const cli = this.channels.get(chatId);
+      if (cli && (cli.status === 'running' || cli.status === 'starting')) {
+        this.reloadChannelConfigInto(chatId);
+        cli.restart({ resume: true });
+      }
+    }, 1500));
+    this.emit('channel-state-changed', chatId);
+  }
+
   /** P1.2: restart 前 reload persisted 进 channel-cli.opts，避免切完配置后 restart 仍用旧 opts */
   reloadChannelConfigInto(chatId: string): void {
     const persisted = this.channelConfigStore.get(chatId);
@@ -1205,13 +1397,14 @@ export class Supervisor extends EventEmitter {
     );
   }
 
-  /** D2: CLI ready（client-hello）后 flush 该 chat 缓冲队列：丢弃入队 > 10min 的过期消息，其余重走 push 路径。 */
+  /** D2: CLI ready（client-hello）后 flush 该 chat 缓冲队列：丢弃入队 > 30min 的过期消息，其余重走 push 路径。 */
   private flushPendingInbound(chatId: string): void {
     const queue = this.pendingInbound.get(chatId);
     if (!queue || queue.length === 0) return;
     this.pendingInbound.delete(chatId);
     const now = Date.now();
-    const TTL = 10 * 60_000;
+    // 30 分钟：覆盖每日 03:55–04:10 停机重启窗口，窗口内积压的消息不被判过期丢弃
+    const TTL = 30 * 60_000;
     let delivered = 0;
     let expired = 0;
     for (const item of queue) {
@@ -1263,7 +1456,19 @@ export class Supervisor extends EventEmitter {
       );
       if (msg.is_p2p) {
         this.applyNewP2pDefault(msg.chat_id, msg.sender_open_id);
-        void this.ensureP2pDisplayName(msg.chat_id, msg.sender_open_id, msg.app_id);
+        void this.ensureP2pDisplayName(msg.chat_id, msg.sender_open_id, msg.app_id).then((found) => {
+          // 查不到名字 → 30s 后若仍未补上，提醒品品礼貌问一句（每进程每频道只问一次）
+          if (found || this.nameAskScheduled.has(msg.chat_id)) return;
+          this.nameAskScheduled.add(msg.chat_id);
+          setTimeout(() => {
+            if (this.channelConfigStore.get(msg.chat_id)?.display_name) return; // 期间已补上
+            this.ipcServer.pushChatTrigger(
+              msg.chat_id,
+              `【系统】还没认出这位私聊对象的名字（open_id=${msg.sender_open_id}）。找个自然的时机礼貌问一句怎么称呼，问到后调 set_person_name 记下。`,
+              { user: '系统', sender_type: 'system', message_id: `name-ask-${msg.chat_id}`, trigger: 'name-ask' },
+            );
+          }, 30_000);
+        });
       }
       this.spawnChannelCli(msg.chat_id, guessName, msg.app_id);
     }
@@ -1284,7 +1489,8 @@ export class Supervisor extends EventEmitter {
     {
       const isBot = msg.sender_type === 'app';
       const resolved = resolveSenderNameSync(msg.sender_open_id, msg.sender_type, msg.app_id);
-      if (resolved === msg.sender_open_id.slice(-8)) {
+      // 机器人（sender_type=app，如飞书智能纪要助手）不进待命名，只给人补名字
+      if (!isBot && resolved === msg.sender_open_id.slice(-8)) {
         this.pendingNames.set(msg.sender_open_id, {
           id: msg.sender_open_id,
           chat_id: msg.chat_id,
@@ -1351,6 +1557,10 @@ export class Supervisor extends EventEmitter {
       // + poll cursor 已推进，下轮不会重发）→ 新群/CLI 未就绪首条消息永久丢失。
       this.enqueuePendingInbound(msg.chat_id, payload);
     }
+    // 启动器频道列表"最后活动"用；channel-state-changed 已有 100ms 防抖在 main.ts pushState 侧，
+    // 高频入站不会导致 renderer 被刷爆。
+    this.lastActivityAt.set(msg.chat_id, Date.now());
+    this.emit('channel-state-changed', msg.chat_id);
     this.emit('feishu-message', msg);
   }
 
@@ -1536,28 +1746,51 @@ export class Supervisor extends EventEmitter {
    */
   private applyNewP2pDefault(chatId: string, peerOpenId?: string): void {
     if (chatId === process.env.PINPIN_OWNER_CHAT_ID || this.channelConfigStore.get(chatId)) return;
-    const alwaysOn = (process.env.PINPIN_P2P_ALWAYS_ON_OPEN_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
-    if (peerOpenId && alwaysOn.includes(peerOpenId)) return;
+    if (peerOpenId && this.alwaysOnOpenIds().includes(peerOpenId)) return;
     this.channelConfigStore.setStandby(chatId, true);
     process.stderr.write(`[supervisor] 新私聊 ${chatId.slice(-8)} 默认睡眠（peer=${peerOpenId?.slice(-6) ?? '?'}）\n`);
+  }
+
+  /** 常驻私聊豁免名单（env PINPIN_P2P_ALWAYS_ON_OPEN_IDS，CSV open_id）。applyNewP2pDefault / onP2pEntered 共用。 */
+  private alwaysOnOpenIds(): string[] {
+    return (process.env.PINPIN_P2P_ALWAYS_ON_OPEN_IDS ?? '').split(',').map((s) => s.trim()).filter(Boolean);
   }
 
   /**
    * 新私聊自动落显示名 `VS <全名>（私聊）`：全名按 认人表 → env → 飞书通讯录 API 反查；查到的同时写进认人表，
    * 让对话记录目录用同一个名字。查不到（应用无权限）→ 不落，留给启动器"待命名"。
    */
-  private async ensureP2pDisplayName(chatId: string, peerOpenId: string, appId?: string): Promise<void> {
-    if (chatId === process.env.PINPIN_OWNER_CHAT_ID || this.channelConfigStore.get(chatId)?.display_name) return;
+  /** 返回 true = 已有名（含刚查到落盘）；false = 查不到，需靠 set_person_name 补（onFeishuMessage 据此推问名提示）。 */
+  private async ensureP2pDisplayName(chatId: string, peerOpenId: string, appId?: string): Promise<boolean> {
+    if (chatId === process.env.PINPIN_OWNER_CHAT_ID || this.channelConfigStore.get(chatId)?.display_name) return true;
     try {
       const name = await resolveUserNameAsync(peerOpenId, appId);
-      if (!name) return;
+      if (!name) return false;
       if (!getHumanNameMapping(peerOpenId)) setNameMapping('human', peerOpenId, name);
       this.channelConfigStore.set(chatId, { display_name: `VS ${name}（私聊）` });
       this.channels.get(chatId)?.setChatName(`VS ${name}（私聊）`);
       process.stderr.write(`[supervisor] 私聊 ${chatId.slice(-8)} 显示名 → VS ${name}（私聊）\n`);
+      return true;
     } catch (e) {
       process.stderr.write(`[supervisor] ensureP2pDisplayName 失败 ${chatId.slice(-8)}: ${e instanceof Error ? e.message : e}\n`);
+      return false;
     }
+  }
+
+  /**
+   * 品品打开的私聊被对方"进入会话"（bot_p2p_chat_entered_v1，无消息内容，纯打开动作）。
+   * 仅常驻豁免名单里的人打开会话才建频道（普通人只打开不说话不建，等他发消息才走热路径）；
+   * 已有配置或已 spawn 的不重复处理。不推任何 trigger、不发任何消息——纯静默挂号。
+   */
+  private async onP2pEntered(chatId: string, openId: string, appId: string): Promise<void> {
+    if (this.channelConfigStore.get(chatId) || this.channels.has(chatId)) return;
+    if (!this.alwaysOnOpenIds().includes(openId)) return;
+    const appEntry = this.apps.get(appId);
+    if (!appEntry || !isChatAllowed(appEntry.cfg, chatId)) return;
+    this.applyNewP2pDefault(chatId, openId); // 常驻豁免名单命中 → 不会被设为睡眠
+    this.spawnChannelCli(chatId, undefined, appId);
+    void this.ensureP2pDisplayName(chatId, openId, appId);
+    process.stderr.write(`[supervisor] 常驻私聊 ${chatId.slice(-8)} 打开会话 → 自动挂号（peer=${openId.slice(-6)}）\n`);
   }
 
   /** 事件投递前确保目标频道 CLI 就绪（find-or-spawn + 等 hello，仿 onPollAction 离线兜底） */
@@ -1617,6 +1850,12 @@ export class Supervisor extends EventEmitter {
       const res = await getFeishuClient(appId).im.v1.chat.get({ path: { chat_id: chatId } });
       chatName = res.data?.name;
     } catch { /* 拿不到群名不影响打招呼 */ }
+    // 落群名：首次拉进的群若还没 display_name，用飞书群名补上（认名补强，2026-09-16）
+    if (chatName && !this.channelConfigStore.get(chatId)?.display_name) {
+      this.channelConfigStore.set(chatId, { display_name: chatName });
+      this.channels.get(chatId)?.setChatName(chatName);
+      this.emit('channel-state-changed', chatId);
+    }
     const body = `【系统】我刚被拉进这个群${chatName ? `「${chatName}」` : ''}。要不要打个招呼 / 做个自我介绍，你看情况决定。`;
     this.ipcServer.pushChatTrigger(chatId, body, {
       user: '系统',
@@ -1627,6 +1866,158 @@ export class Supervisor extends EventEmitter {
   }
 
   /** 云文档评论 → 投到兜底频道（PINPIN_COMMENT_CHAT_ID ?? 主聊 PINPIN_OWNER_CHAT_ID）。评论正文未取。 */
+  /** 已推过的审批动态（instance:kind:status:task），防同一事件重复推；上限 500 条滚动 */
+  /** 本进程启动时刻：审批事件的历史补推按它掐掉 */
+  private readonly startedAt = Date.now();
+  private approvalSeen = new Set<string>();
+  /** 已推过的打卡事件（record_id），防重复推；上限 300 条滚动 */
+  private attendanceSeen = new Set<string>();
+
+  /**
+   * 打卡事件（实测用最小链路）→ 豆姐私聊 trigger。只推白名单里的人，早于 supervisor 启动的丢弃，按 record_id 去重。
+   * 每条（含被丢弃的）都先写后台账本，供实测复盘。晚间加班提醒仍按每小时轮询，本链路只作记录。
+   */
+  private async onAttendanceEvent(evt: AttendanceEventPayload, appId: string): Promise<void> {
+    const dmChatId = process.env.PINPIN_OWNER_CHAT_ID;
+    const logKey = `employee_id=${evt.employee_id} check_time=${evt.check_time} record_id=${evt.record_id ?? '无'}`;
+    if (!dmChatId || this.resolveAppId(dmChatId) !== appId) {
+      logBackground('attendance', `${logKey} app=${appId} 结果=非豆姐私聊所属应用`);
+      return;
+    }
+    const allow = (process.env.PINPIN_ATTENDANCE_EMPLOYEE_IDS ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+    if (!allow.includes(evt.employee_id)) {
+      logBackground('attendance', `${logKey} 结果=非白名单`);
+      return;
+    }
+    const checkAtMs = Number(evt.check_time) * 1000;
+    if (checkAtMs && checkAtMs < this.startedAt) {
+      logBackground('attendance', `${logKey} 结果=早于启动`);
+      return;
+    }
+    const key = evt.record_id ?? `${evt.employee_id}:${evt.check_time}`;
+    if (this.attendanceSeen.has(key)) {
+      logBackground('attendance', `${logKey} 结果=重复`);
+      return;
+    }
+    this.attendanceSeen.add(key);
+    if (this.attendanceSeen.size > 300) this.attendanceSeen.delete(this.attendanceSeen.values().next().value as string);
+    logBackground('attendance', `${logKey} 结果=推送`);
+    const at = new Date(checkAtMs);
+    const hhmm = `${String(at.getHours()).padStart(2, '0')}:${String(at.getMinutes()).padStart(2, '0')}`;
+    const body =
+      `⏰ 打卡事件（实测中）：豆姐 ${hhmm} 打卡${evt.location_name ? `（${evt.location_name}）` : ''}。` +
+      `晚间加班提醒仍按每小时轮询，本条只作记录，不用回豆姐（pinpin_no_reply）。`;
+    if (!(await this.ensureChannelReadyForEvent(dmChatId, appId))) return;
+    this.ipcServer.pushChatTrigger(dmChatId, body, {
+      user: '系统',
+      sender_type: 'system',
+      message_id: `attendance-${key}`,
+      trigger: 'attendance-event',
+      employee_id: evt.employee_id,
+      check_time: evt.check_time,
+      record_id: evt.record_id ?? '',
+    });
+  }
+
+  /**
+   * 审批实例 / 任务状态变更 → 拉实例详情（审批名 / 申请人 / 状态 / 表单要点）→ 推 trigger=approval-event 到Owner私聊。
+   * 只推Owner私聊所属应用的事件；申请人不在认人表的也推（由品品按"豆姐+组员"口径决定说不说）。
+   */
+  private async onApprovalEvent(evt: ApprovalEventPayload, appId: string): Promise<void> {
+    const dmChatId = process.env.PINPIN_OWNER_CHAT_ID;
+    if (!dmChatId || this.resolveAppId(dmChatId) !== appId) return;
+    // 飞书在订阅建立时会把历史变更一起灌过来（实测 30+ 条三天前的旧审批，且 PENDING/APPROVED 乱序）。
+    // 只认本进程起来之后发生的变更：早于启动时间的一律丢。
+    const opMs = Number(evt.operate_time ?? 0);
+    const opAt = opMs > 1e12 ? opMs : opMs * 1000; // 秒/毫秒都可能
+    if (opAt && opAt < this.startedAt - 60_000) return;
+    const key = `${evt.instance_code}:${evt.kind}:${evt.status}:${evt.task_id ?? ''}`;
+    if (this.approvalSeen.has(key)) return;
+    this.approvalSeen.add(key);
+    if (this.approvalSeen.size > 500) this.approvalSeen.delete(this.approvalSeen.values().next().value as string);
+    try {
+      const res = await getFeishuClient(appId).approval.v4.instance.get({
+        path: { instance_id: evt.instance_code },
+        params: { user_id_type: 'open_id' },
+      });
+      const inst = res.data;
+      if (!inst) return;
+      // 全公司的审批流都会推过来（郑州各部门），只留跟豆姐这一组有关的：
+      // 申请人是她或她的组员，或者轮到她审批。其余直接丢，不烧频道 token。
+      // fail-closed：PINPIN_APPROVAL_WATCH_OPEN_IDS 缺失/清空时不放行全部——这行环境变量本身就是
+      // 今天全租户审批灌爆事故的止血闸，缺配置不该悄悄退回未过滤状态（"轮到豆姐审批"这条件不受此开关影响，照常放行）。
+      const watch = (process.env.PINPIN_APPROVAL_WATCH_OPEN_IDS ?? '').split(',').map((x) => x.trim()).filter(Boolean);
+      if (watch.length === 0) {
+        process.stderr.write('[approval] ⚠️ PINPIN_APPROVAL_WATCH_OPEN_IDS 未配置，仅按"轮到豆姐审批"过滤（申请人相关性无法判断）\n');
+      }
+      const ownerOpenId = this.apps.get(appId)?.cfg.ownerOpenId;
+      const isOurs = (watch.length > 0 && !!inst.open_id && watch.includes(inst.open_id))
+        || (ownerOpenId ? (inst.task_list ?? []).some((t) => t.open_id === ownerOpenId) : false);
+      if (!isOurs) return;
+      const applicant = resolveSenderNameSync(inst.open_id, 'user', appId);
+      let formLines = '';
+      try {
+        const form = JSON.parse(inst.form) as Array<{ name?: string; value?: unknown }>;
+        formLines = form
+          .filter((f) => f.name && f.value !== undefined && f.value !== null && f.value !== '')
+          .slice(0, 5)
+          .map((f) => `${f.name}：${String(typeof f.value === 'object' ? JSON.stringify(f.value) : f.value).slice(0, 60)}`)
+          .join('｜');
+      } catch { /* 表单解析失败就不带要点 */ }
+      const operator = evt.kind === 'task' && evt.open_id ? resolveSenderNameSync(evt.open_id, 'user', appId) : '';
+      // 自动秒审批（Owner口径）：只对「下属提交、轮到Owner审」的加班申请自动同意；其它一律只推送
+      const auto = await this.maybeAutoApproveOvertime(evt, inst, appId);
+      const body =
+        (auto ? `✅ 已自动同意 ${applicant} 的加班申请（${inst.approval_name}，编号 ${inst.serial_number}）${formLines ? `｜${formLines}` : ''}\n用一句话告诉豆姐即可。\n` : '') +
+        `📋 审批动态：「${inst.approval_name}」｜申请人 ${applicant}｜${evt.kind === 'task' ? `节点 ${approvalStatusZh(evt.status)}${operator ? `（${operator}）` : ''}` : `实例 ${approvalStatusZh(evt.status)}`}｜整体 ${approvalStatusZh(inst.status)}｜编号 ${inst.serial_number}\n` +
+        (formLines ? `要点：${formLines}\n` : '') +
+        `按「豆姐 + 组员」口径：是他们的就用一句话告诉豆姐（谁、什么审批、到哪一步）；豆姐自己是待审批人的说"待你审批"；无关的人 pinpin_no_reply。`;
+      if (!(await this.ensureChannelReadyForEvent(dmChatId, appId))) return;
+      this.ipcServer.pushChatTrigger(dmChatId, body, {
+        user: '系统',
+        sender_type: 'system',
+        message_id: `approval-event-${evt.instance_code}-${evt.status}-${evt.task_id ?? 'i'}`,
+        trigger: 'approval-event',
+        approval_code: evt.approval_code,
+        instance_code: evt.instance_code,
+        status: evt.status,
+        applicant_open_id: inst.open_id,
+      });
+    } catch (e) {
+      process.stderr.write(`[approval] 实例 ${evt.instance_code.slice(0, 12)}… 详情失败: ${e instanceof Error ? e.message : e}\n`);
+    }
+  }
+
+  /**
+   * 自动秒审批：evt 是 task 待办 + 审批定义 = 加班（env PINPIN_OVERTIME_APPROVAL_CODE，缺省按名含"加班"）
+   * + 申请人 ∈ PINPIN_AUTO_APPROVE_OVERTIME_FROM（下属）+ 该 task 的审批人是Owner且 PENDING → 以Owner身份同意。返回是否同意了。
+   */
+  private async maybeAutoApproveOvertime(
+    evt: ApprovalEventPayload,
+    inst: { approval_name: string; open_id: string; task_list: Array<{ id: string; open_id?: string; status: string }> },
+    appId: string,
+  ): Promise<boolean> {
+    if (evt.kind !== 'task' || evt.status !== 'PENDING' || !evt.task_id) return false;
+    const from = (process.env.PINPIN_AUTO_APPROVE_OVERTIME_FROM ?? '').split(',').map((s) => s.trim()).filter(Boolean);
+    if (!from.includes(inst.open_id)) return false;
+    const code = process.env.PINPIN_OVERTIME_APPROVAL_CODE;
+    if (code ? evt.approval_code !== code : !inst.approval_name.includes('加班')) return false;
+    const owner = this.apps.get(appId)?.cfg.ownerOpenId;
+    const task = inst.task_list.find((t) => t.id === evt.task_id);
+    if (!owner || !task || task.open_id !== owner || task.status !== 'PENDING') return false;
+    try {
+      await getFeishuClient(appId).approval.v4.task.approve({
+        params: { user_id_type: 'open_id' },
+        data: { approval_code: evt.approval_code, instance_code: evt.instance_code, user_id: owner, task_id: evt.task_id, comment: '同意（品品代豆姐自动审批）' },
+      });
+      process.stderr.write(`[approval] 自动同意加班 instance=${evt.instance_code.slice(0, 12)}… 申请人=${inst.open_id.slice(-6)}\n`);
+      return true;
+    } catch (e) {
+      process.stderr.write(`[approval] 自动同意失败 ${evt.instance_code.slice(0, 12)}…: ${e instanceof Error ? e.message : e}\n`);
+      return false;
+    }
+  }
+
   private async onComment(evt: CommentEvent): Promise<void> {
     const targetChatId = process.env.PINPIN_COMMENT_CHAT_ID || process.env.PINPIN_OWNER_CHAT_ID;
     if (!targetChatId) {
@@ -1656,7 +2047,7 @@ export class Supervisor extends EventEmitter {
     }
     // 频道常驻语义（2026-05-28）：飞书 chat.list 返回 removed 不再主动 stop CLI——
     // 被踢/解散事件靠飞书 SDK 可能短时抖动（chat.list 拉空），误判 stop 会导致 CLI 反复重启。
-    // 真要"停频道"走 disband_group → STOP_CHANNEL → stopChannel()。
+    // 真要"停频道"走 delete_channel → STOP_CHANNEL → stopChannel()。
     for (const removed of diff.removed) {
       process.stderr.write(
         `[supervisor] chat.list 不再返回此 chat（可能短时抖动 / 群解散），保持常驻 CLI: ${removed.name ?? removed.chat_id}\n`,
@@ -1665,8 +2056,128 @@ export class Supervisor extends EventEmitter {
     this.emit('chat-list-diff', diff);
   }
 
+  /** 挪动文件/目录（先 renameSync，跨盘失败则 cpSync+rmSync 兜底）。 */
+  private moveFileOrDir(src: string, dest: string): void {
+    try {
+      fs.renameSync(src, dest);
+    } catch {
+      fs.cpSync(src, dest, { recursive: true });
+      fs.rmSync(src, { recursive: true, force: true });
+    }
+  }
+
   /**
-   * 解散群后停该频道 CLI（disband_group → STOP_CHANNEL）。
+   * 彻底删除频道（delete_channel tool → DELETE_CHANNEL）：
+   *   1. confirm_name 二次核对（去空格全等），对不上直接拒绝
+   *   2. 群 → disband 解散（品品自建）或退群（chatMembers.delete 移除自己）；飞书报错则中止，不继续清理
+   *      p2p → 不碰飞书，只清本地
+   *   3. stopChannel（停 CLI + 删配置 + 清熔断/待就绪/待投递状态）
+   *   4. 归档：频道简报 / 对话记录 挪进 vault「归档」子目录；人物注入映射删该 chat_id key
+   *   各步异常只记 stderr、不中断（归档失败不该让已完成的解散/清配置回滚）。
+   */
+  private async deleteChannel(p: DeleteChannelParams): Promise<DeleteChannelResult> {
+    if (p.chat_id === process.env.PINPIN_OWNER_CHAT_ID) {
+      return { ok: false, error: '豆姐私聊是主频道，不能删除' };
+    }
+    const persisted = this.channelConfigStore.get(p.chat_id);
+    if (!this.channels.has(p.chat_id) && !persisted) {
+      return { ok: false, error: '没有这个频道' };
+    }
+    const name = persisted?.display_name ?? p.chat_id;
+    const normalize = (s: string) => s.replace(/\s/g, '');
+    // 启动器显示名与飞书群名（list_active_chats 给的）都认
+    const feishuName = this.allChats().find((c) => c.chat_id === p.chat_id)?.name;
+    const accepted = [name, feishuName].filter((x): x is string => !!x).map(normalize);
+    if (!accepted.includes(normalize(p.confirm_name))) {
+      return { ok: false, error: `名字对不上：这个频道叫「${name}」${feishuName && feishuName !== name ? `（飞书群名「${feishuName}」）` : ''}` };
+    }
+    const appId = this.resolveAppId(p.chat_id);
+    const client = getFeishuClient(appId);
+    let kind: 'group' | 'p2p';
+    try {
+      const res = await client.im.v1.chat.get({ path: { chat_id: p.chat_id } });
+      kind = res.data?.chat_mode === 'p2p' ? 'p2p' : 'group';
+    } catch {
+      // chat.get 失败（如已不在群/权限问题）→ 按显示名后缀兜底判断
+      kind = name.endsWith('（私聊）') ? 'p2p' : 'group';
+    }
+    if (kind === 'group') {
+      try {
+        if (p.disband) {
+          await client.im.v1.chat.delete({ path: { chat_id: p.chat_id } });
+        } else {
+          await client.im.v1.chatMembers.delete({
+            path: { chat_id: p.chat_id },
+            params: { member_id_type: 'app_id' },
+            data: { id_list: [appId] },
+          });
+        }
+      } catch (e) {
+        return { ok: false, error: e instanceof Error ? e.message : String(e) };
+      }
+    }
+    this.stopChannel(p.chat_id);
+
+    const archived: string[] = [];
+    const vault = this.opts.vaultCwd;
+    const archiveRoot = path.join(vault, '归档');
+
+    // 频道简报归档
+    try {
+      const briefSrc = path.join(vault, '频道简报', `${p.chat_id}.md`);
+      if (fs.existsSync(briefSrc)) {
+        const dir = path.join(archiveRoot, '退役频道简报');
+        fs.mkdirSync(dir, { recursive: true });
+        const dest = path.join(dir, `${p.chat_id}.md`);
+        this.moveFileOrDir(briefSrc, dest);
+        archived.push(path.relative(vault, dest));
+      }
+    } catch (e) {
+      process.stderr.write(`[supervisor] deleteChannel 归档简报失败 ${p.chat_id.slice(-8)}: ${e instanceof Error ? e.message : e}\n`);
+    }
+
+    // 对话记录归档
+    try {
+      const safe = safeName(name);
+      const logSrc = path.join(vault, '对话记录', safe);
+      if (fs.existsSync(logSrc)) {
+        const dir = path.join(archiveRoot, '退役对话记录');
+        fs.mkdirSync(dir, { recursive: true });
+        const d = new Date();
+        const stamp = `${d.getFullYear()}${pad2(d.getMonth() + 1)}${pad2(d.getDate())}`;
+        let dest = path.join(dir, `${safe}_${stamp}`);
+        let n = 2;
+        while (fs.existsSync(dest)) {
+          dest = path.join(dir, `${safe}_${stamp}-${n}`);
+          n++;
+        }
+        this.moveFileOrDir(logSrc, dest);
+        archived.push(path.relative(vault, dest));
+      }
+    } catch (e) {
+      process.stderr.write(`[supervisor] deleteChannel 归档对话记录失败 ${p.chat_id.slice(-8)}: ${e instanceof Error ? e.message : e}\n`);
+    }
+
+    // 人物注入映射删 key
+    try {
+      const mapPath = path.join(vault, '记忆系统', '人物', '_注入映射.json');
+      if (fs.existsSync(mapPath)) {
+        const map = JSON.parse(fs.readFileSync(mapPath, 'utf-8')) as Record<string, unknown>;
+        if (p.chat_id in map) {
+          delete map[p.chat_id];
+          fs.writeFileSync(mapPath, JSON.stringify(map, null, 2), 'utf-8');
+          archived.push('记忆系统/人物/_注入映射.json（已删该频道条目）');
+        }
+      }
+    } catch (e) {
+      process.stderr.write(`[supervisor] deleteChannel 清人物映射失败 ${p.chat_id.slice(-8)}: ${e instanceof Error ? e.message : e}\n`);
+    }
+
+    return { ok: true, chat_name: name, kind, archived };
+  }
+
+  /**
+   * 解散群后停该频道 CLI（delete_channel → STOP_CHANNEL）。
    *   1. stop 该频道 CLI + 从 channels Map 移除
    *   2. 从 channel-config.json 删该 entry（防 spawnAllKnownChannels 重拉已解散群）
    *   3. 清 usage / crashState / pendingInbound
@@ -1679,12 +2190,96 @@ export class Supervisor extends EventEmitter {
       this.channels.delete(chatId);
     }
     this.channelConfigStore.remove(chatId);
+    // 立即从所有 app 的 FeishuPoll 轮询列表摘除（不等 5min chat.list 刷新）：
+    // 否则 poll.getChats() 仍含该 chat → resolveAppId() 遍历命中 → markSeen() 把刚 remove 的配置写回。
+    for (const { poll } of this.apps.values()) poll.removeChat(chatId);
     this.channelUsage.delete(chatId);
     this.crashState.delete(chatId); // D1: 频道彻底停掉才清熔断计数（正常 respawn 不清=熔断跨 respawn 持续）
     this.pendingInbound.delete(chatId); // D2: 清未就绪缓冲队列，避免泄漏
     this.clearGraceTimer(chatId); // D3: 清待触发的断线自愈定时器
+    this.nameAskScheduled.delete(chatId); // 删后重建的私聊按新频道重新问称呼
+    this.lastActivityAt.delete(chatId);
+    const live = this.liveRestartTimers.get(chatId);
+    if (live) { clearTimeout(live); this.liveRestartTimers.delete(chatId); }
     process.stderr.write(`[supervisor] stop channel: ${chatId}\n`);
     this.emit('channel-state-changed', chatId);
     return true;
+  }
+
+  // ── 常驻工人托管（医生/工程师/顺子等；wake_worker tool + 启动器面板）──
+
+  listWorkers(): WorkerStatus[] {
+    return [...this.workers.values()].map((w) => w.getStats());
+  }
+
+  getWorker(name: string): WorkerCli | undefined {
+    return this.workers.get(name);
+  }
+
+  stopWorker(name: string): void {
+    this.workers.get(name)?.stop();
+    this.emit('channel-state-changed');
+  }
+
+  /** 品品 wake_worker(name) → 不在则 PTY 拉起，失败重试 1 次；成功后等就绪（PTY 静默 3s，最长 60s）。
+   *  失败/超时/broken 时飞书私聊豆姐告警（同一工人 30 分钟内只告警一次）。 */
+  async wakeWorker(name: string): Promise<WakeWorkerResult> {
+    const w = this.workers.get(name);
+    if (!w) return { ok: false, error: `没有叫「${name}」的工人（workers.json 里没配）` };
+    if (w.status === 'awake') return { ok: true, state: 'already' };
+
+    let res = await w.start();
+    if (!res.ok) res = await w.start(); // 失败重试 1 次
+    if (!res.ok) {
+      void this.notifyWorkerAlert(name, `拉起失败：${res.error ?? '未知错误'}`);
+      return { ok: false, state: 'failed', error: res.error };
+    }
+    // 首次拉起若原为空 sessionId，start() 已生成新 UUID 写进 cfg——落盘（workers.json 单文件覆盖写全量）
+    saveWorkersConfig(this.opts.dataDir, [...this.workers.values()].map((x) => x.cfg));
+    this.emit('channel-state-changed');
+
+    const ready = await this.waitWorkerReady(w, 60_000);
+    if (!ready) {
+      w.stop();
+      void this.notifyWorkerAlert(name, '60 秒内没准备好，已结束进程');
+      this.emit('channel-state-changed');
+      return { ok: false, state: 'failed', error: '启动超时（60s 未就绪）' };
+    }
+    this.emit('channel-state-changed');
+    return { ok: true, state: 'woke' };
+  }
+
+  /** 无官方"CLI 已就绪"接口，用 启动满 8 秒 + PTY 输出静默 3 秒 + 进程存活网络判断；最长等 timeoutMs。 */
+  private async waitWorkerReady(w: WorkerCli, timeoutMs: number): Promise<boolean> {
+    const started = Date.now();
+    return new Promise((resolve) => {
+      const tick = (): void => {
+        if (w.status !== 'awake') { resolve(false); return; }
+        if (w.isQuietFor(3000, 8000)) { resolve(true); return; }
+        if (Date.now() - started >= timeoutMs) { resolve(false); return; }
+        setTimeout(tick, 500);
+      };
+      tick();
+    });
+  }
+
+  private checkWorkersIdle(): void {
+    const IDLE_THRESHOLD_MS = 30 * 60_000;
+    for (const w of this.workers.values()) {
+      if (w.isIdleFor(IDLE_THRESHOLD_MS)) {
+        process.stderr.write(`[supervisor] worker ${w.name} 空闲超 30 分钟，自动结束进程\n`);
+        w.stop();
+        this.emit('channel-state-changed');
+      }
+    }
+  }
+
+  /** 工人拉起失败/超时告警（飞书私聊豆姐），同一工人 30 分钟内只告警一次。 */
+  private async notifyWorkerAlert(name: string, reason: string): Promise<void> {
+    const now = Date.now();
+    const last = this.workerAlertedAt.get(name);
+    if (last && now - last < 30 * 60_000) return;
+    this.workerAlertedAt.set(name, now);
+    await this.notifyOwnerDm(process.env.PINPIN_OWNER_CHAT_ID ?? '', `⚠️ 工人「${name}」叫不起来：${reason}`);
   }
 }

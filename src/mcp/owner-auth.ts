@@ -1,4 +1,4 @@
-// OWNER 鉴权共享函数——restart_self / sleep_self / compact_chat / disband_group 等
+// OWNER 鉴权共享函数——restart_self / sleep_self / compact_chat / delete_channel 等
 // 危险操作复用。
 //
 // 鉴权逻辑：

@@ -6,7 +6,7 @@
 // 失败：自动降级文字（TTS/upload/超长/去重任一不过 → sendText 兜底）
 
 import { sendVoice } from "./send-voice.js";
-import { sendText, splitMessage } from "./feishu-send.js";
+import { sendText, replyText, splitMessage } from "./feishu-send.js";
 import { appendBotReply } from "../utils/chat-log.js";
 import { POST_REPLY_HINT } from "../utils/push-channel.js";
 
@@ -79,7 +79,23 @@ export async function handlePinpinReplyVoice(
         }],
       };
     }
-    // delivered=false：too-long / duplicate → 降级文字
+    // delivered=false, reason=duplicate：5 秒内重复内容，直接算成功，不降级文字
+    if (result.reason === "duplicate") {
+      appendBotReply(chat_id, `[语音] ${text}`);
+      return {
+        content: [{
+          type: "text",
+          text: JSON.stringify({
+            delivered: true,
+            hint: POST_REPLY_HINT,
+            mode: "voice",
+            note: "5 秒内重复内容，已跳过",
+            ...(emotion ? { emotion } : {}),
+          }),
+        }],
+      };
+    }
+    // delivered=false, reason=too-long → 降级文字
     process.stderr.write(`[pinpin_reply_voice] 语音跳过 (${result.reason})，降级文字发送\n`);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
@@ -89,9 +105,12 @@ export async function handlePinpinReplyVoice(
   // 降级文字路径
   const chunks = splitMessage(text);
   const sentIds: string[] = [];
-  for (const chunk of chunks) {
+  for (let i = 0; i < chunks.length; i++) {
     try {
-      const id = await sendText(chat_id, chunk);
+      const id =
+        i === 0 && reply_to_message_id
+          ? await replyText(reply_to_message_id, chunks[i])
+          : await sendText(chat_id, chunks[i]);
       sentIds.push(id);
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);

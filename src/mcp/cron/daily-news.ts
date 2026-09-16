@@ -19,8 +19,7 @@ if (isOwnerOfCron("tea")) {
       chat_id: DAILY_NEWS_CHAT_ID,
       body:
         "🌅 每日早报触发（9:00）。请 Task 派 news-agent 拿 5 个 GitHub Trending + 4 主题精选项目，" +
-        "拿到 sub-agent 返回的 items JSON 后调 send_daily_news_card({chat_id, items}) tool 把内容用卡片形式推送到群里，" +
-        "并把已推送 URL 记到 vault\\品品work\\早报\\已推送.md。",
+        "拿到 sub-agent 返回的 items JSON 后调 send_daily_news_card({chat_id, items}) tool 把内容用卡片形式推送到群里。",
     });
   });
 }

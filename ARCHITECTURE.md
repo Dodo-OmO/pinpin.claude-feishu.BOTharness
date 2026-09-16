@@ -42,7 +42,7 @@
 - **飞书能力**：建群 / 解散群、审批卡 `send_approval_card`（同意/拒绝真按钮，点击经 Supervisor 回调推回发起频道）。云文档 / 任务 / 日历 / 邮件等飞书业务能力不在 MCP 里，交给官方 lark-cli（见 §5）。
 - **调度**：`schedule_reminder`（一次性）/ `notify_when_speaks`（等人发言）/ `relay_message`（传话催回）/ `ask_person`（限时单聊问话，对方私聊回复经 IPC 送回发起频道）/ `recurring_task`（登记固定任务：写 `recurring-tasks.json`，由 `supervisor/recurring-tasks.ts` 启动器级调度到点推 SOP）。
 - **人格机制**：`memory-rewrite`（永存记忆重写）、`write-diary`。
-- **后台 work**：`pinpin-spawn-work-session` / `peek` / `send-to` / `end`（"传话筒"，见 §6）。
+- **常驻工人**：`wake_worker(name)` 叫醒启动器托管的工人会话，之后用本机跨会话消息直接派活（见 §6）。
 
 飞书 SDK（`@larksuiteoapi/node-sdk`）在 `src/mcp/tools/feishu-send.ts` 单例懒加载，凭据从 env 读。
 
@@ -100,7 +100,7 @@
 - **Supervisor 级 cron**（`supervisor/cron-runner.ts`）：OWNER 用户身份保活（每天以 OWNER 本人的 lark-cli 配置跑一次用户接口触发续期；失效则品品自己发起设备码授权、把链接私聊给 OWNER 点一下、后台轮询到完成）——由主进程单点跑，避免 N 个频道争抢写锁。
 - **频道级 cron**（`src/mcp/cron/`）：日记（每日 00:00）、早报 / 新闻 / 记忆自检 / 文档探针——按 `chat_id` 归属分发到对应频道（`cron-owner.ts` 判定，避免重复触发）：日记 / 早报归茶水间频道；记忆自检 / 文档探针归 OWNER 私聊。固定任务由启动器级 `supervisor/recurring-tasks.ts` 统一调度（登记表 `recurring-tasks.json`），不按频道 cron 归属。
 - **临时 job**（`scheduled-jobs-tick.ts`）：轮询 DB 的 scheduled_job 表，到期 fire（提醒 timer / 等某人开口 / 传话转达）。
-- **传话筒 work session**（`supervisor/work-session.ts`）：品品可以 spawn 一个独立的后台 claude code 进程去某目录干活，监听它的 transcript（jsonl）判断"停下等指示"，完工后通过 IPC 把结果回报到原频道，由品品转告用户。
+- **常驻工人托管**（`supervisor/worker-cli.ts`）：启动器按配置（名字 / 会话 ID / 工作目录 / 模型）托管若干交互式 Claude Code 会话；按需 `--resume` 拉起、拉起前检查同一会话是否已被其它进程打开、空闲 30 分钟自动结束、拉不起时私聊告警；启动器面板显示醒 / 睡 / 坏并可打开终端。
 
 ## 7. Electron 启动器
 

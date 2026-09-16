@@ -57,20 +57,16 @@
       <div>
         <div class="section-title">
           <h2>飞书频道</h2>
-          <span class="count" id="channels-count">0 监听</span>
+          <span class="count" id="channels-count">0 个频道</span>
           <span class="grow"></span>
+          <input class="chan-filter" id="chan-filter" type="text" placeholder="按名字过滤…">
+          <span class="chan-quick-filter" id="filter-active">只看活的</span>
+          <span class="chan-quick-filter" id="filter-fresh">只看有新消息</span>
           <span class="action" id="refresh-channels">刷新</span>
         </div>
-        <div class="cards-row" id="channels-row">
+        <!-- main.ts 按应用分组渲染：每组「在线」默认展开 +「睡眠/已停」默认折叠 -->
+        <div id="channels-groups">
           <div class="empty-hint">尚未拉到 chat 列表（supervisor 正在启动）</div>
-        </div>
-        <!-- 休眠折叠区（main.ts 动态填充；空时隐藏） -->
-        <div class="standby-fold" id="standby-fold" style="display:none;">
-          <div class="standby-fold-head" id="standby-fold-head">
-            <span class="standby-fold-caret" id="standby-fold-caret">▸</span>
-            <span class="standby-fold-title">睡眠模式 · <span id="standby-count">0</span></span>
-          </div>
-          <div class="standby-fold-body" id="standby-fold-body" style="display:none;"></div>
         </div>
       </div>
       <div class="log-region">
@@ -119,13 +115,7 @@
         </div>
         <div class="settings-row">
           <label>新频道 CLI 默认 effort</label>
-          <select id="default-effort">
-            <option value="low">low</option>
-            <option value="medium" selected>medium</option>
-            <option value="high">high</option>
-            <option value="xhigh">xhigh</option>
-            <option value="max">max</option>
-          </select>
+          <select id="default-effort"></select>
         </div>
         <div class="settings-row">
           <label>新频道默认压缩阈值（%，20-70）</label>
@@ -220,7 +210,7 @@
         <label>注入人物画像（多选，改完重启该频道生效）</label>
         <div id="modal-personas" class="persona-grid"></div>
       </div>
-      <p class="settings-hint" id="modal-lock-hint" style="display:none;">运行中不可改 model/effort/压缩/fast，先关闭该频道再改。</p>
+      <p class="settings-hint" id="modal-lock-hint" style="display:none;"></p>
     </div>
   </div>
 </div>

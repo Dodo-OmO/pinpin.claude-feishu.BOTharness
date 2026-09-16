@@ -48,11 +48,17 @@ export interface RelayBridgeDeps {
   /** Owner在各飞书应用下的 open_id */
   ownerOpenIds: () => string[];
   ownerChatId: () => string | undefined;
+  /** 传话员掉线超过宽限期时私聊豆姐（supervisor 侧 notifyOwnerDm） */
+  notifyOwner: (chatId: string, text: string) => Promise<void>;
 }
 
 type ConnState = { client_id: string; role: 'submitter' | 'relay'; session_title: string; session_id?: string };
 
 const TICK_MS = 60_000;
+/** 传话员正常工作是「收一条就退再起」，短暂断开是常态——宽限这么久仍没人在线才算掉线 */
+const RELAY_OFFLINE_GRACE_MS = 120_000;
+/** 掉线告警最短间隔，防刷屏 */
+const RELAY_OFFLINE_ALERT_GAP_MS = 2 * 3_600_000;
 const ACTIONS = new Set(['dm', 'group', 'group_at', 'tell_pinpin']);
 
 // ── 正文拼装（纯函数，可单测）──
@@ -127,6 +133,8 @@ export class RelayBridge {
   /** note_id → 提交它的连接（receipt 定向推；重连后靠 session_id 匹配） */
   private submitConn = new Map<string, IpcConn>();
   private timer: NodeJS.Timeout | null = null;
+  private offlineTimer: NodeJS.Timeout | null = null;
+  private lastOfflineAlertAt = 0;
   private delivering = false;
   private redeliverAgain = false;
 
@@ -146,9 +154,12 @@ export class RelayBridge {
       this.letterAck(p as { id?: string; result?: string; note?: string }, conn));
     this.server.on('connection-closed', (conn: IpcConn) => {
       this.conns.delete(conn);
-      if ((conn.state as ConnState).role === 'relay') {
+      const st = conn.state as ConnState;
+      if (st.role === 'relay') {
         this.queue.seen.last_close_at = Date.now();
         this.persist();
+        process.stderr.write(`[relay-bridge] bye relay「${st.session_title}」${st.client_id}\n`);
+        this.armOfflineAlert();
       }
     });
     await this.server.start({ port: RELAY_BRIDGE_PORT });
@@ -160,6 +171,8 @@ export class RelayBridge {
   async stop(): Promise<void> {
     if (this.timer) clearInterval(this.timer);
     this.timer = null;
+    if (this.offlineTimer) clearTimeout(this.offlineTimer);
+    this.offlineTimer = null;
     await this.server.stop();
     this.conns.clear();
     this.submitConn.clear();
@@ -174,6 +187,32 @@ export class RelayBridge {
 
   // ── 传话口方法 ──
 
+  /** 传话员全下线 → 宽限后仍没人回来就私聊豆姐（她的信会排队，没人取谁都不知道）。 */
+  private armOfflineAlert(): void {
+    if (this.offlineTimer) clearTimeout(this.offlineTimer);
+    this.offlineTimer = setTimeout(() => {
+      this.offlineTimer = null;
+      if (this.relayOnline() > 0) return;
+      const now = Date.now();
+      if (now - this.lastOfflineAlertAt < RELAY_OFFLINE_ALERT_GAP_MS) return;
+      this.lastOfflineAlertAt = now;
+      const chatId = this.deps.ownerChatId();
+      if (!chatId) return;
+      const since = this.queue.seen.last_close_at ? new Date(this.queue.seen.last_close_at).toLocaleTimeString() : "刚刚";
+      const pending = this.queue.letters().filter((l) => l.status === "pending").length;
+      void this.deps.notifyOwner(
+        chatId,
+        `⚠️ 传话员掉线了——${since} 起没人取信，现在排着 ${pending} 封。托它转的话会一直排队，直到有人把它拉起来。`,
+      );
+    }, RELAY_OFFLINE_GRACE_MS);
+  }
+
+  private relayOnline(): number {
+    let n = 0;
+    for (const c of this.conns) if ((c.state as ConnState).role === 'relay') n++;
+    return n;
+  }
+
   private onHello(p: RelayHelloParams, conn: IpcConn): { ok: true; client_id: string } {
     const state: ConnState = {
       client_id: `rc-${crypto.randomBytes(3).toString('hex')}`,
@@ -185,6 +224,7 @@ export class RelayBridge {
     this.conns.add(conn);
     process.stderr.write(`[relay-bridge] hello ${state.role}「${state.session_title}」${state.client_id}\n`);
     if (state.role === 'relay') {
+      if (this.offlineTimer) { clearTimeout(this.offlineTimer); this.offlineTimer = null; }
       this.queue.seen.last_hello_at = Date.now();
       this.queue.seen.last_hello_title = state.session_title;
       this.persist();

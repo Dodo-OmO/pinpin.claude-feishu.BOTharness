@@ -31,6 +31,12 @@ declare global {
 
 const params = new URLSearchParams(location.search);
 const chatId = params.get('chat_id') ?? '';
+/** id 以 `worker:` 开头 = 常驻工人（医生/总导演/顺子）终端，非频道 CLI：隐藏压缩按钮、标题改「工人终端」。 */
+const workerName = chatId.startsWith('worker:') ? chatId.slice('worker:'.length) : '';
+const isWorker = workerName !== '';
+if (isWorker) {
+  (document.getElementById('btn-compact') as HTMLElement | null)?.style.setProperty('display', 'none');
+}
 
 const term = new Terminal({
   fontFamily: 'JetBrains Mono, monospace',
@@ -77,10 +83,10 @@ void (async () => {
     const nameEl = document.getElementById('header-name');
     const metaEl = document.getElementById('header-meta');
     const health = document.getElementById('health');
-    if (nameEl) nameEl.textContent = meta.chat_name ?? chatId.slice(-12);
+    if (nameEl) nameEl.textContent = isWorker ? workerName : (meta.chat_name ?? chatId.slice(-12));
     if (metaEl) metaEl.textContent = `${meta.model} · ${meta.effort} · ${meta.status}`;
     if (health) health.className = 'health-dot ' + (meta.status === 'running' ? 'green' : meta.status === 'starting' ? 'yellow' : meta.status === 'failed' ? 'red' : 'gray');
-    document.title = `${meta.chat_name ?? chatId} · 品品频道终端`;
+    document.title = isWorker ? `工人终端 · ${workerName}` : `${meta.chat_name ?? chatId} · 品品频道终端`;
   } catch { /* ignore */ }
 })();
 

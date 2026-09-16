@@ -8,6 +8,7 @@ import type {
   RateLimitWindow,
   NameMappings,
   PendingNameEntry,
+  WorkerStatusInfo,
 } from '../shared-types.js';
 
 const api = {
@@ -80,6 +81,12 @@ const api = {
     set: (chatId: string, sel: string[] | '__ALL__'): Promise<void> =>
       ipcRenderer.invoke('personas.set', chatId, sel),
   },
+  /** 常驻工人托管（医生 / 总导演 / 顺子）：唤醒 / 结束；终端沿用 channel.openTerminal 传 `worker:<name>`。 */
+  worker: {
+    wake: (name: string): Promise<{ ok: boolean; state?: 'woke' | 'already' | 'failed'; error?: string }> =>
+      ipcRenderer.invoke('worker.wake', name),
+    stop: (name: string): Promise<void> => ipcRenderer.invoke('worker.stop', name),
+  },
 };
 
 export type {
@@ -91,6 +98,7 @@ export type {
   RateLimitWindow,
   NameMappings,
   PendingNameEntry,
+  WorkerStatusInfo,
 } from '../shared-types.js';
 
 contextBridge.exposeInMainWorld('pinpin', api);

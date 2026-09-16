@@ -40,6 +40,12 @@ export async function handleAskPerson(args: {
   if (!question) {
     return { isError: true, content: [{ type: "text" as const, text: "缺少必填参数 question" }] };
   }
+  if (!Number.isFinite(timeoutMin) || timeoutMin < 1 || timeoutMin > 1440) {
+    return {
+      isError: true,
+      content: [{ type: "text" as const, text: `timeout_min 必须是 1–1440 的有限数，实际: ${args.timeout_min}` }],
+    };
+  }
   const targetOpenId = resolveTargetOpenId({ person_name, open_id });
   if (!targetOpenId) {
     return {

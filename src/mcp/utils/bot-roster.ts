@@ -11,8 +11,8 @@ import { getBotNameMapping } from "../../shared/name-map-store.js";
 let _botMapCache: Record<string, string> | null = null;
 
 // 格式同 FEISHU_KNOWN_USERS：`cli_号:友好名,cli_号:友好名` 或 JSON 对象。缺省 → 空 map。
-function parseBotRosterEnv(): Record<string, string> {
-  const raw = process.env.FEISHU_BOT_ROSTER;
+// raw 缺省时读 supervisor 自身 env（旧行为，供 getBotMap 走）；显式传参供多应用按 app.botRoster 现算。
+function parseBotRosterEnv(raw: string | undefined = process.env.FEISHU_BOT_ROSTER): Record<string, string> {
   const m: Record<string, string> = {};
   if (!raw || !raw.trim()) return m;
   const trimmed = raw.trim();
@@ -57,9 +57,11 @@ export function resolveBotName(appId: string): string | undefined {
 /**
  * 拼"群里已知 bot 花名册"——给 instructions 用，让品品圈 bot 时知道 cli_xxx 对应谁。
  * 输出形如：[群里已知bot（圈它用 <at user_id="cli_号">显示名</at>…）：BotC=cli_xxxx…｜BotA=cli_yyyy…]
+ * rosterEnv 显式传入（多应用场景传 app.botRoster）时按该字符串现算，不落全局缓存；
+ * 不传 → 维持旧行为，走 supervisor 自身 env 的缓存 map。
  */
-export function loadBotRoster(): string {
-  const entries = Object.entries(getBotMap());
+export function loadBotRoster(rosterEnv?: string): string {
+  const entries = Object.entries(rosterEnv !== undefined ? parseBotRosterEnv(rosterEnv) : getBotMap());
   if (entries.length === 0) return "";
   const roster = entries.map(([appId, name]) => `${name}=${appId}`).join("｜");
   return `[群里已知bot（圈它用 <at user_id="cli_号">显示名</at>，中间必带显示名否则空白）：${roster}]`;

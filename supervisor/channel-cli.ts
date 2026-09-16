@@ -27,7 +27,7 @@ export interface ChannelCliOptions {
   vaultCwd: string;
   /** 模型——默认值见 supervisor/index.ts DEFAULT_MODEL；热切换需先关闭再启动 */
   model: string;
-  /** effort：low / medium / high / max。默认 high（Owner 2026-05-28 实测反馈改） */
+  /** effort：low / medium / high / xhigh / max。默认 high（Owner 2026-05-28 实测反馈改） */
   effort: string;
   /** supervisor IPC server 端口 */
   supervisorPort: number;
@@ -70,6 +70,9 @@ export class ChannelCli extends EventEmitter {
   /** P1.3: 每次 spawn 生成新 UUID（Owner决策：重启 = 上下文清零）。
    *  传给 claude --session-id，让 supervisor 知道 transcript jsonl 路径。 */
   private _sessionId: string = '';
+  /** restart({resume:true}) 置位，下一次 start() 读完即清——续接重启（改模型/effort 等）用
+   *  --resume 接回原会话，不清零上下文；若 transcript 文件已不存在则回落成普通新会话。 */
+  private resumeNext = false;
 
   constructor(opts: ChannelCliOptions) {
     super();
@@ -78,6 +81,26 @@ export class ChannelCli extends EventEmitter {
 
   get sessionId(): string {
     return this._sessionId;
+  }
+
+  /** 本 vaultCwd 下某 sessionId 对应的 transcript jsonl 绝对路径（与子 MCP 注入的
+   *  PINPIN_TRANSCRIPT_PATH 同一路径公式，抽成私有方法供 start() 复用）。 */
+  private transcriptPathFor(sessionId: string): string {
+    return path.join(
+      os.homedir(),
+      '.claude',
+      'projects',
+      this.opts.vaultCwd.replace(/[^a-zA-Z0-9]/g, '-'),
+      `${sessionId}.jsonl`,
+    );
+  }
+
+  private transcriptExists(sessionId: string): boolean {
+    try {
+      return fs.existsSync(this.transcriptPathFor(sessionId));
+    } catch {
+      return false;
+    }
   }
 
   get status(): ChannelCliStatus {
@@ -94,8 +117,14 @@ export class ChannelCli extends EventEmitter {
       return;
     }
     this._status = 'starting';
-    // P1.3: 每次 spawn 都新 UUID（Owner"重启清零"决策）
-    this._sessionId = randomUUID();
+    // 续接重启：resumeNext 置位 + 已有 sessionId + transcript 文件仍在 → 本次不换 sessionId、
+    // 用 --resume 接回原会话；否则按原逻辑（P1.3 Owner"重启清零"决策）每次 spawn 都新 UUID。
+    const wantResume = this.resumeNext;
+    this.resumeNext = false;
+    const canResume = wantResume && !!this._sessionId && this.transcriptExists(this._sessionId);
+    if (!canResume) {
+      this._sessionId = randomUUID();
+    }
 
     // P1.3: 内联 statusLine JSON 注入（--settings 接 file-or-JSON-string）
     // 不污染 vault settings.json；sink script 收 stdin JSON 通过 TCP 推 supervisor
@@ -118,7 +147,7 @@ export class ChannelCli extends EventEmitter {
     try {
       fs.writeFileSync(
         sysPromptFile,
-        buildInstructions(this.opts.vaultCwd, this.opts.chatId),
+        buildInstructions(this.opts.vaultCwd, this.opts.chatId, this.opts.app),
         'utf-8',
       );
       sysPromptOk = true;
@@ -136,8 +165,7 @@ export class ChannelCli extends EventEmitter {
       this.opts.model,
       '--effort',
       this.opts.effort,
-      '--session-id',
-      this._sessionId,
+      ...(canResume ? ['--resume', this._sessionId] : ['--session-id', this._sessionId]),
       '--settings',
       statusLineCfg,
       ...(sysPromptOk ? ['--append-system-prompt-file', sysPromptFile] : []),
@@ -151,7 +179,7 @@ export class ChannelCli extends EventEmitter {
       '--tools',
       // 禁 AskUserQuestion：频道 CLI 跑后台 PTY、无人能应答 ask，模型一调即卡死前台，故白名单不含它
       // ListAgents/SendMessage：品品各频道直接跟本机其它 Claude 窗口（工人 / 工作站 / 顺子）说话
-      'Bash,Edit,Read,Write,Glob,Grep,Task,WebFetch,WebSearch,TodoWrite,Skill,NotebookEdit,ToolSearch,ListAgents,SendMessage',
+      'Bash,BashOutput,KillShell,Edit,Read,Write,Glob,Grep,Task,WebFetch,WebSearch,TodoWrite,Skill,NotebookEdit,ToolSearch,ListAgents,SendMessage',
     ];
     for (const a of args) {
       if (a === '-p' || a === '--print') {
@@ -163,10 +191,16 @@ export class ChannelCli extends EventEmitter {
     const childEnv: Record<string, string> = {
       ...(process.env as Record<string, string>),
       PINPIN_CHAT_ID: this.opts.chatId,
+      // 频道友好名：子进程写对话记录时按它分目录，避免首次写盘早于首条入站消息时落进 oc_xxx 裸目录
+      ...(this.opts.chatName ? { PINPIN_CHAT_NAME: this.opts.chatName } : {}),
       PINPIN_SUPERVISOR_PORT: String(this.opts.supervisorPort),
       PINPIN_DB_PATH: this.opts.dbPath,
       // 子 MCP 进程读同一份人名/bot名映射（sender-names / bot-roster 解析最前优先），mtime 热重载
       PINPIN_NAME_MAP_PATH: this.opts.nameMapPath,
+      // 本次会话 transcript 路径：子 MCP 判断"启动消息 / 唤醒消息是否已被 claude 收到"（不只认 MCP 工具调用）
+      PINPIN_TRANSCRIPT_PATH: this.transcriptPathFor(this._sessionId),
+      // 续接重启（--resume 接回原会话，非"重启清零"）：子 MCP 据此跳过 warmup / restart-care / 重启标题
+      ...(canResume ? { PINPIN_RESUMED: '1' } : {}),
       // MCP tool search：强制所有 MCP tool 折叠（按需 ToolSearch 发现），仅 server ListTools 标
       // app/alwaysLoad 的核心/自动触发工具常驻。省每轮固定 MCP 开销（~40k→~10k）。
       // true=强制开启（跳过走网络时的 fallback；网络 透传 tool_reference 块）。
@@ -335,10 +369,14 @@ export class ChannelCli extends EventEmitter {
     process.stderr.write(`[channel-cli ${this.opts.chatId}] stopped (user-initiated)\n`);
   }
 
-  restart(): void {
+  /** opts.resume=true：续接重启（改模型/effort/fast 后接回原对话，非"重启清零"）——
+   *  下一次 start() 若已有 sessionId 且 transcript 文件仍在，用 --resume 接回；否则回落新会话。
+   *  无参调用（启动器 [↻] 手动重启）行为不变：仍走"重启清零"、发 manual-restart。 */
+  restart(opts?: { resume?: boolean }): void {
     // 仅启动器 [↻] 手动重启走这里（自动重启走 supervisor 直调 start()）。
     // 发 manual-restart 让 supervisor 重置崩溃熔断计数——人工介入视为"从头算"。
     this.emit('manual-restart');
+    if (opts?.resume) this.resumeNext = true;
     this.stop();
     setTimeout(() => this.start(), 500);
   }

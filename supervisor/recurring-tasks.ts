@@ -66,7 +66,7 @@ export class RecurringTaskRunner {
   start(): void {
     if (this.started) return;
     this.started = true;
-    this.reload(true);
+    this.reload();
     this.watchDir();
   }
 
@@ -111,7 +111,7 @@ export class RecurringTaskRunner {
     const raw = this.safeReadRaw();
     if (hashContent(raw) === this.lastContentHash) return; // 内容没变（重复事件/别的文件），跳过
     process.stderr.write("[recurring-tasks] 检测到 recurring-tasks.json 变化，重新加载\n");
-    this.reload(false);
+    this.reload();
   }
 
   private safeReadRaw(): string {
@@ -122,8 +122,8 @@ export class RecurringTaskRunner {
     }
   }
 
-  /** (重)加载任务列表 + 重排所有调度。isStartup=true 时额外跑一遍 catch-up 检测（补跑离线期漏跑的）。 */
-  private reload(isStartup: boolean): void {
+  /** (重)加载任务列表 + 重排所有调度。每次 reload 都跑 catch-up（漏跑自愈；shouldCatchUp 的 firedToday 保证一天只补一次）。 */
+  private reload(): void {
     this.lastContentHash = hashContent(this.safeReadRaw());
     const tasks = readRecurringTasks(this.deps.filePath);
     for (const e of this.entries.values()) if (e.timer) clearTimeout(e.timer);
@@ -132,12 +132,13 @@ export class RecurringTaskRunner {
     for (const task of tasks) {
       this.entries.set(task.id, { task });
       if (!task.enabled) continue;
-      if (isStartup && this.shouldCatchUp(task, now)) {
+      if (this.shouldCatchUp(task, now)) {
         process.stderr.write(`[recurring-tasks] catch-up 触发: ${task.name}(${task.id})\n`);
         void this.fire(task, MAX_RETRIES);
         continue; // fire() 成功/放弃后会自己 scheduleTask 排下一周期，这里不重复排
       }
-      this.scheduleTask(task);
+      this.logMissedIfAny(task, now);
+      this.scheduleTask(task, 60_000); // 回拨 60s：仅 reload 场景防边界秒把这轮甩到明天
     }
     process.stderr.write(`[recurring-tasks] loaded ${tasks.length} tasks\n`);
   }
@@ -151,10 +152,26 @@ export class RecurringTaskRunner {
     return prevIsToday && !firedToday && now - prev < catchUpMs;
   }
 
-  private scheduleTask(task: RecurringTask): void {
+  /** 今天该跑却超出补跑窗口的打一行日志——不打的话漏跑在日志上完全不可见。 */
+  private logMissedIfAny(task: RecurringTask, now: number): void {
+    if (!task.enabled) return;
+    const prev = prevFireAt(task.rule, now);
+    if (!sameLocalDay(prev, now)) return;
+    if (task.last_fired_at && sameLocalDay(Date.parse(task.last_fired_at), now)) return;
+    const mins = Math.round((now - prev) / 60_000);
+    process.stderr.write(
+      `[recurring-tasks] 漏跑未补: ${task.name}(${task.id}) 该跑于 ${new Date(prev).toLocaleString()}，已过 ${mins}min > catch_up_hours=${task.catch_up_hours ?? 3}\n`,
+    );
+  }
+
+  /** rollbackMs 仅供 reload() 传：fire() 成功/放弃后立即重排下一周期不需要回拨——此时距目标时刻远不足 60s
+   *  会导致 nextFireAt 判定"今天还没到"而排回今天已过的同一时刻，形成 armTimer delay≈0 的紧循环。 */
+  private scheduleTask(task: RecurringTask, rollbackMs = 0): void {
     const entry = this.entries.get(task.id);
     if (!entry) return;
-    this.armTimer(entry, nextFireAt(task.rule, Date.now()));
+    const next = nextFireAt(task.rule, Date.now() - rollbackMs);
+    process.stderr.write(`[recurring-tasks] scheduled ${task.id} -> ${new Date(next).toLocaleString()}\n`);
+    this.armTimer(entry, next);
   }
 
   /** setTimeout 单次上限 ~24.8 天，monthly rule 间隔可能逼近这个上限，超限先分段等到接近再排最后一段。 */
@@ -196,6 +213,8 @@ export class RecurringTaskRunner {
     } catch (e) {
       process.stderr.write(`[recurring-tasks] notifyOwner 失败: ${e instanceof Error ? e.message : e}\n`);
     }
+    // 放弃也写 last_fired_at（标记"今天已处理过"，非"推送成功"）——否则每次 reload 都会当漏跑重新拉起一轮重试链
+    this.markFired(task);
     this.scheduleTask(task); // 本轮放弃，排下一周期
   }
 
@@ -215,7 +234,10 @@ export class RecurringTaskRunner {
         task_name: task.name,
         sop_path: task.sop_path,
       };
-      return this.deps.pushTrigger(task.chat_id, body, meta);
+      const pushed = this.deps.pushTrigger(task.chat_id, body, meta);
+      process.stderr.write(`[recurring-tasks] ${pushed ? "fired" : "push failed"} ${task.name}(${task.id}) -> ${task.chat_id.slice(-8)}
+`);
+      return pushed;
     } catch (e) {
       process.stderr.write(
         `[recurring-tasks] ${task.name}(${task.id}) 推送异常: ${e instanceof Error ? e.message : e}\n`,
@@ -224,7 +246,7 @@ export class RecurringTaskRunner {
     }
   }
 
-  /** 触发成功 → 写回 last_fired_at（从磁盘最新版本改，防覆盖掉期间被工具改过的其它字段/别的任务）。 */
+  /** 触发成功/放弃（今天已处理过）→ 写回 last_fired_at（从磁盘最新版本改，防覆盖掉期间被工具改过的其它字段/别的任务）。 */
   private markFired(task: RecurringTask): void {
     const firedAt = new Date().toISOString();
     task.last_fired_at = firedAt;

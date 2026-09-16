@@ -20,7 +20,7 @@ import type { Server } from "@modelcontextprotocol/sdk/server/index.js";
 import { getUserName, resolveBotName, logUnknownBotOnce } from "../utils/sender-names.js";
 import { markInboundChat } from "../chat-activity.js";
 import { resolveReplyQuote } from "../utils/reply-quote.js";
-import { appendUserMessage, setChatNameCache, appendRestartHeading } from "../utils/chat-log.js";
+import { appendUserMessage, setChatNameCache, appendRestartHeading, hasChatName, readChatLog, lastActivityBefore } from "../utils/chat-log.js";
 import { pushChannelTrigger } from "../utils/push-channel.js";
 import { sanitizeChannelParams } from "../utils/sanitize-surrogates.js";
 import {
@@ -36,6 +36,10 @@ import { pad2 } from "../utils/helper.js";
 import { PARSERS, type ParseCtx } from "./parse-inbound.js";
 import { getSupervisorClient } from "../../ipc/client-singleton.js";
 import { IPC_METHODS, type PeerMessageParams, type PeerMessageResult } from "../../ipc/protocol.js";
+
+// 本模块（MCP 子进程）启动时刻——restart-care 窗口锚点（server.ts 里 warmup 也各自求值同名常量，
+// 两边都在子进程启动早期求值，差 <1s 可接受，不做跨模块共享）。
+const PROCESS_START_MS = Date.now();
 
 // 本地时间格式化 YYYY-MM-DD HH:MM（用系统时区=Owner机器所在时区）——
 // 给品品注入可读的「消息发送时间」+「当前时间」，让她随时感知时间。
@@ -66,7 +70,8 @@ export interface InboundPayload {
 const restartCareTriggered = new Set<string>();
 // 本 session 已写过"重启轮次"标题的 chat（每 chat 一次，首条入站时写——#2 重启事件记录）
 const restartHeadingWritten = new Set<string>();
-const RESTART_CARE_WINDOW_HOURS = Number(process.env.RESTART_CARE_WINDOW_HOURS ?? 12);
+// restart-care 窗口 = [启动 - CARE_FROM_H 小时, 启动 - 1 小时]（最近 1 小时原文已在 warmup 里给过，不重复）
+const CARE_FROM_H = Number(process.env.RESTART_CARE_WINDOW_HOURS ?? 12);
 
 // 骰子语音命中阈值——约 5% 概率附"本轮用语音"祈使指令（Owner否过 150，VOICE_TEXT_LIMIT 仍 120）
 const VOICE_DICE_THRESHOLD = 0.05;
@@ -146,13 +151,14 @@ export async function handleInboundMessage(
   //   单聊判定用 supervisor 按入站路径定的 is_p2p（WS=单聊 / poll=群），权威——
   //     不再用"chat_name 空"启发（会把 chat.list 未刷新的新群首条误判成单聊）。
   //   仅当 senderName 不是纯 ID 兜底（getUserName 拿到真名）时才派生，避免目录名也变 ou 残片。
-  if (payload.is_p2p && !isBot && !senderOpenId.endsWith(senderName)) {
+  //   加 !hasChatName(chatId)：本频道 env 名（或已有缓存名）优先，不被单聊派生名覆盖（修日志目录分裂）。
+  if (payload.is_p2p && !isBot && !senderOpenId.endsWith(senderName) && !hasChatName(chatId)) {
     setChatNameCache(chatId, `VS ${senderName}（私聊）`);
   }
 
   // #2：本 chat 本 session 首条入站 → 写"第 N 轮重启"标题（此时友好名已缓存，写对文件夹）。
-  // 放在 appendUserMessage 之前，保证标题在消息上方。
-  if (!restartHeadingWritten.has(chatId)) {
+  // 放在 appendUserMessage 之前，保证标题在消息上方。PINPIN_RESUMED=1（续接重启，非真正重启）不写。
+  if (!restartHeadingWritten.has(chatId) && process.env.PINPIN_RESUMED !== "1") {
     restartHeadingWritten.add(chatId);
     appendRestartHeading(chatId);
   }
@@ -209,7 +215,8 @@ export async function handleInboundMessage(
     }
   }
 
-  const needRestartCare = !restartCareTriggered.has(chatId);
+  // PINPIN_RESUMED=1（续接重启：改模型/effort 后 --resume 接原会话）不算失忆，跳过护理。
+  const needRestartCare = process.env.PINPIN_RESUMED !== "1" && !restartCareTriggered.has(chatId);
   if (needRestartCare) restartCareTriggered.add(chatId);
 
   const pendingWatches = listPendingSpeakWatchByOpenId(senderOpenId);
@@ -261,14 +268,29 @@ export async function handleInboundMessage(
   const sentResult: SentNotification = { content: notifParams.content, meta: notifParams.meta };
 
   if (needRestartCare) {
-    await pushChannelTrigger({
-      trigger: "restart-care",
-      chat_id: chatId,
-      body:
-        `🌸 重启失忆护理触发（本 chat 重启后第一条入站）。请 Task 派 restart-care-agent，` +
-        `sub-agent 调 read_chat_log({chat_id, hours: ${RESTART_CARE_WINDOW_HOURS}}) 拿近 ${RESTART_CARE_WINDOW_HOURS} 小时日志，` +
-        `写 ≤300 字"刚回神"摘要返主 session。主 session 拿到摘要后再正常回 sender ${senderName} 的原消息。`,
-    });
+    const careSince = PROCESS_START_MS - CARE_FROM_H * 3600_000;
+    // 与启动消息同锚：启动消息已给「最后一条对话前 1 小时」，失忆守护只管更早的部分
+    const anchor = lastActivityBefore(chatId, PROCESS_START_MS, CARE_FROM_H * 3600_000);
+    const careUntil = (anchor ?? PROCESS_START_MS) - 3600_000 - 60_000; // 分界那一分钟归启动消息，不重复
+    let careLogs: Record<string, string> = {};
+    try {
+      careLogs = readChatLog({ chat_id: chatId, since: careSince, until: careUntil });
+    } catch (e) {
+      process.stderr.write(
+        `[chat-message] restart-care readChatLog 失败: ${e instanceof Error ? e.message : e}\n`,
+      );
+    }
+    const careHasContent = Object.values(careLogs).some((v) => v.trim());
+    if (careHasContent) {
+      await pushChannelTrigger({
+        trigger: "restart-care",
+        chat_id: chatId,
+        body:
+          `🌸 重启失忆护理：重启前最近 1 小时的原文已在启动消息里给你了。请 Task 派 restart-care-agent 调 ` +
+          `read_chat_log({chat_id, since:"${fmtLocalTime(careSince)}", until:"${fmtLocalTime(careUntil)}"}) ` +
+          `总结这段较早的对话（≤300 字）返回主 session。拿到后再正常回 sender ${senderName} 的原消息。`,
+      });
+    }
   }
 
   for (const watch of speakWatchHits) {

@@ -96,39 +96,64 @@ body {
 .section-title .action:hover { color: var(--ink); }
 .section-title select { font-size: 11px; padding: 2px 6px; border: 1px solid var(--line); border-radius: 6px; background: white; color: var(--ink-soft); cursor: pointer; }
 
-.cards-row { display: flex; gap: 12px; overflow-x: auto; overflow-y: visible; padding-bottom: 4px; scroll-snap-type: x mandatory; min-height: 130px; }
-.cards-row::-webkit-scrollbar { height: 6px; }
-.cards-row::-webkit-scrollbar-track { background: transparent; }
-.cards-row::-webkit-scrollbar-thumb { background: linear-gradient(90deg, var(--pink), var(--purple)); border-radius: 999px; opacity: 0.5; }
 .empty-hint { color: var(--ink-mute); font-size: 12px; padding: 20px; font-style: italic; align-self: center; }
 
-.card { flex: 0 0 260px; background: white; border: 1px solid var(--line); border-radius: var(--radius-md); padding: 13px 14px; transition: all .2s; scroll-snap-align: start; }
-/* 批3 需求2：停止的频道卡——整卡不再用 opacity（opacity 会传染压暗 model/effort 下拉）。
-   改为淡背景+虚线边框表"关闭"，头部/操作区变淡，meta 文本用颜色变淡，
-   但 model/effort 下拉保持全亮 + 紫色 accent 边框，提示"频道已关、现在可改模型/effort"。 */
-.card.dim { background: #f6f6f8; border-style: dashed; box-shadow: none; }
-.card.dim .card-head, .card.dim .card-actions { opacity: 0.5; }
-.card-head { display: flex; align-items: center; gap: 7px; margin-bottom: 8px; }
 .health-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
 .health-dot.green { background: var(--green); box-shadow: 0 0 5px var(--green); }
 .health-dot.yellow { background: var(--yellow); box-shadow: 0 0 5px var(--yellow); }
 .health-dot.red { background: var(--red); box-shadow: 0 0 5px var(--red); }
 .health-dot.gray { background: var(--ink-mute); }
-.card-title { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; flex: 1; }
-.card-tag { font-size: 9px; font-weight: 600; color: var(--ink-mute); padding: 2px 6px; background: rgba(44,44,46,0.05); border-radius: 5px; text-transform: uppercase; letter-spacing: 0.04em; }
+.card-title { font-weight: 600; font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .btn-rename { background: transparent; border: none; cursor: pointer; color: var(--ink-mute); font-size: 12px; padding: 2px 4px; border-radius: 4px; flex-shrink: 0; opacity: 0.4; transition: opacity .15s; }
-.card:hover .btn-rename { opacity: 1; }
+.chan-row:hover .btn-rename { opacity: 1; }
 .btn-rename:hover { background: rgba(44,44,46,0.08); color: var(--ink); }
 .card-title.editing { outline: 2px solid var(--purple); outline-offset: 2px; background: white; padding: 2px 4px; border-radius: 4px; cursor: text; }
-.card-actions { display: flex; gap: 5px; border-top: 1px dashed var(--line); padding-top: 8px; flex-wrap: wrap; }
-.btn { flex: 1; padding: 6px 8px; font-size: 11px; font-weight: 500; background: rgba(44,44,46,0.04); border: none; border-radius: 7px; cursor: pointer; transition: all .15s; color: var(--ink-soft); white-space: nowrap; }
+.btn { padding: 5px 9px; font-size: 11px; font-weight: 500; background: rgba(44,44,46,0.04); border: none; border-radius: 7px; cursor: pointer; transition: all .15s; color: var(--ink-soft); white-space: nowrap; }
 .btn:hover { background: rgba(44,44,46,0.08); color: var(--ink); }
 .btn.primary { background: linear-gradient(135deg, var(--pink), var(--purple)); color: white; font-weight: 600; }
 .btn.primary:hover { filter: brightness(1.05); }
-.btn-more { flex: 0 0 28px; padding: 6px 0; }
+.btn-more { padding: 5px 8px; }
 .btn-danger { color: #c0392b; }
 .btn-danger:hover { background: rgba(192, 57, 43, 0.1); }
 .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── 频道列表：应用分组 + 一行一频道（固定行高，不横滚） ── */
+.chan-filter { font-size: 12px; padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; background: white; color: var(--ink); width: 150px; }
+.chan-quick-filter { font-size: 11px; font-weight: 600; color: var(--ink-soft); padding: 4px 10px; border: 1px solid var(--line); border-radius: 999px; cursor: pointer; background: rgba(255,255,255,0.6); transition: all .15s; }
+.chan-quick-filter:hover { color: var(--ink); }
+.chan-quick-filter.active { background: linear-gradient(135deg, var(--pink), var(--purple)); color: white; border-color: transparent; }
+
+.chan-group { margin-bottom: 10px; }
+.chan-group-title { font-size: 11px; font-weight: 700; color: var(--ink-mute); letter-spacing: 0.04em; padding: 4px 2px; }
+.chan-section-head { display: flex; align-items: center; gap: 6px; padding: 4px 2px; cursor: pointer; font-size: 11px; font-weight: 600; color: var(--ink-soft); user-select: none; }
+.chan-section-head:hover { color: var(--ink); }
+.chan-section-caret { font-size: 9px; transition: transform .15s; display: inline-block; }
+.chan-section-caret.open { transform: rotate(90deg); }
+.chan-section-body { display: flex; flex-direction: column; gap: 4px; padding: 2px 0 6px; }
+
+.chan-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  height: 38px;
+  flex-shrink: 0;
+  padding: 0 12px;
+  background: white;
+  border: 1px solid var(--line);
+  border-radius: var(--radius-sm);
+  transition: background .15s;
+}
+.chan-row:hover { background: rgba(255,255,255,0.9); }
+.chan-row.dim { background: #f6f6f8; border-style: dashed; }
+.chan-row.chan-row-failed { background: rgba(231,139,139,0.08); border-color: rgba(231,139,139,0.4); }
+.chan-row .health-dot { flex: 0 0 auto; }
+.chan-row-name { flex: 1 1 auto; min-width: 0; }
+.chan-row-meta { flex: 0 0 110px; font-size: 11px; color: var(--ink-mute); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.chan-row-meta .sep { opacity: 0.5; margin: 0 3px; }
+.chan-row-activity { flex: 0 0 76px; font-size: 11px; color: var(--ink-mute); white-space: nowrap; font-variant-numeric: tabular-nums; }
+.chan-pending-badge { flex: 0 0 auto; background: var(--red); color: white; font-size: 10px; font-weight: 700; min-width: 16px; height: 16px; line-height: 16px; text-align: center; border-radius: 999px; padding: 0 4px; }
+.chan-row-actions { flex: 0 0 auto; display: flex; align-items: center; gap: 4px; }
+@media (max-width: 1100px) { .chan-row-meta { display: none; } }
 
 .log-region { flex: 1; background: white; border: 1px solid var(--line); border-radius: var(--radius-md); padding: 12px 14px; box-shadow: var(--shadow-sm); display: flex; flex-direction: column; min-height: 130px; max-height: 360px; overflow: hidden; }
 /* P3 bug 2: log-list 容器固定高度（Owner要求 ~20 行可视区，旧版无 max-height 致 main 整体滚动）。
@@ -205,21 +230,12 @@ body {
 .mode-toggle input:not(:checked) ~ .mode-track .lbl-on { color: var(--green); }
 .mode-toggle input:checked ~ .mode-track .lbl-off { color: var(--purple); }
 
-/* ── 频道卡瘦身：精简元信息行 ── */
-.card-meta-line { display: flex; flex-wrap: wrap; align-items: center; gap: 4px 8px; font-size: 11px; color: var(--ink-soft); margin: 4px 0 10px; font-variant-numeric: tabular-nums; }
-.card-meta-line .sep { color: var(--ink-mute); opacity: 0.5; }
-.card-meta-line .badge-fast { background: linear-gradient(135deg, var(--orange), var(--pink)); color: white; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 5px; letter-spacing: 0.03em; }
+/* ── 频道行徽章（fast / 睡眠 / 待处理，chan-row 内联）── */
+.badge-fast { background: linear-gradient(135deg, var(--orange), var(--pink)); color: white; font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 5px; letter-spacing: 0.03em; flex-shrink: 0; }
 .badge-sleep { background: rgba(88,86,214,0.12); color: var(--purple); font-size: 9px; font-weight: 700; padding: 1px 6px; border-radius: 5px; letter-spacing: 0.03em; flex-shrink: 0; }
-.card-meta-line .mi-label { color: var(--ink-mute); }
-.card.dim .card-meta-line { color: var(--ink-mute); }
 
-/* ── 休眠折叠区 ── */
-.standby-fold { margin-top: 10px; border: 1px dashed var(--line); border-radius: var(--radius-sm); background: rgba(255,255,255,0.4); }
-.standby-fold-head { display: flex; align-items: center; gap: 8px; padding: 8px 12px; cursor: pointer; font-size: 12px; font-weight: 600; color: var(--ink-soft); user-select: none; }
-.standby-fold-head:hover { color: var(--ink); }
-.standby-fold-caret { font-size: 10px; transition: transform .15s; display: inline-block; }
-.standby-fold-caret.open { transform: rotate(90deg); }
-.standby-fold-body { padding: 4px 12px 10px; }
+/* ── 工人（常驻托管）行：错误提示——broken 常驻显示 或 唤醒失败时临时插入，title 放全文 ── */
+.worker-error { flex: 1 1 auto; min-width: 0; color: var(--red); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 
 /* ── 频道设置弹窗 ── */
 .modal-overlay { position: fixed; inset: 0; background: rgba(44,44,46,0.32); backdrop-filter: blur(2px); display: flex; align-items: center; justify-content: center; z-index: 100; }

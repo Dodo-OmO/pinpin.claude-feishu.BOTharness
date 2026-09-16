@@ -14,7 +14,7 @@ import { dateYYYYMMDD, timeHHMM, safeName, getVaultRoot, ensureDir } from "./hel
 // 对话记录根目录：vault 根（getVaultRoot）下「对话记录」子目录
 const LOG_ROOT = path.join(getVaultRoot(), "对话记录");
 
-// chat_id → friendly name 映射（chat-message.ts 启动时填）
+// chat_id → friendly name 映射（chat-message.ts 收到入站消息时填；env PINPIN_CHAT_NAME 兜底）
 const chatNameCache = new Map<string, string>();
 
 export function setChatNameCache(chatId: string, name: string): void {
@@ -22,9 +22,19 @@ export function setChatNameCache(chatId: string, name: string): void {
 }
 
 export function getChatName(chatId: string): string {
-  // cache miss 用 chat_id 兜底——但正常路径下 chat-message.ts 首次写盘前已 setChatNameCache
-  // 填好友好名（群名 / 单聊 "VS X（私聊）"），故此裸兜底实际不再被走到（残留 oc_xxx 目录是历史存量）。
-  return chatNameCache.get(chatId) ?? chatId;
+  // 缓存优先（入站消息填的友好名）→ 仅本频道（PINPIN_CHAT_ID）时退到启动时 env 里的频道名
+  // （覆盖"首次写盘早于首条入站"的路径，例如重启后先发定时/触发产出）→ 最后才用 chat_id 兜底。
+  return (
+    chatNameCache.get(chatId) ??
+    (chatId === process.env.PINPIN_CHAT_ID ? process.env.PINPIN_CHAT_NAME : undefined) ??
+    chatId
+  );
+}
+
+/** 是否已有该 chat 的友好名（缓存命中，或本频道 env 名非空）——供 chat-message.ts 判断是否需要派生单聊名 */
+export function hasChatName(chatId: string): boolean {
+  if (chatNameCache.has(chatId)) return true;
+  return chatId === process.env.PINPIN_CHAT_ID && Boolean(process.env.PINPIN_CHAT_NAME);
 }
 
 // 按 chat 分目录：每 chat 独立 currentDate / currentLogPath 避免跨 chat 并发写串目录
@@ -149,8 +159,12 @@ export interface ReadChatLogOpts {
   date?: string;
   /** 近 N 天（含今天） */
   days?: number;
-  /** 近 N 小时（按行内 HH:MM 时间戳过滤；要求 days 隐式 = 1） */
+  /** 近 N 小时（无 since 时转换成 since = now - hours*3600e3） */
   hours?: number;
+  /** 窗口起点（毫秒时间戳）。给了 since 时按 [since, until] 精确过滤，优先级高于 hours */
+  since?: number;
+  /** 窗口终点（毫秒时间戳，不传 = 不设上限） */
+  until?: number;
 }
 
 /**
@@ -173,7 +187,14 @@ export function readChatLog(opts: ReadChatLogOpts = {}): Record<string, string> 
       .filter((d) => fs.statSync(path.join(LOG_ROOT, d)).isDirectory());
   }
 
-  // 2. 确定要读哪些日期
+  // 2. since/until：无 since 时 hours 转换成 since = now - hours*3600e3
+  let sinceMs = opts.since;
+  if (sinceMs === undefined && opts.hours && opts.hours > 0) {
+    sinceMs = Date.now() - opts.hours * 3600_000;
+  }
+  const untilMs = opts.until;
+
+  // 3. 确定要读哪些日期（优先级：date > days > since/until(含 hours 转换) > 默认今天）
   const dates: string[] = [];
   if (opts.date) {
     dates.push(opts.date);
@@ -183,17 +204,24 @@ export function readChatLog(opts: ReadChatLogOpts = {}): Record<string, string> 
       d.setDate(d.getDate() - i);
       dates.push(dateYYYYMMDD(d));
     }
-  } else if (opts.hours && opts.hours > 0) {
-    // hours 模式：跨午夜时需要昨天+今天两天文件
-    dates.push(dateYYYYMMDD()); // 今天
-    const yesterday = new Date();
-    yesterday.setDate(yesterday.getDate() - 1);
-    dates.push(dateYYYYMMDD(yesterday)); // 昨天（窗口可能跨午夜）
+  } else if (sinceMs !== undefined) {
+    // since 所在日 → (until ?? now) 所在日，逐日列出；上限 3 天，超出只取最近 3 天
+    const endMs = untilMs ?? Date.now();
+    const cur = new Date(sinceMs);
+    cur.setHours(0, 0, 0, 0);
+    const last = new Date(endMs);
+    last.setHours(0, 0, 0, 0);
+    const dayList: string[] = [];
+    while (cur <= last) {
+      dayList.push(dateYYYYMMDD(cur));
+      cur.setDate(cur.getDate() + 1);
+    }
+    dates.push(...(dayList.length > 3 ? dayList.slice(-3) : dayList));
   } else {
     dates.push(dateYYYYMMDD()); // 默认今天
   }
 
-  // 3. 读 + 可选按 hours 过滤
+  // 4. 读 + 可选按 since/until 窗口过滤
   for (const chatName of chatNames) {
     const parts: string[] = [];
     for (const date of dates) {
@@ -206,8 +234,8 @@ export function readChatLog(opts: ReadChatLogOpts = {}): Record<string, string> 
       } catch {
         continue;
       }
-      if (opts.hours && opts.hours > 0) {
-        content = filterByRecentHours(content, opts.hours, date);
+      if (sinceMs !== undefined) {
+        content = filterByWindow(content, date, sinceMs, untilMs);
       }
       if (content.trim()) parts.push(`### ${date}\n${content.trim()}`);
     }
@@ -218,30 +246,53 @@ export function readChatLog(opts: ReadChatLogOpts = {}): Record<string, string> 
 }
 
 /**
- * 按行内 HH:MM 时间戳过滤近 N 小时。
- * fileDate: 该行所属文件的日期（YYYY-MM-DD），用于跨午夜场景下正确组成完整 Date 再比较。
- * 弃 HH:MM 字符串比较——跨午夜时昨天 23:xx > 今天 01:xx 字符串比较会误判。
+ * 重启回神锚点：本频道在 beforeMs 之前、lookbackMs 以内最后一条对话的时刻（毫秒）；这段时间没有对话 → undefined。
+ * 「重启前最近 1 小时」按这个锚点往前取——凌晨定时重启前通常没人说话，按重启时刻取会总是空的。
  */
-function filterByRecentHours(content: string, hours: number, fileDate?: string): string {
-  const cutoffMs = Date.now() - hours * 3600_000;
+export function lastActivityBefore(chatId: string, beforeMs: number, lookbackMs: number): number | undefined {
+  const logs = readChatLog({ chat_id: chatId, since: beforeMs - lookbackMs, until: beforeMs });
+  let last: number | undefined;
+  for (const text of Object.values(logs)) {
+    let date = "";
+    for (const line of text.split("\n")) {
+      const d = line.match(/^### (\d{4}-\d{2}-\d{2})$/);
+      if (d) { date = d[1]; continue; }
+      const m = line.match(/^(\d{2}):(\d{2})\s/);
+      if (m && date) {
+        const ms = new Date(`${date}T${m[1]}:${m[2]}:00`).getTime();
+        if (last === undefined || ms > last) last = ms;
+      }
+    }
+  }
+  return last;
+}
+
+/**
+ * 按时间窗口 [since, until] 过滤内容。
+ * fileDate: 该行所属文件的日期（YYYY-MM-DD），用于组成完整 Date 再比较（弃 HH:MM 字符串比较——
+ * 跨午夜时昨天 23:xx > 今天 01:xx 字符串比较会误判）。
+ * 非时间行：H1/H2 标题行总收集（放上下文）；其它非时间行（多行消息续行）跟随上一时间行的 keep 状态。
+ * 若整个文件没有任何时间行落在窗口内，返回 ""（避免只剩标题的空堆输出）。
+ */
+function filterByWindow(content: string, fileDate: string, since: number, until?: number): string {
   const lines = content.split("\n");
   const out: string[] = [];
+  let lastKeep = false;
+  let anyTimeLineKept = false;
   for (const line of lines) {
     const m = line.match(/^(\d{2}):(\d{2})\s/);
     if (m) {
-      let lineMs: number;
-      if (fileDate) {
-        // 用文件日期 + 行内 HH:MM 组成完整时间戳比较
-        lineMs = new Date(`${fileDate}T${m[1]}:${m[2]}:00`).getTime();
-      } else {
-        // 降级：用今天日期（无 fileDate 时）
-        lineMs = new Date(`${dateYYYYMMDD()}T${m[1]}:${m[2]}:00`).getTime();
+      const lineMs = new Date(`${fileDate}T${m[1]}:${m[2]}:00`).getTime();
+      lastKeep = lineMs >= since && (until === undefined || lineMs <= until);
+      if (lastKeep) {
+        out.push(line);
+        anyTimeLineKept = true;
       }
-      if (lineMs >= cutoffMs) out.push(line);
     } else if (line.startsWith("# ") || line.startsWith("## ")) {
-      // H1/H2 标题行（如 "# 2026-05-27 第 N 轮重启"）总保留作上下文
+      out.push(line);
+    } else if (lastKeep) {
       out.push(line);
     }
   }
-  return out.join("\n");
+  return anyTimeLineKept ? out.join("\n") : "";
 }

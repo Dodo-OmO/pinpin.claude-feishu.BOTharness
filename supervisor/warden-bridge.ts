@@ -15,6 +15,8 @@ import {
   IPC_METHODS,
   WARDEN_BRIDGE_PORT,
   WARDEN_CLIENT_ID,
+  MODEL_OPTIONS,
+  EFFORT_OPTIONS,
   type HelloParams,
   type WorkOkResult,
   type WardenSystemInfo,
@@ -22,13 +24,47 @@ import {
   type WardenLogEntry,
 } from '../src/ipc/protocol.js';
 
-/** 全局默认设置快照（频道默认） */
-export interface WardenDefaults {
+/** 全局默认设置快照（频道默认，deps.getDefaults() 只需提供这部分） */
+export interface ChannelDefaults {
   channel: { model: string; effort: string; fast: boolean; autoCompactPct: number };
+}
+
+/** WARDEN_GET_DEFAULTS 的完整响应：频道默认 + model/effort 清单单源（供启动器设置页 / 管家页下拉渲染） */
+export interface WardenDefaults extends ChannelDefaults {
+  options: { models: string[]; efforts: string[] };
+}
+
+// effort 五档单源见 src/ipc/protocol.ts EFFORT_OPTIONS
+const VALID_EFFORTS = EFFORT_OPTIONS;
+
+/** set-config / set-defaults 入参净化：只挑 model/effort/fast/autoCompactPct 四个字段（不透传任意其它键）；
+ *  effort 传了但不在五档内 → 整请求判非法；autoCompactPct 非有限数则丢弃该字段，是则夹到 20-70。 */
+function sanitizeChannelPatch(
+  raw: unknown,
+): { ok: true; patch: { model?: string; effort?: string; fast?: boolean; autoCompactPct?: number } } | { ok: false; error: string } {
+  const p = (raw ?? {}) as {
+    model?: unknown;
+    effort?: unknown;
+    fast?: unknown;
+    autoCompactPct?: unknown;
+  };
+  if (p.effort !== undefined && !VALID_EFFORTS.includes(p.effort as string)) {
+    return { ok: false, error: `invalid effort: ${String(p.effort)}` };
+  }
+  const patch: { model?: string; effort?: string; fast?: boolean; autoCompactPct?: number } = {};
+  if (typeof p.model === 'string') patch.model = p.model;
+  if (typeof p.effort === 'string') patch.effort = p.effort;
+  if (typeof p.fast === 'boolean') patch.fast = p.fast;
+  if (typeof p.autoCompactPct === 'number' && Number.isFinite(p.autoCompactPct)) {
+    patch.autoCompactPct = Math.min(70, Math.max(20, p.autoCompactPct));
+  }
+  return { ok: true, patch };
 }
 
 export interface WardenBridgeDeps {
   getChannels: () => Map<string, ChannelCli>;
+  /** 展示用频道列表：已 spawn 的真实状态 + 已识别但睡眠/未 spawn 的合成"停止卡"（list-clis 用它，不用 getChannels） */
+  getDisplayChannels: () => Array<ReturnType<ChannelCli['getStats']>>;
   getSystemInfo: () => WardenSystemInfo;
   /** per-CLI 上下文用量（context_pct/cost 等，来自 statusLine）；透传给手机仪表盘 */
   getUsage: (chatId: string) => unknown;
@@ -40,11 +76,16 @@ export interface WardenBridgeDeps {
     chatId: string,
     cfg: { model?: string; effort?: string; fast?: boolean; autoCompactPct?: number },
   ) => void;
+  /** 改配置并立即生效（运行中的频道 --resume 重启）；未注入时退回只写配置 */
+  applyChannelConfigLive?: (
+    chatId: string,
+    patch: { model?: string; effort?: string; fast?: boolean; autoCompactPct?: number },
+  ) => void;
   setDisplayName: (chatId: string, name: string) => void;
   // 批2 额度
   fetchQuota: () => Promise<{ quota: unknown; today_messages: number; rate_limits: unknown }>;
   // 批4 全局设置 + 系统 + 日志
-  getDefaults: () => WardenDefaults;
+  getDefaults: () => ChannelDefaults;
   setDefaults: (patch: { model?: string; effort?: string; fast?: boolean; autoCompactPct?: number }) => void;
   restartSupervisor: () => Promise<void>;
   quitApp: () => void;
@@ -58,10 +99,7 @@ export async function createWardenBridge(deps: WardenBridgeDeps, token: string):
 
   bridge.setRequestHandler(IPC_METHODS.WARDEN_LIST_CLIS, async () => {
     return {
-      clis: [...deps.getChannels().values()].map((c) => {
-        const stats = c.getStats();
-        return { ...stats, usage: deps.getUsage(stats.chat_id) };
-      }),
+      clis: deps.getDisplayChannels().map((stats) => ({ ...stats, usage: deps.getUsage(stats.chat_id) })),
     };
   });
 
@@ -101,15 +139,11 @@ export async function createWardenBridge(deps: WardenBridgeDeps, token: string):
   });
 
   bridge.setRequestHandler(IPC_METHODS.WARDEN_SET_CONFIG, async (params): Promise<WorkOkResult> => {
-    const p = (params ?? {}) as {
-      chat_id?: string;
-      model?: string;
-      effort?: string;
-      fast?: boolean;
-      autoCompactPct?: number;
-    };
-    if (!p.chat_id) return { ok: false, error: 'no chat_id' };
-    deps.setChannelConfig(p.chat_id, p);
+    const { chat_id } = (params ?? {}) as { chat_id?: string };
+    if (!chat_id) return { ok: false, error: 'no chat_id' };
+    const sanitized = sanitizeChannelPatch(params);
+    if (!sanitized.ok) return { ok: false, error: sanitized.error };
+    (deps.applyChannelConfigLive ?? deps.setChannelConfig)(chat_id, sanitized.patch);
     return { ok: true };
   });
 
@@ -154,13 +188,14 @@ export async function createWardenBridge(deps: WardenBridgeDeps, token: string):
   });
 
   // ── 批4 全局设置 + 系统 + 日志 ──
-  bridge.setRequestHandler(IPC_METHODS.WARDEN_GET_DEFAULTS, async () => {
-    return deps.getDefaults();
+  bridge.setRequestHandler(IPC_METHODS.WARDEN_GET_DEFAULTS, async (): Promise<WardenDefaults> => {
+    return { ...deps.getDefaults(), options: { models: MODEL_OPTIONS, efforts: EFFORT_OPTIONS } };
   });
 
   bridge.setRequestHandler(IPC_METHODS.WARDEN_SET_DEFAULTS, async (params): Promise<WorkOkResult> => {
-    const p = (params ?? {}) as { model?: string; effort?: string; fast?: boolean; autoCompactPct?: number };
-    deps.setDefaults(p);
+    const sanitized = sanitizeChannelPatch(params);
+    if (!sanitized.ok) return { ok: false, error: sanitized.error };
+    deps.setDefaults(sanitized.patch);
     return { ok: true };
   });
 

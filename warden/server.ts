@@ -7,14 +7,85 @@
 import http from 'node:http';
 import fs from 'node:fs';
 import path from 'node:path';
+import crypto from 'node:crypto';
 import { WebSocketServer, WebSocket } from 'ws';
 import { HTTP_PORT, PUBLIC_DIR, CODE_ROOT } from './config.js';
 import { SupervisorBridge } from './supervisor-bridge.js';
 import { IPC_METHODS } from '../src/ipc/protocol.js';
 import { checkNet, launchLauncher } from './system-ops.js';
+import { handleHuixing } from './huixing-qr.js';
 
 const bridge = new SupervisorBridge();
 bridge.start();
+
+// Cloudflare Access（管家外网隧道）验签：团队域 + 本应用 aud，固定常量，不外置配置。
+const CF_ACCESS_TEAM_DOMAIN = 'https://<your-team>.cloudflareaccess.com';
+const CF_ACCESS_AUD = '<your-access-app-aud>';
+const CF_ACCESS_CERTS_URL = `${CF_ACCESS_TEAM_DOMAIN}/cdn-cgi/access/certs`;
+const CF_ACCESS_CERTS_TTL_MS = 60 * 60 * 1000; // 证书缓存 1 小时
+
+interface CfAccessJwk {
+  kid: string;
+  [k: string]: unknown;
+}
+let cfAccessCertsCache: { keys: CfAccessJwk[]; fetchedAt: number } | null = null;
+
+async function getCfAccessKeys(): Promise<CfAccessJwk[]> {
+  if (cfAccessCertsCache && Date.now() - cfAccessCertsCache.fetchedAt < CF_ACCESS_CERTS_TTL_MS) {
+    return cfAccessCertsCache.keys;
+  }
+  const res = await fetch(CF_ACCESS_CERTS_URL, { signal: AbortSignal.timeout(5000) });
+  if (!res.ok) throw new Error(`拉 Cloudflare Access 证书失败: HTTP ${res.status}`);
+  const body = (await res.json()) as { keys?: CfAccessJwk[] };
+  const keys = body.keys ?? [];
+  cfAccessCertsCache = { keys, fetchedAt: Date.now() };
+  return keys;
+}
+
+/** 验 Cloudflare Access JWT：RS256 签名 + exp + aud。任何解析/网络异常都判失败（fail-closed）。 */
+async function verifyCfAccessJwt(token: string): Promise<boolean> {
+  try {
+    const parts = token.split('.');
+    if (parts.length !== 3) return false;
+    const [headerB64, payloadB64, sigB64] = parts;
+    const header = JSON.parse(Buffer.from(headerB64, 'base64url').toString('utf-8')) as {
+      kid?: string;
+      alg?: string;
+    };
+    const payload = JSON.parse(Buffer.from(payloadB64, 'base64url').toString('utf-8')) as {
+      exp?: number;
+      aud?: string | string[];
+    };
+    if (header.alg !== 'RS256' || !header.kid) return false;
+
+    const aud = Array.isArray(payload.aud) ? payload.aud : payload.aud ? [payload.aud] : [];
+    if (!aud.includes(CF_ACCESS_AUD)) return false;
+    if (typeof payload.exp !== 'number' || payload.exp <= Math.floor(Date.now() / 1000)) return false;
+
+    const keys = await getCfAccessKeys();
+    const jwk = keys.find((k) => k.kid === header.kid);
+    if (!jwk) return false;
+
+    const publicKey = crypto.createPublicKey({ key: jwk as unknown as crypto.JsonWebKey, format: 'jwk' });
+    const signature = Buffer.from(sigB64, 'base64url');
+    const signedData = Buffer.from(`${headerB64}.${payloadB64}`);
+    return crypto.verify('RSA-SHA256', signedData, publicKey, signature);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * 请求带 cf-connecting-ip（说明经 Cloudflare 隧道进来）→ 必须带 cf-access-jwt-assertion 且验签通过；
+ * 不带 cf-connecting-ip 的本机直连请求照常放行、不受影响。
+ */
+async function isRequestAuthorized(req: http.IncomingMessage): Promise<boolean> {
+  if (!req.headers['cf-connecting-ip']) return true;
+  const assertion = req.headers['cf-access-jwt-assertion'];
+  const token = Array.isArray(assertion) ? assertion[0] : assertion;
+  if (!token) return false;
+  return verifyCfAccessJwt(token);
+}
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -57,6 +128,9 @@ async function handleApi(
   url: URL,
   res: http.ServerResponse,
 ): Promise<boolean> {
+  // 汇星授权二维码：豆姐自己开 /huixing.html 当场看当场扫（见 huixing-qr.ts）
+  if (url.pathname.startsWith('/api/huixing/')) return handleHuixing(url, req, res);
+
   if (url.pathname === '/api/state') {
     const launcher_up = bridge.isConnected();
     let clis: unknown[] = [];
@@ -199,6 +273,15 @@ async function handleApi(
 }
 
 const server = http.createServer((req, res) => {
+  void handleRequest(req, res);
+});
+
+async function handleRequest(req: http.IncomingMessage, res: http.ServerResponse): Promise<void> {
+  if (!(await isRequestAuthorized(req))) {
+    res.writeHead(403);
+    res.end('forbidden');
+    return;
+  }
   const url = new URL(req.url ?? '/', 'http://localhost');
 
   if (url.pathname === '/health') {
@@ -252,7 +335,7 @@ const server = http.createServer((req, res) => {
     });
     res.end(data);
   });
-});
+}
 
 // 终端实时流：前端 ws(/ws?chat=<id>) ↔ 管家 ↔ supervisor 桥接。
 // 同一 chat 多个前端 ws 在管家层 fan-out（突破 supervisor 单 consumer，支持多页签看同一终端）。
@@ -276,7 +359,13 @@ bridge.onReconnect = () => {
   for (const chat of chatSubs.keys()) subTerminal(chat).catch(() => {});
 };
 
-const wss = new WebSocketServer({ server, path: '/ws' });
+const wss = new WebSocketServer({
+  server,
+  path: '/ws',
+  verifyClient: (info, cb) => {
+    void isRequestAuthorized(info.req).then((ok) => cb(ok, ok ? undefined : 403));
+  },
+});
 wss.on('connection', (ws, req) => {
   // 手机切 WiFi/4G 等底层 socket 异常 → ws emit 'error'，无监听器会 uncaught 崩管家进程
   ws.on('error', (err) => console.error('[warden/ws]', err.message));

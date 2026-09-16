@@ -300,6 +300,14 @@ export function cancelJob(id: number): boolean {
   return result.changes > 0;
 }
 
+/** delete_channel 用：取消某频道全部待办（timer/speak_watch/relay/ask 等），返回取消条数。 */
+export function cancelPendingJobsByChat(chatId: string): number {
+  const result = getDb()
+    .prepare(`UPDATE scheduled_jobs SET status = 'cancelled' WHERE chat_id = ? AND status = 'pending'`)
+    .run(chatId);
+  return result.changes;
+}
+
 // ============ relay payload (主动单聊传话催回) ============
 
 /**

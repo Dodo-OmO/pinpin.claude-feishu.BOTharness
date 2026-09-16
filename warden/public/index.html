@@ -146,9 +146,22 @@
   <script src="/vendor/xterm/xterm.js"></script>
   <script>if ('serviceWorker' in navigator) navigator.serviceWorker.register('/sw.js').catch(() => {});</script>
   <script>
-    // ⚠️ launcher\renderer\main.ts 有同名常量的独立副本——加模型要两处一起改，否则启动器上看不到
-    const MODEL_OPTIONS = ['claude-opus-5 [1m]', 'claude-opus-4-8 [1m]', 'claude-opus-4-7 [1m]', 'claude-opus-4-6 [1m]', 'claude-sonnet-5', 'claude-sonnet-4-6'];
-    const EFFORT_OPTIONS = ['low', 'medium', 'high', 'max'];
+    // model/effort 清单单源：src/ipc/protocol.ts MODEL_OPTIONS/EFFORT_OPTIONS，经 /api/defaults 的 options 字段取；
+    // 页面加载时拉一次并缓存，拉取失败时下拉框只放当前值（见下方各 mo()/eo() 的回退逻辑）。
+    let MODEL_OPTIONS = [];
+    let EFFORT_OPTIONS = [];
+    let optionsLoaded = false;
+    async function loadOptions() {
+      if (optionsLoaded) return;
+      try {
+        const d = await (await fetch('/api/defaults')).json();
+        if (d && d.options && Array.isArray(d.options.models) && Array.isArray(d.options.efforts)) {
+          MODEL_OPTIONS = d.options.models;
+          EFFORT_OPTIONS = d.options.efforts;
+          optionsLoaded = true;
+        }
+      } catch {}
+    }
     const STATUS = {
       running:  { cls: 'ok',   label: '运行中' },
       starting: { cls: 'warn', label: '启动中' },
@@ -250,11 +263,13 @@
 
     // ── 全局默认设置 ──
     async function refreshDefaults() {
+      await loadOptions();
       let d;
       try { d = await (await fetch('/api/defaults')).json(); } catch { return; }
       if (!d || !d.channel) { $('defaults-panel').innerHTML = '<div class="empty" style="padding:14px">读取失败（启动器未运行？）</div>'; return; }
-      const mo = (sel) => MODEL_OPTIONS.map((m) => `<option ${m === sel ? 'selected' : ''}>${m}</option>`).join('');
-      const eo = (sel) => EFFORT_OPTIONS.map((e) => `<option ${e === sel ? 'selected' : ''}>${e}</option>`).join('');
+      // 已存值不在清单里时补到最前并选中（兼容旧持久化值，避免保存时被静默改成清单第一项）
+      const mo = (sel) => (MODEL_OPTIONS.includes(sel) || !sel ? MODEL_OPTIONS : [sel, ...MODEL_OPTIONS]).map((m) => `<option ${m === sel ? 'selected' : ''}>${m}</option>`).join('');
+      const eo = (sel) => (EFFORT_OPTIONS.includes(sel) || !sel ? EFFORT_OPTIONS : [sel, ...EFFORT_OPTIONS]).map((e) => `<option ${e === sel ? 'selected' : ''}>${e}</option>`).join('');
       $('defaults-panel').innerHTML = `
         <div class="row" style="color:#c9d1d9;font-weight:600">频道默认</div>
         <div class="row"><label>模型</label><select id="def-model">${mo(d.channel.model)}</select></div>
@@ -311,7 +326,8 @@
       try { term.resize(cols, rows); } catch {}
     }
 
-    function openConsole(key) {
+    async function openConsole(key) {
+      await loadOptions();
       currentKey = key;
       const item = lastClis.find((x) => x.chat_id === key) || { chat_id: key, status: 'stopped' };
       const running = item.status === 'running';
@@ -347,15 +363,16 @@
     }
 
     function renderSettings(c) {
-      const modelOpts = MODEL_OPTIONS.map((m) => `<option ${m === c.model ? 'selected' : ''}>${m}</option>`).join('');
-      const effortOpts = EFFORT_OPTIONS.map((e) => `<option ${e === c.effort ? 'selected' : ''}>${e}</option>`).join('');
+      // 已存值不在清单里时补到最前并选中（同上 mo/eo 逻辑）
+      const modelOpts = (MODEL_OPTIONS.includes(c.model) || !c.model ? MODEL_OPTIONS : [c.model, ...MODEL_OPTIONS]).map((m) => `<option ${m === c.model ? 'selected' : ''}>${m}</option>`).join('');
+      const effortOpts = (EFFORT_OPTIONS.includes(c.effort) || !c.effort ? EFFORT_OPTIONS : [c.effort, ...EFFORT_OPTIONS]).map((e) => `<option ${e === c.effort ? 'selected' : ''}>${e}</option>`).join('');
       $('term-settings').innerHTML = `
         <div class="row"><label>名称</label><input id="cfg-name" value="${esc(c.chat_name || '')}" placeholder="自定义卡片名" /></div>
         <div class="row"><label>模型</label><select id="cfg-model">${modelOpts}</select></div>
         <div class="row"><label>Effort</label><select id="cfg-effort">${effortOpts}</select></div>
         <div class="row"><label>压缩%</label><input id="cfg-compact" type="number" min="20" max="70" value="${c.autoCompactPct ?? 25}" /></div>
         <div class="row"><label>Fast</label><input id="cfg-fast" type="checkbox" ${c.fast ? 'checked' : ''} style="flex:none;width:auto" /></div>
-        <button class="save" onclick="saveConfig()">保存（改配置需重启频道生效）</button>`;
+        <button class="save" onclick="saveConfig()">保存（运行中的频道会立即重启生效）</button>`;
     }
 
     $('term-settings-toggle').onclick = () => {
@@ -371,7 +388,7 @@
       });
       const r1 = await (await fetch('/api/cli/config?' + qs, { method: 'POST' })).json();
       const r2 = await (await fetch('/api/cli/name?chat=' + encodeURIComponent(currentKey) + '&name=' + encodeURIComponent(name), { method: 'POST' })).json();
-      alert(r1.ok && r2.ok ? '已保存（重启该频道生效）' : '保存失败：' + (r1.error || r2.error));
+      alert(r1.ok && r2.ok ? '已保存（运行中的频道会自动重启生效）' : '保存失败：' + (r1.error || r2.error));
     };
 
     window.cliAction = async (action) => {
@@ -414,6 +431,7 @@
       } catch { el.textContent = '查询失败'; }
     }
 
+    loadOptions();
     refresh();
     setInterval(() => {
       refresh();

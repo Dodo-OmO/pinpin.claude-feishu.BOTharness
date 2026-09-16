@@ -242,6 +242,9 @@ export async function handleSendApprovalCard(args: {
   const card = buildApprovalCard(args.title, args.lines, args.buttons, value);
   try {
     const targetOpenId = resolveTargetOpenId({ person_name: args.person_name, open_id: args.open_id });
+    if ((args.person_name || args.open_id) && !targetOpenId) {
+      return textErr(`找不到这个人：${args.person_name ?? args.open_id}`);
+    }
     let messageId: string;
     let chatId: string;
     if (targetOpenId) {

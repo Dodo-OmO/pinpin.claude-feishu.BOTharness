@@ -38,21 +38,21 @@ export const memoryRewriteTool: Tool = {
 export async function handleMemoryRewrite(args: { new_content: string; summary?: string }) {
   const { new_content } = args;
 
-  // 行数校验①
-  const newLines = new_content.split("\n").filter((l) => l.trim().length > 0).length;
+  // 行数校验①（只数编号条目行，不含文件头/空行）
+  const newLines = new_content.split("\n").filter((l) => /^\d{1,2}\.\s/.test(l)).length;
   if (newLines !== EXPECTED_LINES) {
     return {
       isError: true,
       content: [
         {
           type: "text" as const,
-          text: `行数校验失败：期望 ${EXPECTED_LINES} 行非空内容，实际 ${newLines} 行。请补齐/精简到正好 ${EXPECTED_LINES} 条后重试。`,
+          text: `行数校验失败：期望 ${EXPECTED_LINES} 条编号内容，实际 ${newLines} 条。请补齐/精简到正好 ${EXPECTED_LINES} 条后重试。`,
         },
       ],
     };
   }
 
-  // 大小校验②
+  // 读现文件（供大小校验②ᐧ拼头两用）
   let oldContent = "";
   if (fs.existsSync(MEMORY_FILE)) {
     try {
@@ -62,8 +62,20 @@ export async function handleMemoryRewrite(args: { new_content: string; summary?:
       return { isError: true, content: [{ type: "text" as const, text: `读原永存记忆失败：${msg}` }] };
     }
   }
+
+  // new_content 不以 # 标题开头 → 把现文件第一个编号行之前的头部原样拼回去
+  let finalContent = new_content;
+  if (!/^\s*#/.test(new_content)) {
+    const firstEntryMatch = oldContent.match(/^\d{1,2}\.\s/m);
+    if (firstEntryMatch && firstEntryMatch.index !== undefined) {
+      const header = oldContent.slice(0, firstEntryMatch.index);
+      if (header.length > 0) finalContent = header + new_content;
+    }
+  }
+
+  // 大小校验②
   const oldSize = Buffer.byteLength(oldContent, "utf-8");
-  const newSize = Buffer.byteLength(new_content, "utf-8");
+  const newSize = Buffer.byteLength(finalContent, "utf-8");
   if (oldSize > 0 && newSize < oldSize * MIN_SIZE_RATIO) {
     return {
       isError: true,
@@ -90,9 +102,11 @@ export async function handleMemoryRewrite(args: { new_content: string; summary?:
     return { isError: true, content: [{ type: "text" as const, text: `备份失败（已拒绝写主文件保护数据）：${msg}` }] };
   }
 
-  // 三校验全过 → 写盘
+  // 三校验全过 → 写盘（tmp+rename 原子落盘，参照 memory.ts writeMemoryLine）
+  const tmp = `${MEMORY_FILE}.tmp.${process.pid}`;
   try {
-    fs.writeFileSync(MEMORY_FILE, new_content, "utf-8");
+    fs.writeFileSync(tmp, finalContent, "utf-8");
+    fs.renameSync(tmp, MEMORY_FILE);
     return {
       content: [
         {
@@ -108,6 +122,7 @@ export async function handleMemoryRewrite(args: { new_content: string; summary?:
       ],
     };
   } catch (e) {
+    try { fs.unlinkSync(tmp); } catch { /* tmp 可能未生成 */ }
     const msg = e instanceof Error ? e.message : String(e);
     return { isError: true, content: [{ type: "text" as const, text: `写永存记忆失败：${msg}` }] };
   }

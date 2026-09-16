@@ -9,6 +9,7 @@
  */
 
 import type * as Lark from '@larksuiteoapi/node-sdk';
+import { rememberMessage } from './recent-messages.js';
 
 const POLL_INTERVAL_MS = Number(process.env.PINPIN_POLL_INTERVAL_MS ?? 8000);
 const CHAT_LIST_REFRESH_MS = Number(process.env.PINPIN_CHAT_LIST_REFRESH_MS ?? 5 * 60 * 1000);
@@ -98,6 +99,15 @@ export class FeishuPoll {
     return [...this.chats.entries()].map(([chat_id, info]) => ({ chat_id, name: info.name, app_id: this.appId }));
   }
 
+  /** 立即从本 app 的轮询列表移除某 chat（deleteChannel/stopChannel 调，或探测到"机器人不在群"时自愈调）。
+   *  不等下次 5min chat.list 刷新——防止：① 轮询继续打对方已退出的群报 400；
+   *  ② resolveAppId 遍历 poll.getChats() 命中已删的 chat 把 channel-config.json 写回 seen/appId。 */
+  removeChat(chatId: string): boolean {
+    const had = this.chats.delete(chatId);
+    this.lastCreateTimeMs.delete(chatId);
+    return had;
+  }
+
   private async refreshChatList(isInitial: boolean): Promise<void> {
     // has_more 翻页（消化 step 2 code-review Optional：100 群封顶，群多了会漏新群发现）
     const items: Array<{ chat_id?: string; name?: string }> = [];
@@ -172,9 +182,21 @@ export class FeishuPoll {
       try {
         await this.pollChat(chatId);
       } catch (e) {
-        process.stderr.write(
-          `[feishu-poll] pollChat(${chatId}) 异常: ${e instanceof Error ? e.message : e}\n`,
-        );
+        // 飞书 230002 = "Bot/User can NOT be out of the chat"（机器人已不在群，如刚被踢/退群）：
+        // 不是瞬时抖动，是确定性状态——立即从轮询列表摘除，防止每 8s 重复报 400 刷屏，
+        // 等下次 chat.list 刷新自然确认（群若重新拉回会走 onChatListDiff added 自动恢复）。
+        const feishuCode = (e as { response?: { data?: { code?: number } } })?.response?.data?.code;
+        if (feishuCode === 230002) {
+          this.chats.delete(chatId);
+          this.lastCreateTimeMs.delete(chatId);
+          process.stderr.write(
+            `[feishu-poll] pollChat(${chatId}) 机器人已不在群（code=230002），从轮询列表移除\n`,
+          );
+        } else {
+          process.stderr.write(
+            `[feishu-poll] pollChat(${chatId}) 异常: ${e instanceof Error ? e.message : e}\n`,
+          );
+        }
       }
     }
     // processedIds 上限
@@ -216,7 +238,7 @@ export class FeishuPoll {
       message_id: string;
       msg_type: string;
       create_time: string;
-      sender: { id: string; id_type: string; sender_type: string };
+      sender: { id: string; id_type: string; sender_type: string; sender_name?: string };
       body: { content: string };
       // poll API 返回项含 mentions（@ 占位符↔真名映射）；透传 raw 后给 chat-message resolveMentions 用
       mentions?: Array<{ key: string; name: string; id?: unknown; tenant_key?: string }>;
@@ -258,6 +280,12 @@ export class FeishuPoll {
       raw: m,
       app_id: this.appId,
     };
+
+    rememberMessage(m.message_id, {
+      chat_id: chatId,
+      sender: m.sender.sender_name ?? m.sender.id,
+      preview: text ?? `(${m.msg_type})`,
+    });
 
     if (this.callbacks.onMessage) {
       try {

@@ -175,7 +175,7 @@ export async function parseFile(ctx: ParseCtx): Promise<string | null> {
       return `[文件附件「${parsed.file_name ?? "未命名"}」] 你发的文件默认没自动存（你本机通常已有）。要存进库就回复这条文件跟我说"存下来"，我用 pinpin_save_file 给你存。`;
     }
     const localPath = await saveInboundFile(payload.message_id, parsed.file_key, parsed.file_name ?? "file");
-    return `[文件附件「${parsed.file_name ?? "未命名"}」] 已备份到本地，默认不读——需要时再 Read：${localPath}`;
+    return `[文件附件「${parsed.file_name ?? "未命名"}」] 已备份到本地，默认不读——要读：.xlsx/.docx/.csv 用 read_attachment 工具（Read 解析不了二进制），图片/PDF/文本用 Read：${localPath}`;
   } catch (e) {
     process.stderr.write(
       `[chat-message] 文件处理失败 msg_id=${payload.message_id}: ${e instanceof Error ? e.message : e}\n`,

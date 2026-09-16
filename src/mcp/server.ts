@@ -23,6 +23,14 @@ import { PINPIN_MEMORIZE_TOOL, handlePinpinMemorize } from './tools/pinpin-memor
 import { PINPIN_NO_REPLY_TOOL, handlePinpinNoReply } from './tools/pinpin-no-reply.js';
 import { PINPIN_SEND_FILE_TOOL, handlePinpinSendFile } from './tools/pinpin-send-file.js';
 import { PINPIN_SAVE_FILE_TOOL, handlePinpinSaveFile } from './tools/pinpin-save-file.js';
+import {
+  PINPIN_RECALL_MESSAGE_TOOL,
+  PINPIN_EDIT_MESSAGE_TOOL,
+  PINPIN_MERGE_FORWARD_TOOL,
+  handlePinpinRecallMessage,
+  handlePinpinEditMessage,
+  handlePinpinMergeForward,
+} from './tools/pinpin-message-ops.js';
 // 阶段 4：DB 初始化 + cron 注册（import 触发 registerCron 副作用）
 import { initDatabase, closeDatabase } from './db/database.js';
 import { startAllCrons, stopAllCrons } from './cron/registry.js';
@@ -40,7 +48,9 @@ import { readChatLogTool, handleReadChatLog } from './tools/read-chat-log.js';
 // 阶段 4 批次 2 tools
 import { sendPrivateMessageTool, handleSendPrivateMessage } from './tools/send-private-message.js';
 import { createGroupTool, handleCreateGroup } from './tools/create-group.js';
-import { disbandGroupTool, handleDisbandGroup } from './tools/disband-group.js';
+import { deleteChannelTool, handleDeleteChannel } from './tools/delete-channel.js';
+import { setPersonNameTool, handleSetPersonName } from './tools/set-person-name.js';
+import { wakeWorkerTool, handleWakeWorker } from './tools/wake-worker.js';
 import { listActiveChatsTool, handleListActiveChats } from './tools/list-active-chats.js';
 import { writeDiaryTool, handleWriteDiary } from './tools/write-diary.js';
 import { readPushedNewsUrlsTool, handleReadPushedNewsUrls } from './tools/read-pushed-news-urls.js';
@@ -56,6 +66,7 @@ import { askPersonTool, handleAskPerson } from './tools/ask-person.js';
 import { notifyWhenSpeaksTool, handleNotifyWhenSpeaks } from './tools/notify-when-speaks.js';
 // 2026-05-28 多 CLI 落地：跨频道发言 tool
 import { CROSS_CHAT_MESSAGE_TOOL, handleCrossChatMessage } from './tools/cross-chat-message.js';
+import { BROADCAST_TOOL, handleBroadcast } from './tools/broadcast.js';
 // 传话主动催 relay tool
 import { relayMessageTool, handleRelayMessage } from './tools/relay-message.js';
 // 传话口：本机 Claude 窗口 ⇄ 品品
@@ -72,9 +83,7 @@ import {
 // 2026-05-28 阶段补齐：辅助 2 tool
 import {
   RESOLVE_OPEN_ID_TOOL,
-  ARCHIVE_SEARCH_TOOL,
   handleResolveOpenId,
-  handleArchiveSearch,
 } from './tools/misc-tools.js';
 // 2026-05-28 阶段补齐：卡片家族 4 tool（B4：send_approval_card 真按钮回调，confirm_dangerous_action 复用之）
 import {
@@ -87,9 +96,11 @@ import {
   handleSendApprovalCard,
   handleConfirmDangerousAction,
 } from './tools/cards.js';
-import { appendFileSync, mkdirSync, existsSync } from 'node:fs';
+import { appendFileSync, mkdirSync, existsSync, openSync, readSync, closeSync, fstatSync } from 'node:fs';
 import { join } from 'node:path';
 import { getVaultRoot, dateYYYYMMDD } from './utils/helper.js';
+import { sendDirectMessage } from './utils/dm-send.js';
+import { getChatName, readChatLog, lastActivityBefore } from './utils/chat-log.js';
 
 /** 黑匣子：把 MCP server 进程级崩溃/降级写盘留证。进程崩了重连代码随之死、launcher.log 接不到，
  *  故落到 vault 系统日志，下次复发可定位真凶。崩溃 handler 内只做最小同步写盘 + 退出，不碰复杂状态。 */
@@ -119,6 +130,9 @@ process.on('unhandledRejection', (reason) => {
 });
 
 async function main() {
+  // 本 MCP 子进程启动时刻——warmup 以它之前最后一条对话为锚读「最近 1 小时原文」（chat-message.ts 里各自求值同名常量）
+  const PROCESS_START_MS = Date.now();
+
   const server = new Server(
     {
       name: 'feishu-channel',
@@ -150,9 +164,9 @@ async function main() {
   const ALWAYS_LOAD = new Set<string>([
     'pinpin_reply_text', 'pinpin_reply_voice', 'pinpin_react', 'pinpin_no_reply',
     'pinpin_memorize',
-    'write_diary', 'send_daily_news_card',
-    'send_private_message',
   ]);
+  // write_diary / send_daily_news_card / send_private_message 不常驻：只有 sub-agent（frontmatter 已点名）
+  // 和定时提示词用得到，主会话按名 ToolSearch 即可展开，省每轮常驻 token
   server.setRequestHandler(ListToolsRequestSchema, async () => ({
     tools: [
       PINPIN_REPLY_TEXT_TOOL,
@@ -162,6 +176,9 @@ async function main() {
       PINPIN_NO_REPLY_TOOL,
       PINPIN_SEND_FILE_TOOL,
       PINPIN_SAVE_FILE_TOOL,
+      PINPIN_RECALL_MESSAGE_TOOL,
+      PINPIN_EDIT_MESSAGE_TOOL,
+      PINPIN_MERGE_FORWARD_TOOL,
       readChatLogTool,
       // 阶段 4 批次 2
       sendPrivateMessageTool,
@@ -180,9 +197,12 @@ async function main() {
       notifyWhenSpeaksTool,
       // 2026-05-28 多 CLI 跨频道发言
       CROSS_CHAT_MESSAGE_TOOL,
+      BROADCAST_TOOL,
       // 2026-05-29 建群 / 解散群
       createGroupTool,
-      disbandGroupTool,
+      deleteChannelTool,
+      setPersonNameTool,
+      wakeWorkerTool,
       // 传话主动催
       relayMessageTool,
       DESKTOP_NOTE_ACK_TOOL,
@@ -193,7 +213,6 @@ async function main() {
       COMPACT_CHAT_TOOL,
       // 2026-05-28 阶段补齐：辅助 2 tool
       RESOLVE_OPEN_ID_TOOL,
-      ARCHIVE_SEARCH_TOOL,
       // 2026-05-28 阶段补齐：卡片家族 4 tool（send_poll_card 已实装，重新加回）
       SEND_CARD_TOOL,
       SEND_POLL_CARD_TOOL,
@@ -217,6 +236,32 @@ async function main() {
   // 补发逻辑在下方 feishu-message handler 里；此变量模块级、不跨请求累积。
   let lastToolCallAt = 0;
 
+  /**
+   * "claude 已收到该条推送"判断：lastToolCallAt >= sentAt（调过工具）视为收到；
+   * 否则退到 transcript 兜底（env PINPIN_TRANSCRIPT_PATH 存在时，读文件尾最多 512KB 找 marker 字符串——
+   * 品品哪怕没调工具、只是读完打了字，transcript 里也会留下 marker 原文）。任何异常/无 transcript 返回 false。
+   */
+  function claudeReceived(marker: string, sentAt: number): boolean {
+    if (lastToolCallAt >= sentAt) return true;
+    const transcriptPath = process.env.PINPIN_TRANSCRIPT_PATH;
+    if (!transcriptPath) return false;
+    try {
+      if (!existsSync(transcriptPath)) return false;
+      const fd = openSync(transcriptPath, 'r');
+      try {
+        const size = fstatSync(fd).size;
+        const readSize = Math.min(size, 512 * 1024);
+        const buf = Buffer.alloc(readSize);
+        readSync(fd, buf, 0, readSize, size - readSize);
+        return buf.toString('utf8').includes(marker);
+      } finally {
+        closeSync(fd);
+      }
+    } catch {
+      return false;
+    }
+  }
+
   server.setRequestHandler(CallToolRequestSchema, async (request) => {
     lastToolCallAt = Date.now();
     const { name, arguments: args } = request.params;
@@ -238,6 +283,12 @@ async function main() {
         return handlePinpinSendFile(args as unknown as Parameters<typeof handlePinpinSendFile>[0]);
       case 'pinpin_save_file':
         return handlePinpinSaveFile(args as unknown as Parameters<typeof handlePinpinSaveFile>[0]);
+      case 'pinpin_recall_message':
+        return handlePinpinRecallMessage(args as unknown as Parameters<typeof handlePinpinRecallMessage>[0]);
+      case 'pinpin_edit_message':
+        return handlePinpinEditMessage(args as unknown as Parameters<typeof handlePinpinEditMessage>[0]);
+      case 'pinpin_merge_forward':
+        return handlePinpinMergeForward(args as unknown as Parameters<typeof handlePinpinMergeForward>[0]);
       case 'read_chat_log':
         return handleReadChatLog(args as unknown as Parameters<typeof handleReadChatLog>[0]);
       // 阶段 4 批次 2
@@ -245,8 +296,12 @@ async function main() {
         return handleSendPrivateMessage(args as unknown as Parameters<typeof handleSendPrivateMessage>[0]);
       case 'create_group':
         return handleCreateGroup(args as unknown as Parameters<typeof handleCreateGroup>[0]);
-      case 'disband_group':
-        return handleDisbandGroup(args as unknown as Parameters<typeof handleDisbandGroup>[0]);
+      case 'delete_channel':
+        return handleDeleteChannel(args as unknown as Parameters<typeof handleDeleteChannel>[0]);
+      case 'set_person_name':
+        return handleSetPersonName(args as unknown as Parameters<typeof handleSetPersonName>[0]);
+      case 'wake_worker':
+        return handleWakeWorker(args as unknown as Parameters<typeof handleWakeWorker>[0]);
       case 'list_active_chats':
         return handleListActiveChats();
       case 'write_diary':
@@ -273,6 +328,8 @@ async function main() {
       case 'notify_when_speaks':
         return handleNotifyWhenSpeaks(args as unknown as Parameters<typeof handleNotifyWhenSpeaks>[0]);
       // 2026-05-28 多 CLI 跨频道发言
+      case 'broadcast':
+        return handleBroadcast(args as unknown as Parameters<typeof handleBroadcast>[0]);
       case 'cross_chat_message':
         return handleCrossChatMessage(args as unknown as Parameters<typeof handleCrossChatMessage>[0]);
       // 传话主动催
@@ -292,8 +349,6 @@ async function main() {
       // 2026-05-28 阶段补齐：辅助 3 tool
       case 'resolve_open_id':
         return handleResolveOpenId(args as unknown as Parameters<typeof handleResolveOpenId>[0]);
-      case 'archive_search':
-        return handleArchiveSearch(args as unknown as Parameters<typeof handleArchiveSearch>[0]);
       // 2026-05-28 阶段补齐：卡片家族 4 tool
       case 'send_card':
         return handleSendCard(args as unknown as Parameters<typeof handleSendCard>[0]);
@@ -395,12 +450,14 @@ async function main() {
     // 冷启动补发安全网：是否已完成首条 feishu-message 的 handleInboundMessage 处理
     // （flush 路径和直接处理路径都会把它设为 true）
     let firstMessageHandled = false;
+    /** 上次「补发耗尽」告警时刻：同频道 30 分钟内只告警一次，防崩溃循环刷屏 */
+    let lastResendAlertAt = 0;
 
     /**
      * 补发安全网：对冷启动首条消息，在发出 channel notification 后轮询检测
      * claude 是否在限定时间内调用过工具。若没有（channel 注册间隙导致丢弃），则重发 notification。
      * 退避重试：6s / 14s / 25s（三次后放弃）。
-     * 取消条件：lastToolCallAt >= sentAt（claude 已就绪收到了）。
+     * 取消条件：claudeReceived(marker, sentAt)（claude 已就绪收到了——调过工具，或 transcript 里已见 marker）。
      * 不重跑 handleInboundMessage 副作用（不重写 chat-log / 不重触发 restart-care）。
      */
     function scheduleResend(
@@ -408,17 +465,34 @@ async function main() {
       sentAt: number,
       attempt: number,
     ): void {
-      const delays = [6000, 14000, 25000];
+      // 冷启动读 CLAUDE.md + skills 动辄十几秒，6s 就判「没收到」会让几乎每次唤醒都白补一发。
+      // 放到 18/45/90 秒：既躲开正常启动耗时，又能在真丢消息时 2 分半内补回来。
+      const delays = [18_000, 45_000, 90_000];
       // chatId 在外层 if (chatId && supervisorPort) 块内已 guard，此处确保非空
       const chatIdSuffix = (chatId as string).slice(-8);
+      const marker = sent.meta?.message_id || sent.content.slice(0, 40);
       if (attempt >= delays.length) {
-        logBackground('wake-resend', `chat=${chatIdSuffix} 已重试 ${delays.length} 次，放弃补发`);
+        const ownerOpenId = process.env.FEISHU_OWNER_OPEN_ID;
+        // 频道反复崩溃重启时每轮都会走到这儿，加 30 分钟窗口去重，别把告警刷进豆姐私聊
+        const alerted = ownerOpenId && Date.now() - lastResendAlertAt > 30 * 60_000;
+        logBackground('wake-resend', `chat=${chatIdSuffix} 已重试 ${delays.length} 次，放弃补发${alerted ? '（已告警豆姐）' : '（30 分钟内已告警过或没配 owner，本次不告警）'}`);
+        // 静默丢消息是最坏的失败方式：补到头还没反应 → 私聊豆姐说清哪个频道、丢了什么
+        if (alerted) {
+          lastResendAlertAt = Date.now();
+          const preview = String(sent.content ?? '').slice(0, 60);
+          void sendDirectMessage(
+            ownerOpenId,
+            'text',
+            `⚠️ 「${getChatName(chatId as string)}」那边的我三次都没接住这条唤醒，可能漏了：${preview}…\n要紧的话你再说一次，或者让维护看一眼。`,
+            '[唤醒补发耗尽告警]',
+          ).catch(() => { /* 告警本身失败只能落日志 */ });
+        }
         return;
       }
       const delay = delays[attempt];
       setTimeout(() => {
-        if (lastToolCallAt >= sentAt) {
-          // claude 已调工具，说明原消息被收到，取消补发
+        if (claudeReceived(marker, sentAt)) {
+          // claude 已收到原消息（调过工具 / transcript 已见 marker），取消补发
           logBackground('wake-resend', `chat=${chatIdSuffix} claude acted, cancel resend (attempt=${attempt + 1})`);
           return;
         }
@@ -436,33 +510,67 @@ async function main() {
       }, delay);
     }
 
-    // ── 频道简报 warmup（2026-08-24）──
+    // ── 频道简报 warmup（2026-08-24，2026-09-16 扩到「重启前 1 小时原文」）──
     // 简报（vault\频道简报\<chatId>.md）含「## 启动预读」节 → 冷启动就绪后推预读 trigger，
-    // 品品先读好知识库再等人提问（Project X提示词工作频道用）。once per 进程；每次重启（上下文清零）都重预读。
-    // 安全网：借 lastToolCallAt 信号（与冷启动补发同款），20s 无任何工具调用 → 重推一次。
+    // 品品先读好知识库再等人提问（Project X提示词工作频道用）。再加：重启前最后一条对话往前 1 小时的原文（所有频道），
+    // 让品品重启完成即完整看到自己重启前经历的最后一段——不用等 restart-care agent 总结。
+    // once per 进程；每次重启（上下文清零）都重推。
+    // 安全网：claudeReceived（与冷启动补发同款），20s 未收到 → 重推一次。
     let warmupFired = false;
     function scheduleChannelWarmup(): void {
       if (warmupFired) return;
+      // PINPIN_RESUMED=1（续接重启：--resume 接原会话，上下文没清零）不推 warmup
+      if (process.env.PINPIN_RESUMED === '1') return;
       warmupFired = true;
+      const cid = chatId as string;
       // readVaultFile 带 3×50ms 重试（同步盘瞬时锁防护）；无简报/读失败返回 ""（绝大多数频道走这里）。
       // 但 existsSync 先探一下：不存在就别让 readVaultFile 打 4 连 WARN 日志。
       let section = '';
-      if (existsSync(channelBriefPath(getVaultRoot(), chatId as string))) {
-        const briefRaw = readVaultFile(getVaultRoot(), `频道简报/${chatId as string}.md`);
+      if (existsSync(channelBriefPath(getVaultRoot(), cid))) {
+        const briefRaw = readVaultFile(getVaultRoot(), `频道简报/${cid}.md`);
         // $(?![\s\S]) = 真·字符串末尾（m 标志下裸 $ 是行尾，会把多行预读节截成一行）
         const m = briefRaw.match(/^## 启动预读\s*\n([\s\S]*?)(?=\n## |$(?![\s\S]))/m);
         if (m) section = m[1].trim();
       }
-      if (!section) return;
-      const body =
-        `🧭 频道启动预读（系统触发，本频道每次重启后自动执行一次）。先把知识库读好再服务提问：\n${section}\n` +
-        `读完调 pinpin_no_reply 留痕即可，不用在群里说话。`;
+
+      let recentRaw = '';
+      let anchor: number | undefined;
+      try {
+        // 以重启前 12 小时内最后一条对话为锚，取它之前 1 小时（含锚点那一分钟）
+        anchor = lastActivityBefore(cid, PROCESS_START_MS, 12 * 3600_000);
+        if (anchor !== undefined) {
+          const logs = readChatLog({ chat_id: cid, since: anchor - 3600_000, until: anchor + 59_000 });
+          recentRaw = Object.values(logs).join('\n\n').trim();
+        }
+      } catch (e) {
+        logBackground('warmup', `chat=${cid.slice(-8)} 读重启前最近 1 小时原文失败: ${e instanceof Error ? e.message : e}`);
+      }
+      if (recentRaw.length > 6000) {
+        recentRaw = `…（更早部分省略）\n${recentRaw.slice(-6000)}`;
+      }
+
+      if (!recentRaw && !section) return;
+
+      const marker = `warmup-${PROCESS_START_MS}`;
+      const parts: string[] = [`【${marker}】`];
+      if (recentRaw) {
+        const at = anchor !== undefined ? new Date(anchor).toTimeString().slice(0, 5) : '';
+        parts.push(`🕐 重启前最近 1 小时的对话原文（最后一条在 ${at}；你自己在这个频道里经历的，完整看一遍再干活）：\n${recentRaw}`);
+      }
+      if (section) {
+        parts.push(
+          `🧭 频道启动预读（系统触发，本频道每次重启后自动执行一次）。先把知识库读好再服务提问：\n${section}`,
+        );
+      }
+      parts.push('读完调 pinpin_no_reply 留痕即可，不用发消息。');
+      const body = parts.join('\n\n');
+
       const sentAt = Date.now();
-      void pushChannelTrigger({ trigger: 'channel-warmup', chat_id: chatId as string, body });
+      void pushChannelTrigger({ trigger: 'channel-warmup', chat_id: cid, body });
       setTimeout(() => {
-        if (lastToolCallAt >= sentAt) return; // claude 已动过工具 = 已收到
-        logBackground('warmup', `chat=${(chatId as string).slice(-8)} 20s 无工具调用，warmup 重推一次`);
-        void pushChannelTrigger({ trigger: 'channel-warmup', chat_id: chatId as string, body, meta: { resend: 'true' } });
+        if (claudeReceived(marker, sentAt)) return; // 已收到
+        logBackground('warmup', `chat=${cid.slice(-8)} 20s 未收到，warmup 重推一次`);
+        void pushChannelTrigger({ trigger: 'channel-warmup', chat_id: cid, body, meta: { resend: 'true' } });
       }, 20_000);
     }
 

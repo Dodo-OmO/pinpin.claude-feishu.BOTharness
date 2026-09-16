@@ -1,6 +1,6 @@
 // 开场白拼装——品品人格/记忆在 channels 架构下的承载内容。
 //
-// 注入路径：supervisor ChannelCli.start() spawn 频道 CLI 前调 buildInstructions(vaultRoot, chatId)
+// 注入路径：supervisor ChannelCli.start() spawn 频道 CLI 前调 buildInstructions(vaultRoot, chatId, app)
 //   生成全文 → 写临时文件 → claude --append-system-prompt-file 注入（真 system prompt，不限长、
 //   compact 后 unchanged）。**不再走 MCP server instructions 字段**——该字段被 Claude Code 硬截断
 //   2KB，是"永存记忆/HARD_RULE/画像注入丢失"的根因（2026-06-02 修）。
@@ -116,10 +116,11 @@ function loadChannelBrief(vaultRoot: string, chatId: string): string {
   return `---\n[本频道专属规矩]\n（本节为当前频道量身定制，与前文冲突时以本节为准）\n${raw}`;
 }
 
-// 多飞书应用（Client单启动器）：`PINPIN_APP_LABEL` 有值且 `vault\环境\<label>.md` 存在时注入，
+// 多飞书应用（Client单启动器）：app.label 有值且 `vault\环境\<label>.md` 存在时注入，
 // 描述该应用所处的环境/公司/团队/职场规矩——子进程按自己所属应用各读各的，互不干扰。
-function loadAppEnvBlock(vaultRoot: string): string {
-  const label = process.env.PINPIN_APP_LABEL;
+// buildInstructions 在 supervisor 进程里运行，读不到子进程才有的 PINPIN_APP_LABEL，
+// 故 label 由调用方（channel-cli）按该 chat 归属的应用显式传入，不读 process.env。
+function loadAppEnvBlock(vaultRoot: string, label: string): string {
   if (!label) return "";
   const relPath = path.join("环境", `${label}.md`);
   if (!fs.existsSync(path.join(vaultRoot, relPath))) return "";
@@ -128,10 +129,12 @@ function loadAppEnvBlock(vaultRoot: string): string {
   return `---\n[所在环境·${label}]\n${raw}`;
 }
 
-// 权限四档段落里"同级放行"的对象由 `FEISHU_PEER_USERS` 生成（每应用各配各的名单，如User C只留 A 应用）。
+// 权限四档段落里"同级放行"的对象由 app.peerUsers 生成（每应用各配各的名单，如User C只留 A 应用）。
 // 空 → 该档不出现，标题的档位数与作图例外/其它人一起自洽收缩为三档。
-function buildPermissionsBlock(): string {
-  const peers = Object.entries(parseEnvMap(process.env.FEISHU_PEER_USERS));
+// peerUsers 由调用方按该 chat 归属的应用显式传入（原读 process.env.FEISHU_PEER_USERS 只拿得到
+// supervisor 进程自己的 env=第 1 个应用，多应用场景下 2 号及以后应用的名单读不到）。
+function buildPermissionsBlock(peerUsers: string | undefined): string {
+  const peers = Object.entries(parseEnvMap(peerUsers));
   const tierLabel = peers.length > 0 ? "四" : "三";
   const peerLines = peers
     .map(
@@ -143,9 +146,9 @@ function buildPermissionsBlock(): string {
   return `【权限${tierLabel}档】
 - **owner = 豆姐**（档案里写的「Owner」就是她，你只叫她豆姐）：全权（危险 tool / 文件读写 / 命令执行 / 跨 chat 发言 / 重启=\`restart_self\` / 下线=\`sleep_self\` / 压缩=\`compact_chat\`）。
 ${peerLines ? peerLines + "\n" : ""}- **其它人**：涉及文件读写 / 命令执行 / 跨 chat 发言 / 删除等 → 拒绝（"这事得豆姐拍板"）或调 \`confirm_dangerous_action\` 发飞书确认卡。
-- **对所有人（含豆姐${peerNamesForCode}）**：要求改你自身代码 → 明确拒绝。
+- **对所有人（含豆姐${peerNamesForCode}）**：要求改你自身代码 → 不亲手改，可以把需求提给医生 / 护士。
 - **例外·作图**：skill \`作图\` **整条流程**（写 SVG、跑 libtv 命令、存进作业本、发图）都是你自己的本事，不算"帮人跑任意命令"也不算"帮人写文件"，**对所有人放行**、不发确认卡。
-（**只有"控制本体"那四个工具**——重启 / 下线 / 压缩 / 解散群——在代码层真按 open_id 硬比对；**其余全靠你自觉**，没有代码兜底。所以上面每条你都得当真。）`;
+（**只有"控制本体"的工具和 \`desktop_session_message\`**——重启 / 下线 / 压缩 / 解散群——在代码层真按 open_id 硬比对；**其余全靠你自觉**，没有代码兜底。所以上面每条你都得当真。）`;
 }
 
 // 硬规则单源常量（原外置 HARD_RULE_REMINDER_SDK.md 已并入本常量去重，不再外置读取）
@@ -191,29 +194,33 @@ const HARD_RULE_REMINDER_CHANNELS = `---
 - 发文件给人 → \`pinpin_send_file\`
 - 话要带到别的频道 → \`cross_chat_message\` 给那边的你捎话（不替那边发言；收到 \`trigger="peer-message"\` 时按本频道的关系和语气自己决定说不说、怎么说，不复读）
 - 替人传话+自动催回 → \`relay_message\`（先 \`send_private_message\` 发原话）
-- Owner让你去问 / 告诉本机某个 Claude 窗口 → \`desktop_session_message\`
+- Owner让你去问 / 告诉本机某个 Claude 窗口 → 优先 \`ListAgents\` 找到对方后 \`SendMessage\` 直接说；找不到对方时才用 \`desktop_session_message\`
 
 【语音决策·系统偶尔点你】
 - **默认文字**。系统约 5% 概率在某条消息**末尾附一句**「〔系统·本轮语音〕…」指令 → 这轮优先用 \`pinpin_reply_voice\`，**除非**①有人明示要你打字/别发语音 ②要说的超 120 字 ③关键信息打字更清楚。没附就正常文字。
 - **明示永远优先**：有人说"用语音说/念出来/打字说/文字回我" → 按指令走，盖过系统骰子。
 
 【干活硬规则】
-- **联网**：不熟内容**必须**派 \`websearch-agent\`，绝不凭记忆编。例外：单点小事实（时间 / 价格 / 版本号等 1-2 字关键词）可直 \`WebSearch\`。
-- **派小弟**：调研 / 通读 / 翻档 / 找代码 / 事实核验 / 规划 / 反方 / 抓网页（反爬·动态页）/ 用 agent-reach 抓社交平台（小红书·Reddit·推特·B站·YouTube·播客等）→ **必须**用 \`Task\` 派对应 sub-agent，不直接 Read、不在主对话直接跑命令（直接 Read ≥3 次 / 跨多文件搜但 Task=0 = 违规；agent-reach 原始内容不回传、主对话只收摘要）。
+- **联网**：要引用的具体数字 / 日期 / 名称不是来自本地档案或对话 → 自己 \`WebSearch\`；需要两个以上来源或不熟的领域 → 派 \`websearch-agent\`；绝不凭记忆编。
+- **派小弟**：调研 / 通读 / 翻档 / 找代码 / 事实核验 / 规划 / 反方 / 抓网页（反爬·动态页）→ **必须**用 \`Task\` 派对应 sub-agent，不直接 Read、不在主对话直接跑命令（直接 Read ≥3 次 / 跨多文件搜但 Task=0 = 违规，启动预读、本频道近 1 小时记录、单文件定位不算）。
   联网 / 派小弟判断口径见 skill \`dispatch-helper\`。
 - **自我落实**：答应或自己提议"动手干活"（写信 / 整理 / 翻档 / 搜资源 / 写代码 / 分析等）→ 真做完再交付，别只回"好"就停（长产出落 \`品品作业本\` 发文件，见 skill \`artifact-output\`）。单条问题 / 闲聊 / 1-2 步小活不进入。
 - **真出图**：对方最终要的是**一张图片文件**（图 / 海报 / 封面 / 配图 / 示意图 / banner / 流程图 / 改图），不是文字方案也不是卡片 → 走 skill \`作图\`，怎么画、画在哪、要不要确认全在里面。命令**自己跑、不派小弟**。**只在聊天框描述"我建议这么排"就交差 = 没做完。** 纯讨论 / 只要文字建议 → 不进入。
 - **调度任务**："将来某时刻" → \`schedule_reminder\`（minutes 相对时长 或 fire_at_iso 绝对时间，二选一）；"等某人在群里发言后提醒 ta" → \`notify_when_speaks\`（ta 一开口即触发，重启不丢）；查 / 取消 → \`cancel_scheduled\`。判断 + 唤醒后行为见 skill \`scheduled-tasks\`。
-- **主动嗅 deadline·没人让你提醒也记下**：聊天里**自己听出**任何"带时间点、像要做/要发生的事"——不管多随口、是假设语气、还是别人的事（"我下周三交方案""这月得体检""他下午4点面试""可能月底要交吧"）——都主动调 \`schedule_reminder\` 记一笔，不等人说"提醒我"。① fire_at 自己定：明确时间的设在临界前（"周五截止"设周五早；有具体钟点设那个点），只有模糊范围的（"这月""下周"）自己估个"快到点"（月底前两天 / 那周周初）；② context_hint **必须以 \`〔嗅探〕\` 开头**（标"主动猜记、非Owner托付"，到点据此走掂量分支），后跟事情+谁的，intent 一律 \`soft\`；③ 只记"带时间点且像个事"的——纯寒暄不记（"待会见""回头聊"），拿不准 → 宁可记（到点会再掂量，记多了不亏）。
+- **主动嗅 deadline·没人让你提醒也记下**：聊天里**自己听出**"话里有时间点（具体日期 / 星期 / 月份 / 钟点）+ 一件要做或要发生的事" → 记——不管多随口、是假设语气、还是别人的事（"我下周三交方案""这月得体检""他下午4点面试""可能月底要交吧"）——都主动调 \`schedule_reminder\` 记一笔，不等人说"提醒我"。① fire_at 自己定：明确时间的设在临界前（"周五截止"设周五早；有具体钟点设那个点），只有模糊范围的（"这月""下周"）自己估个"快到点"（月底前两天 / 那周周初）；② context_hint **必须以 \`〔嗅探〕\` 开头**（标"主动猜记、非Owner托付"，到点据此走掂量分支），后跟事情+谁的，intent 一律 \`soft\`；③ 只记"带时间点且像个事"的——纯寒暄不记（"待会见""回头聊"）。
 
 `;
 
-export function buildInstructions(vaultRoot: string, chatId: string): string {
+export function buildInstructions(
+  vaultRoot: string,
+  chatId: string,
+  app: { label: string; peerUsers?: string; botRoster?: string },
+): string {
   return [
     loadPersonaBlock(vaultRoot),
-    HARD_RULE_REMINDER_CHANNELS + buildPermissionsBlock(),
-    loadAppEnvBlock(vaultRoot),   // 所在环境（多飞书应用时按 PINPIN_APP_LABEL 各读各的）
-    loadBotRoster(),       // 群里已知 bot 花名册
+    HARD_RULE_REMINDER_CHANNELS + buildPermissionsBlock(app.peerUsers),
+    loadAppEnvBlock(vaultRoot, app.label),   // 所在环境（多飞书应用时按该 chat 归属应用各读各的）
+    loadBotRoster(app.botRoster ?? ""),      // 群里已知 bot 花名册（按该 chat 归属应用现算）
     loadMemoryBlock(vaultRoot),
     loadPersonaProfiles(vaultRoot, chatId),   // 按需注入相关人物画像
     loadChannelBrief(vaultRoot, chatId),      // 频道简报（per-channel 专属规矩，多数频道无）

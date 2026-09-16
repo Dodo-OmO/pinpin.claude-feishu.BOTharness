@@ -8,6 +8,10 @@
  * 方法全集见下方 IPC_METHODS 逐条注释（hello/bye、push、request、warden 桥接四类，40+ method）。
  */
 
+// model/effort 清单单源——launcher renderer、warden-bridge、warden 页面都从这里取，不再各自维护副本。
+export const MODEL_OPTIONS = ['claude-fable-5-1 [1m]', 'claude-opus-5 [1m]', 'claude-opus-4-8 [1m]', 'claude-opus-4-7 [1m]', 'claude-opus-4-6 [1m]', 'claude-sonnet-5', 'claude-sonnet-4-6'];
+export const EFFORT_OPTIONS = ['low', 'medium', 'high', 'xhigh', 'max'];
+
 export interface IpcEnvelope<T = unknown> {
   /** Request/response 配对 id；单向 notification 无 id */
   id?: string;
@@ -34,9 +38,16 @@ export const IPC_METHODS = {
   SPAWN_CHANNEL: 'spawn-channel',      // request → returns WorkOkResult
   // 停某频道 CLI + 删配置，不再重 spawn（解散群后调）
   STOP_CHANNEL: 'stop-channel',        // request → returns WorkOkResult
+  // 彻底删除频道（delete_channel tool）：群→自建解散/否则退群，私聊→只清本地；归档简报+对话记录，取消待办、删画像映射
+  DELETE_CHANNEL: 'delete-channel',    // request DeleteChannelParams → DeleteChannelResult
+  // 记人名（set_person_name tool）：写认人表 + 私聊无名时补显示名
+  SET_PERSON_NAME: 'set-person-name',  // request SetPersonNameParams → WorkOkResult
+  // 叫醒常驻工人会话（wake_worker tool）：医生/工程师/顺子等，不在则 PTY 拉起并等就绪
+  WAKE_WORKER: 'wake-worker',          // request WakeWorkerParams → WakeWorkerResult
   // 多飞书应用：supervisor 持有全部应用 client，跨应用能力集中在此（子进程只有本 chat 所属应用的 client）
   LIST_CHATS: 'list-chats',              // child → main request {} → ListChatsResult（全部应用的群，带 app 标签）
   PEER_MESSAGE: 'peer-message',          // child → main request PeerMessageParams → PeerMessageResult（给另一频道的品品捎话，main 推 trigger=peer-message）
+  BROADCAST: 'broadcast',                // child → main request BroadcastParams → BroadcastResult（一件事扇出给相关频道，trigger=broadcast；同时落广播板）
   // 方案A：投票点击 → supervisor 把记票请求路由到有 DB 的频道子进程执行（main → child request）
   POLL_VOTE: 'poll.vote',              // main → child request → returns PollVoteResult
   // ── 管家(warden)桥接：独立管家进程连 supervisor 固定端口，手机远程看/控 CLI ──
@@ -244,8 +255,49 @@ export interface SpawnChannelParams {
   /** 单聊对方 open_id（在 PINPIN_P2P_ALWAYS_ON_OPEN_IDS 白名单内则不睡眠） */
   peer_open_id?: string;
 }
+/** SPAWN_CHANNEL 返回：带上 supervisor 定的频道显示名，子进程写对话记录按它分目录 */
+export interface SpawnChannelResult extends WorkOkResult {
+  chat_name?: string;
+}
 export interface StopChannelParams {
   chat_id: string;
+}
+
+// ── 彻底删除频道 params/result（DELETE_CHANNEL）──
+export interface DeleteChannelParams {
+  chat_id: string;
+  /** 必须原样复述频道显示名（去空格后全等）才放行，防误删 */
+  confirm_name: string;
+  /** true=品品自建群→解散；false/未传=Owner的正式群→退群 */
+  disband?: boolean;
+}
+export interface DeleteChannelResult {
+  ok: boolean;
+  error?: string;
+  chat_name?: string;
+  kind?: 'group' | 'p2p';
+  /** 归档/清理动作留痕（相对 vault 路径） */
+  archived?: string[];
+}
+
+// ── 记人名 params（SET_PERSON_NAME；复用 WorkOkResult 返回）──
+export interface SetPersonNameParams {
+  open_id: string;
+  name: string;
+  /** 该私聊 chat_id（有值且该频道未落显示名时，同时补 `VS 名（私聊）`） */
+  chat_id?: string;
+}
+
+// ── 常驻工人托管 params/result（WAKE_WORKER）──
+export interface WakeWorkerParams {
+  /** 工人名字，同 --name / ListAgents 里的名字（workers.json 配置项 name） */
+  name: string;
+}
+export interface WakeWorkerResult {
+  ok: boolean;
+  /** woke=刚拉起成功；already=本来就醒着；failed=拉起或等就绪失败（详见 error） */
+  state?: 'woke' | 'already' | 'failed';
+  error?: string;
 }
 
 // ── 人名/bot名映射（supervisor 方法返回给启动器 Electron IPC 用；不走 TCP IPC）──
@@ -286,6 +338,21 @@ export interface PeerMessageParams {
   trigger?: string;
   /** 附加 meta，随 trigger 送到目标频道 */
   meta?: Record<string, string>;
+}
+export interface BroadcastParams {
+  /** 事件类型：派活/改期/催办/完成/通知/其它 */
+  kind: string;
+  /** 一句话摘要 */
+  text: string;
+  /** person=只播 chat_ids；all=播全部Client频道（PINPIN_BROADCAST_CHAT_IDS） */
+  scope: 'person' | 'all';
+  chat_ids?: string[];
+}
+export interface BroadcastResult {
+  /** 送达的频道友好名 */
+  delivered: string[];
+  /** 没送到的（拉不起来 / 不在服务范围） */
+  failed: string[];
 }
 export interface PeerMessageResult {
   ok: boolean;

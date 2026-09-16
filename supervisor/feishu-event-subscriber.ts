@@ -19,6 +19,8 @@ import * as Lark from '@larksuiteoapi/node-sdk';
 import type { CardActionEvent, ReactionEvent, BotAddedEvent, CommentEvent } from '@larksuiteoapi/node-sdk';
 import type { FeishuInboundMessage } from './feishu-poll.js';
 import type { ApprovalCardValue } from '../src/mcp/feishu/cards/diy-card.js';
+import { rememberMessage, lookupMessage } from './recent-messages.js';
+import { logBackground } from '../src/mcp/utils/background-log.js';
 
 /** 卡片投票回调结构（action.value.poll_id + option_idx） */
 export interface PollActionValue {
@@ -43,6 +45,33 @@ export interface FeishuEventSubscriberOptions {
   onBotAdded?: (evt: BotAddedEvent) => void | Promise<void>;
   /** 云文档评论（无 chat_id，supervisor 侧投兜底频道） */
   onComment?: (evt: CommentEvent) => void | Promise<void>;
+  /** 审批实例 / 审批任务状态变更（v1 事件 approval_instance / approval_task；需先按 approval_code 订阅） */
+  onApprovalEvent?: (evt: ApprovalEventPayload) => void | Promise<void>;
+  /** 对方打开与品品的私聊会话（bot_p2p_chat_entered_v1，无消息内容，纯打开动作） */
+  onP2pEntered?: (chatId: string, openId: string) => void | Promise<void>;
+  /** 打卡成功（attendance.user_flow.created_v1；平台侧要勾事件 + 考勤读权限才会推） */
+  onAttendanceEvent?: (evt: AttendanceEventPayload) => void | Promise<void>;
+}
+
+/** 审批 v1 事件的公共字段（两个事件体字段名一致，task 事件多 task_id / user_id） */
+export interface ApprovalEventPayload {
+  kind: 'instance' | 'task';
+  approval_code: string;
+  instance_code: string;
+  status: string;
+  task_id?: string;
+  user_id?: string;
+  open_id?: string;
+  operate_time?: string;
+}
+
+/** 打卡流水事件（schema 2.0 被 SDK 扁平化，字段直接在顶层）；employee_id 是 user_id 不是 open_id，check_time 是秒 */
+export interface AttendanceEventPayload {
+  employee_id: string;
+  check_time: string;
+  record_id?: string;
+  location_name?: string;
+  is_field?: boolean;
 }
 
 export class FeishuEventSubscriber {
@@ -95,6 +124,11 @@ export class FeishuEventSubscriber {
             return;
           }
           const inbound = this.normalize(msg);
+          rememberMessage(msg.messageId, {
+            chat_id: msg.chatId,
+            sender: msg.senderName ?? msg.senderId,
+            preview: msg.content ?? `(${inbound.msg_type})`,
+          });
           Promise.resolve(this.opts.onMessage(inbound)).catch((e) => {
             process.stderr.write(
               `[feishu-event] onMessage 异步异常: ${e instanceof Error ? e.message : e}\n`,
@@ -189,13 +223,97 @@ export class FeishuEventSubscriber {
       process.stderr.write('[feishu-event] ✅ WS 重连成功\n');
     });
 
-    // 平台订阅但无业务处理的 3 个事件——注册空 handler 消 SDK "no xxx handle" warn 刷屏
-    // SDK 升级需复查此 cast
-    (this.channel as unknown as { dispatcher: { register(h: Record<string, () => void>): void } })
+    // 平台订阅但无业务处理的事件（message_read_v1）——注册空 handler 消 SDK "no xxx handle" warn 刷屏。
+    // bot_p2p_chat_entered_v1 已接 onP2pEntered（对方打开私聊会话，无消息内容）；
+    // recalled_v1 已接落日志（见下 recallHandler）。SDK 升级需复查此 cast
+    const onApproval = this.opts.onApprovalEvent;
+    const onP2pEntered = this.opts.onP2pEntered;
+    const p2pEnteredHandler = (data: Record<string, unknown>) => {
+      if (!onP2pEntered) return;
+      const chatId = typeof data.chat_id === 'string' ? data.chat_id : undefined;
+      const operatorId = data.operator_id as { open_id?: string } | undefined;
+      const openId = typeof operatorId?.open_id === 'string' ? operatorId.open_id : undefined;
+      if (!chatId || !openId) {
+        process.stderr.write(`[feishu-event] bot_p2p_chat_entered_v1 缺 chat_id/open_id，丢弃: ${JSON.stringify(data)}\n`);
+        return;
+      }
+      setImmediate(() => void onP2pEntered(chatId, openId));
+    };
+    const recallHandler = (data: Record<string, unknown>) => {
+      const s = (k: string) => (typeof data[k] === 'string' ? (data[k] as string) : undefined);
+      const message_id = s('message_id');
+      const chat_id = s('chat_id');
+      const recall_type = s('recall_type');
+      const cached = message_id ? lookupMessage(message_id) : undefined;
+      logBackground(
+        'recall',
+        `chat=${chat_id ?? '未知'} 发送者=${cached?.sender ?? '未知'} 撤回方式=${recall_type ?? '未知'} ` +
+          `原文=${cached?.preview ?? '（启动器没缓存到）'} id=${message_id ?? '未知'}`,
+      );
+      process.stderr.write(
+        `[feishu-event] 消息撤回 chat=${chat_id ?? '?'} id=${message_id ?? '?'} 方式=${recall_type ?? '?'}\n`,
+      );
+    };
+    const onAttendance = this.opts.onAttendanceEvent;
+    const attendanceHandler = (data: Record<string, unknown>) => {
+      if (!onAttendance) return;
+      const s2 = (k: string) => (typeof data[k] === 'string' ? (data[k] as string) : undefined);
+      const employee_id = s2('employee_id');
+      const check_time = s2('check_time');
+      if (!employee_id || !check_time) return;
+      void onAttendance({
+        employee_id,
+        check_time,
+        record_id: s2('record_id'),
+        location_name: s2('location_name'),
+        is_field: typeof data['is_field'] === 'boolean' ? (data['is_field'] as boolean) : undefined,
+      });
+    };
+    const approvalHandler = (kind: 'instance' | 'task') => (data: Record<string, unknown>) => {
+      if (!onApproval) return;
+      const s = (k: string) => (typeof data[k] === 'string' ? (data[k] as string) : undefined);
+      const approval_code = s('approval_code');
+      const instance_code = s('instance_code');
+      if (!approval_code || !instance_code) return;
+      void onApproval({
+        kind,
+        approval_code,
+        instance_code,
+        status: s('status') ?? '',
+        task_id: s('task_id'),
+        user_id: s('user_id'),
+        open_id: s('open_id'),
+        operate_time: s('operate_time') ?? s('instance_operate_time'),
+      });
+    };
+    (this.channel as unknown as { dispatcher: { register(h: Record<string, (data: Record<string, unknown>) => void>): void } })
       .dispatcher.register({
-        'im.chat.access_event.bot_p2p_chat_entered_v1': () => {},
+        'im.chat.access_event.bot_p2p_chat_entered_v1': p2pEnteredHandler,
         'im.message.message_read_v1': () => {},
-        'im.message.recalled_v1': () => {},
+        'im.message.recalled_v1': recallHandler,
+        // 平台在推但无业务处理（按平台实际推的 key 原样写，别用文档同义词）：日志里 no xxx handle 刷屏的就是它们
+        user_status_change: () => {},
+        'contact.scope.updated_v3': () => {},
+        p2p_chat_create: () => {},
+        // 审批 v1 事件（开放平台事件订阅里勾了"审批实例/任务状态变更"才会推）
+        approval_instance: approvalHandler('instance'),
+        approval_task: approvalHandler('task'),
+        // 打卡流水（平台侧没勾这个事件就永远不会进来；实测用最小链路，轮询 SOP 不受影响）
+        'attendance.user_flow.created_v1': attendanceHandler,
+        // 平台各类审批单在推但无业务处理，同上注册空 handler 消 "no xxx handle" 刷屏
+        // （按 `grep -o "no [a-zA-Z_0-9.]* handle" logs/launcher.log | sort | uniq -c` 实测原文核对）
+        approval: () => {},
+        approval_cc: () => {},
+        work_approval: () => {},
+        leave_approval: () => {},
+        leave_approvalV2: () => {},
+        out_approval: () => {},
+        trip_approval: () => {},
+        leave_approval_revert: () => {},
+        work_approval_revert: () => {},
+        'approval.instance.comment.created_v4': () => {},
+        'approval.instance.trip_group_update_v4': () => {},
+        'vc.room.deleted_v1': () => {},
       });
 
     // **关键**：createLarkChannel 只返回 channel 实例，不自动建 WS 握手——必须显式 connect()

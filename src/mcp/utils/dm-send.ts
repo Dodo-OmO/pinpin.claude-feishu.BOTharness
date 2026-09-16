@@ -5,9 +5,9 @@
 import { getFeishuClient } from "../tools/feishu-send.js";
 import { resolveOpenId } from "../db/database.js";
 import { logBackground } from "./background-log.js";
-import { appendBotReply } from "./chat-log.js";
+import { appendBotReply, setChatNameCache } from "./chat-log.js";
 import { getSupervisorClient } from "../../ipc/client-singleton.js";
-import { IPC_METHODS, type WorkOkResult } from "../../ipc/protocol.js";
+import { IPC_METHODS, type SpawnChannelResult } from "../../ipc/protocol.js";
 
 /** person_name 经 known_users 反查 open_id；或直接传 open_id。都没给 / 反查不到 → undefined。 */
 export function resolveTargetOpenId(args: { person_name?: string; open_id?: string }): string | undefined {
@@ -54,7 +54,9 @@ export async function sendDirectMessage(
   if (dmChatId) {
     try {
       const ipcClient = getSupervisorClient();
-      await ipcClient.request<WorkOkResult>(IPC_METHODS.SPAWN_CHANNEL, { chat_id: dmChatId, is_p2p: true, peer_open_id: openId });
+      const spawned = await ipcClient.request<SpawnChannelResult>(IPC_METHODS.SPAWN_CHANNEL, { chat_id: dmChatId, is_p2p: true, peer_open_id: openId });
+      // 以 supervisor 定的频道名写记录，免得落进裸 chat_id 目录或和那边频道分成两个目录
+      if (spawned.chat_name) setChatNameCache(dmChatId, spawned.chat_name);
     } catch (e) {
       process.stderr.write(
         `[dm-send] 挂频道 IPC 失败（不阻断发送）: ${e instanceof Error ? e.message : e}\n`,

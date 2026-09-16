@@ -222,6 +222,8 @@ export class IpcServer extends EventEmitter {
     // entry 占位——hello 来了再填 chatId / pid
     const entry: ClientEntry = { chatId: '', pid: 0, socket, buffer: '', authed: false, state: {} };
     this.sockets.add(socket);
+    // 半死连接（对端休眠/被强杀/断网）不会触发 close，会让在线数假活——30s keepalive 探活
+    socket.setKeepAlive(true, 30_000);
 
     socket.on('data', (chunk) => {
       entry.buffer += chunk.toString('utf8');

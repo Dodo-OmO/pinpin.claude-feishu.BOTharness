@@ -4,6 +4,8 @@ import dotenv from 'dotenv';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Supervisor } from '../../supervisor/index.js';
+import type { ChannelCli } from '../../supervisor/channel-cli.js';
+import type { WorkerCli } from '../../supervisor/worker-cli.js';
 import { loadFeishuApps } from '../../supervisor/feishu-apps.js';
 import { ensureThisMachineIsHost } from './host-lock.js';
 import { getVaultRoot } from '../../src/mcp/utils/helper.js';
@@ -13,6 +15,7 @@ import {
   type FeishuMention,
 } from '../../supervisor/sender-resolver.js';
 import type { SupervisorStateSnapshot, LogEntry } from '../shared-types.js';
+import { supportsFast } from '../shared-types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -152,9 +155,17 @@ function createTray(): void {
   });
 }
 
+/** 终端窗口 IPC 统一按 id 查 PTY 持有者：`worker:<name>` 走工人托管，其余照旧走频道 CLI。 */
+function findPtyOwner(id: string): ChannelCli | WorkerCli | undefined {
+  if (id.startsWith('worker:')) {
+    return supervisor?.getWorker(id.slice('worker:'.length));
+  }
+  return supervisor?.getChannel(id);
+}
+
 function snapshotState(): SupervisorStateSnapshot {
   if (!supervisor) {
-    return { ipc_port: 0, chats: [], channels: [], today_messages: 0 };
+    return { ipc_port: 0, chats: [], channels: [], today_messages: 0, workers: [] };
   }
   const sv = supervisor;
   return {
@@ -175,6 +186,7 @@ function snapshotState(): SupervisorStateSnapshot {
       };
     }),
     today_messages: sv.getTodayMessageCount(),
+    workers: sv.listWorkers(),
   };
 }
 
@@ -352,23 +364,30 @@ app.whenReady().then(async () => {
   ipcMain.handle('channel.compact', (_, chatId: string) => {
     supervisor?.getChannel(chatId)?.compact();
   });
-  // P1.2: 切 model / effort（持久化 + 更新 channel-cli.opts；CLI 不支持热切换，需手动 restart 生效）
+  // P1.2→改：切 model / effort（持久化 + 更新 channel-cli.opts；改完该频道续接重启生效，不用等手动重启）
   ipcMain.handle('channel.set-model', (_, chatId: string, model: string) => {
-    supervisor?.setChannelConfig(chatId, { model });
+    if (!supervisor) return;
+    // 切到不支持 fast 的模型（非 Opus 5 / Opus 4.8）时同步关 fast，一次 apply 只重启一次
+    const patch: { model: string; fast?: boolean } = { model };
+    if (!supportsFast(model)) {
+      const cur = supervisor.getDisplayChannels().find((c) => c.chat_id === chatId);
+      if (cur?.fast) patch.fast = false;
+    }
+    supervisor.applyChannelConfigLive(chatId, patch);
     pushState();
   });
   ipcMain.handle('channel.set-effort', (_, chatId: string, effort: string) => {
-    supervisor?.setChannelConfig(chatId, { effort });
+    supervisor?.applyChannelConfigLive(chatId, { effort });
     pushState();
   });
-  // 每频道自动压缩阈值（持久化 + 更新 channel-cli.opts；同 model/effort 需 restart 生效）
+  // 每频道自动压缩阈值（持久化 + 改完该频道续接重启生效，同 model/effort）
   ipcMain.handle('channel.set-compact-threshold', (_, chatId: string, pct: number) => {
-    supervisor?.setChannelConfig(chatId, { autoCompactPct: pct });
+    supervisor?.applyChannelConfigLive(chatId, { autoCompactPct: pct });
     pushState();
   });
-  // 每频道 fast 模式（持久化 + 更新 channel-cli.opts；需 restart 生效）
+  // 每频道 fast 模式（持久化 + 更新 channel-cli.opts；改完该频道续接重启生效）
   ipcMain.handle('channel.set-fast', (_, chatId: string, fast: boolean) => {
-    supervisor?.setChannelConfig(chatId, { fast });
+    supervisor?.applyChannelConfigLive(chatId, { fast });
     pushState();
   });
   // P4.Q3 续：改卡片显示名
@@ -408,7 +427,7 @@ app.whenReady().then(async () => {
       cancelId: 0,
       title: '重启品品',
       message: '确认重启 supervisor + 所有频道 CLI？',
-      detail: '· 所有频道 CLI 将停止并重新启动\n· 进行中的对话上下文保留（CLI 重连后继续）',
+      detail: '· 所有频道 CLI 将停止并重新启动\n· 各频道重启后按简报「启动预读」重新就位（进行中的对话上下文不保留）',
       noLink: true,
     });
     if (choice.response !== 1) return;
@@ -455,43 +474,69 @@ app.whenReady().then(async () => {
     });
   });
 
-  // ── step 6: 终端子窗口 IPC handlers ──
-  ipcMain.handle('terminal.open', (_, chatId: string) => {
-    openTerminalWindow(chatId);
+  // ── 工人托管（步骤 8 块 F）：唤醒 / 结束（终端相关 IPC 见下方"终端子窗口" — 已统一走 findPtyOwner） ──
+  ipcMain.handle('worker.wake', async (_, name: string) => {
+    const result = await supervisor?.wakeWorker(name);
+    pushState();
+    return result ?? { ok: false, error: 'supervisor 未就绪' };
+  });
+  ipcMain.handle('worker.stop', async (_, name: string) => {
+    // renderer window.confirm 默认禁用，确认对话框移到 main process
+    const choice = await dialog.showMessageBox(mainWindow ?? new BrowserWindow({ show: false }), {
+      type: 'warning',
+      buttons: ['取消', '结束'],
+      defaultId: 0,
+      cancelId: 0,
+      title: '结束工人会话',
+      message: `确认结束工人「${name}」的会话？`,
+      detail: '进程会退出；下次可再次唤醒接回原对话。',
+      noLink: true,
+    });
+    if (choice.response !== 1) return;
+    supervisor?.stopWorker(name);
+    pushState();
   });
 
-  ipcMain.on('terminal.subscribe-pty', (e, chatId: string) => {
+  // ── step 6: 终端子窗口 IPC handlers ──
+  // id 形如 chat_id（频道）或 `worker:<name>`（工人）；统一经 findPtyOwner 按前缀分流。
+  ipcMain.handle('terminal.open', (_, id: string) => {
+    openTerminalWindow(id);
+  });
+
+  ipcMain.on('terminal.subscribe-pty', (e, id: string) => {
     const win = BrowserWindow.fromWebContents(e.sender);
     if (!win) return;
-    const cli = supervisor?.getChannel(chatId);
-    if (!cli) {
-      e.sender.send(`pty-data:${chatId}`, `\r\n[supervisor] 频道 CLI 未启动\r\n`);
+    const owner = findPtyOwner(id);
+    if (!owner) {
+      e.sender.send(`pty-data:${id}`, `\r\n[supervisor] 未找到该会话进程\r\n`);
       return;
     }
-    cli.attachTerminal((data) => {
-      if (!win.isDestroyed()) e.sender.send(`pty-data:${chatId}`, data);
+    owner.attachTerminal((data) => {
+      if (!win.isDestroyed()) e.sender.send(`pty-data:${id}`, data);
     });
   });
 
-  ipcMain.on('terminal.unsubscribe-pty', (_, chatId: string) => {
-    supervisor?.getChannel(chatId)?.detachTerminal();
+  ipcMain.on('terminal.unsubscribe-pty', (_, id: string) => {
+    findPtyOwner(id)?.detachTerminal();
   });
 
-  ipcMain.handle('terminal.input', (_, chatId: string, text: string) => {
-    supervisor?.getChannel(chatId)?.sendInput(text);
+  ipcMain.handle('terminal.input', (_, id: string, text: string) => {
+    findPtyOwner(id)?.sendInput(text);
   });
 
-  ipcMain.handle('terminal.resize-pty', (_, chatId: string, cols: number, rows: number) => {
-    supervisor?.getChannel(chatId)?.resizeTerminal(cols, rows);
+  ipcMain.handle('terminal.resize-pty', (_, id: string, cols: number, rows: number) => {
+    findPtyOwner(id)?.resizeTerminal(cols, rows);
   });
 
   ipcMain.handle('terminal.compact', (_, chatId: string) => {
+    // 工人无压缩概念（前端已隐藏该按钮），压缩只对频道 CLI 生效
     supervisor?.getChannel(chatId)?.compact();
   });
 
-  ipcMain.handle('terminal.restart', async (_, chatId: string) => {
+  ipcMain.handle('terminal.restart', async (_, id: string) => {
     // renderer window.confirm 默认禁用，确认对话框移到 main process
-    const displayName = getChatDisplayName(chatId);
+    const isWorker = id.startsWith('worker:');
+    const displayName = isWorker ? id.slice('worker:'.length) : getChatDisplayName(id);
     const termWin = BrowserWindow.getAllWindows().find(
       (w) => !w.isDestroyed() && w !== mainWindow,
     );
@@ -500,20 +545,22 @@ app.whenReady().then(async () => {
       buttons: ['取消', '重启'],
       defaultId: 0,
       cancelId: 0,
-      title: '重启频道 CLI',
-      message: `确认重启频道「${displayName}」的 CLI？`,
-      detail: '· 当前对话上下文会丢失\n· CLI 将在 500ms 后自动重新启动',
+      title: isWorker ? '重启工人会话' : '重启频道 CLI',
+      message: isWorker ? '重启这个工人会话？（接回原对话）' : `确认重启频道「${displayName}」的 CLI？`,
+      detail: isWorker
+        ? '· 当前终端会断开，CLI 以 --resume 续接原会话\n· 约十几秒后恢复'
+        : '· 当前对话上下文会丢失\n· CLI 将在 500ms 后自动重新启动',
       noLink: true,
     });
     if (choice.response !== 1) return false;
-    supervisor?.getChannel(chatId)?.restart();
+    findPtyOwner(id)?.restart();
     pushState();
     return true;
   });
 
-  ipcMain.handle('terminal.get-meta', (_, chatId: string) => {
-    const cli = supervisor?.getChannel(chatId);
-    const stats = cli?.getStats();
+  ipcMain.handle('terminal.get-meta', (_, id: string) => {
+    const owner = findPtyOwner(id);
+    const stats = owner && 'getMeta' in owner ? owner.getMeta() : owner?.getStats();
     return {
       chat_name: stats?.chat_name,
       model: stats?.model ?? '?',
@@ -556,8 +603,8 @@ function openTerminalWindow(chatId: string): void {
     });
   }
   win.on('close', () => {
-    // 关 X = detach（任务 MD §决策 G：CLI 后台继续跑）
-    supervisor?.getChannel(chatId)?.detachTerminal();
+    // 关 X = detach（任务 MD §决策 G：CLI/工人 后台继续跑）
+    findPtyOwner(chatId)?.detachTerminal();
   });
   win.on('closed', () => {
     terminalWindows.delete(chatId);

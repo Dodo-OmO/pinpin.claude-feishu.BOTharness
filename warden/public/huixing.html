@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover" />
+<title>汇星授权</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin:0; font:15px/1.5 system-ui,-apple-system,"Microsoft YaHei",sans-serif;
+         display:flex; flex-direction:column; align-items:center; gap:14px; padding:18px 16px 40px; }
+  h1 { font-size:18px; margin:4px 0 0; }
+  #wrap { width:100%; max-width:420px; display:flex; flex-direction:column; gap:12px; }
+  #shot { width:100%; border-radius:12px; border:1px solid rgba(128,128,128,.35); background:#fff; }
+  .row { display:flex; gap:10px; align-items:center; justify-content:space-between; }
+  button { flex:1; padding:12px 14px; font-size:15px; border-radius:10px; border:1px solid rgba(128,128,128,.4);
+           background:transparent; color:inherit; }
+  button:active { opacity:.6; }
+  #tip { font-size:13px; opacity:.75; }
+  .ok { color:#1a9e4b; font-weight:600; }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <h1>汇星授权</h1>
+  <div id="tip">页面每 5 秒自动取一次当前有效的码（过期会自动点刷新），直接扫屏幕上这张就行。扫完自动完成，不用回来点。</div>
+  <img id="shot" alt="二维码加载中…" />
+  <div class="row">
+    <button id="restart">重新生成</button>
+    <button id="refresh">立刻刷新</button>
+  </div>
+  <div id="state"></div>
+</div>
+<script>
+const shot = document.getElementById('shot');
+const state = document.getElementById('state');
+let stop = false;
+function tick() {
+  if (stop) return;
+  shot.src = '/api/huixing/qr?t=' + Date.now();
+}
+async function poll() {
+  try {
+    const s = await (await fetch('/api/huixing/state?t=' + Date.now())).json();
+    if (s.has_token && s.mtime && Date.now() - s.mtime < 90000) {
+      state.innerHTML = '<span class="ok">✅ 授权成功，token 已写盘，可以关掉这页了</span>';
+      stop = true;
+      shot.style.opacity = .35;
+    } else if (s.exp) {
+      const left = Math.round((s.exp * 1000 - Date.now()) / 3600000);
+      state.textContent = left > 0 ? `当前 token 还有约 ${left} 小时到期` : '当前 token 已过期，扫码续上';
+    }
+  } catch (e) { /* 忽略 */ }
+}
+document.getElementById('refresh').onclick = tick;
+document.getElementById('restart').onclick = async () => {
+  state.textContent = '正在拉起登录…';
+  await fetch('/api/huixing/start', { method: 'POST' });
+  stop = false; shot.style.opacity = 1;
+  setTimeout(tick, 5000);
+};
+tick(); poll();
+setInterval(tick, 5000);
+setInterval(poll, 4000);
+</script>
+</body>
+</html>
